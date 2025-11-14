@@ -28,6 +28,7 @@ import com.rk.terminal.gemini.client.OllamaClient
 import com.rk.terminal.gemini.tools.ToolResult
 import com.rk.terminal.ui.activities.terminal.MainActivity
 import com.rk.settings.Settings
+import java.io.File
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
@@ -42,6 +43,161 @@ fun formatTimestamp(timestamp: Long): String {
     val time = java.util.Date(timestamp)
     val format = java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault())
     return format.format(time)
+}
+
+@Composable
+fun DirectoryPickerDialog(
+    initialPath: String,
+    onDismiss: () -> Unit,
+    onDirectorySelected: (File) -> Unit
+) {
+    var currentPath by remember { mutableStateOf(initialPath) }
+    var directories by remember { mutableStateOf<List<File>>(emptyList()) }
+    val initialDir = com.rk.libcommons.alpineDir().absolutePath
+    
+    LaunchedEffect(currentPath) {
+        val dir = File(currentPath)
+        directories = if (dir.exists() && dir.isDirectory) {
+            dir.listFiles()?.filter { it.isDirectory }?.toList() ?: emptyList()
+        } else {
+            emptyList()
+        }
+    }
+    
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Select Workspace Directory") },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 400.dp)
+            ) {
+                // Path bar with navigation
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    if (currentPath != initialDir) {
+                        IconButton(onClick = {
+                            File(currentPath).parentFile?.let {
+                                currentPath = it.absolutePath
+                            }
+                        }) {
+                            Icon(Icons.Default.ArrowBack, contentDescription = "Up")
+                        }
+                    }
+                    Text(
+                        text = currentPath,
+                        modifier = Modifier.weight(1f),
+                        maxLines = 2,
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
+                
+                Divider(modifier = Modifier.padding(vertical = 8.dp))
+                
+                // Current directory option
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 4.dp),
+                    onClick = {
+                        val dir = File(currentPath)
+                        if (dir.exists() && dir.isDirectory) {
+                            onDirectorySelected(dir)
+                        }
+                    }
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(12.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Folder,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary
+                        )
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Use this directory",
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Text(
+                                text = currentPath,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Icon(
+                            imageVector = Icons.Default.CheckCircle,
+                            contentDescription = "Select",
+                            tint = MaterialTheme.colorScheme.primary
+                        )
+                    }
+                }
+                
+                Divider(modifier = Modifier.padding(vertical = 8.dp))
+                
+                // Subdirectories list
+                Text(
+                    text = "Subdirectories:",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(bottom = 4.dp)
+                )
+                
+                LazyColumn(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f)
+                ) {
+                    items(directories.sortedBy { it.name.lowercase() }) { dir ->
+                        Card(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 2.dp),
+                            onClick = {
+                                currentPath = dir.absolutePath
+                            }
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(12.dp),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Folder,
+                                    contentDescription = null
+                                )
+                                Text(
+                                    text = dir.name,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                Icon(
+                                    imageVector = Icons.Default.ArrowForward,
+                                    contentDescription = "Enter",
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancel")
+            }
+        }
+    )
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -360,7 +516,7 @@ fun AgentScreen(
         DirectoryPickerDialog(
             initialPath = workspaceRoot,
             onDismiss = { showWorkspacePicker = false },
-            onDirectorySelected = { selectedDir ->
+            onDirectorySelected = { selectedDir: File ->
                 workspaceRoot = selectedDir.absolutePath
                 showWorkspacePicker = false
                 // Reinitialize client with new workspace
