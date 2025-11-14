@@ -43,7 +43,7 @@ fun CodeEditorScreen(
             },
             navigationIcon = {
                 IconButton(onClick = { showFilePicker = true }) {
-                    Icon(Icons.Default.CreateNewFolder, contentDescription = "Open File")
+                    Icon(Icons.Default.Add, contentDescription = "Open File")
                 }
             },
             actions = {
@@ -207,7 +207,7 @@ fun FilePickerDialog(
                                 horizontalArrangement = Arrangement.spacedBy(8.dp)
                             ) {
                                 Icon(
-                                    imageVector = if (file.isDirectory) Icons.Default.CreateNewFolder else Icons.Default.InsertDriveFile,
+                                    imageVector = if (file.isDirectory) Icons.Default.Add else Icons.Default.Edit,
                                     contentDescription = null
                                 )
                                 Text(file.name)
