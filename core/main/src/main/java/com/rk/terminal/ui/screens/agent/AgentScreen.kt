@@ -14,6 +14,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -223,36 +224,34 @@ fun AgentScreen(
                                                 )
                                             } else {
                                                 (aiClient as GeminiClient).sendMessageStream(
-                                                userMessage = prompt,
-                                                onChunk = { chunk ->
-                                                    currentResponseText += chunk
-                                                    // Update the last message with accumulated text
-                                                    val currentMessages = messages.dropLast(1)
-                                                    messages = currentMessages + AgentMessage(
-                                                        text = currentResponseText,
-                                                        isUser = false,
-                                                        timestamp = System.currentTimeMillis()
-                                                    )
-                                                },
-                                                onToolCall = { functionCall ->
-                                                    // Add tool call message
-                                                    val toolMessage = AgentMessage(
-                                                        text = "🔧 Calling tool: ${functionCall.name}",
-                                                        isUser = false,
-                                                        timestamp = System.currentTimeMillis()
-                                                    )
-                                                    messages = messages + toolMessage
-                                                },
-                                                onToolResult = { toolName, args ->
-                                                    // Add tool result message
-                                                    val resultMessage = AgentMessage(
-                                                        text = "✅ Tool '$toolName' completed",
-                                                        isUser = false,
-                                                        timestamp = System.currentTimeMillis()
-                                                    )
-                                                    messages = messages + resultMessage
-                                                }
-                                            )
+                                                    userMessage = prompt,
+                                                    onChunk = { chunk ->
+                                                        currentResponseText += chunk
+                                                        val currentMessages = messages.dropLast(1)
+                                                        messages = currentMessages + AgentMessage(
+                                                            text = currentResponseText,
+                                                            isUser = false,
+                                                            timestamp = System.currentTimeMillis()
+                                                        )
+                                                    },
+                                                    onToolCall = { functionCall ->
+                                                        val toolMessage = AgentMessage(
+                                                            text = "🔧 Calling tool: ${functionCall.name}",
+                                                            isUser = false,
+                                                            timestamp = System.currentTimeMillis()
+                                                        )
+                                                        messages = messages + toolMessage
+                                                    },
+                                                    onToolResult = { toolName, args ->
+                                                        val resultMessage = AgentMessage(
+                                                            text = "✅ Tool '$toolName' completed",
+                                                            isUser = false,
+                                                            timestamp = System.currentTimeMillis()
+                                                        )
+                                                        messages = messages + resultMessage
+                                                    }
+                                                )
+                                            }
                                             
                                             // Collect stream events
                                             stream.collect { event ->

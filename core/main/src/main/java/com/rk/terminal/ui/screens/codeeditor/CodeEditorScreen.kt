@@ -78,10 +78,10 @@ fun CodeEditorScreen(
         // Code Editor using EditText with monospace font
         AndroidView(
             factory = { ctx ->
+                val bgColor = MaterialTheme.colorScheme.surface.toArgb()
+                val textColor = MaterialTheme.colorScheme.onSurface.toArgb()
                 EditText(ctx).apply {
                     // Use theme colors - dark background, light text
-                    val bgColor = MaterialTheme.colorScheme.surface.toArgb()
-                    val textColor = MaterialTheme.colorScheme.onSurface.toArgb()
                     setBackgroundColor(bgColor)
                     setTextColor(textColor)
                     setPadding(16, 16, 16, 16)
