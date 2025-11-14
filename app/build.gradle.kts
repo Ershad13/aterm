@@ -48,7 +48,12 @@ android {
                 
                 storePassword = properties["storePassword"] as String?
             } else {
-                println("Signing properties file not found at $propertiesFilePath")
+                println("Signing properties file not found at $propertiesFilePath - using debug signing for release builds")
+                // Use debug signing as fallback if properties file doesn't exist
+                storeFile = file(layout.buildDirectory.dir("../testkey.keystore"))
+                storePassword = "testkey"
+                keyAlias = "testkey"
+                keyPassword = "testkey"
             }
         }
         getByName("debug") {
@@ -68,7 +73,13 @@ android {
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro"
             )
-            signingConfig = signingConfigs.getByName("release")
+            // Only use release signing if it's properly configured, otherwise use debug signing
+            val releaseSigning = signingConfigs.getByName("release")
+            if (releaseSigning.storePassword != null && releaseSigning.storeFile != null) {
+                signingConfig = releaseSigning
+            } else {
+                signingConfig = signingConfigs.getByName("debug")
+            }
             resValue("string","app_name","ReTerminal")
         }
         debug{
