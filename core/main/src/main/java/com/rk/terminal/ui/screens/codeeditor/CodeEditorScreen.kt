@@ -10,6 +10,7 @@ import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -48,20 +49,21 @@ fun CodeEditorScreen(
             },
             actions = {
                 if (currentFile != null) {
-                    IconButton(
-                        onClick = {
-                            if (isModified) {
+                    // Only show save button if file has been modified
+                    if (isModified) {
+                        IconButton(
+                            onClick = {
                                 saveFile(currentFile!!, fileContent)
                                 isModified = false
                             }
-                        },
-                        enabled = isModified
-                    ) {
-                        Icon(Icons.Default.Done, contentDescription = "Save")
+                        ) {
+                            Icon(Icons.Default.Done, contentDescription = "Save")
+                        }
                     }
                     
                     IconButton(
                         onClick = {
+                            // Close file completely - reset everything
                             currentFile = null
                             fileContent = ""
                             isModified = false
@@ -77,8 +79,11 @@ fun CodeEditorScreen(
         AndroidView(
             factory = { ctx ->
                 EditText(ctx).apply {
-                    setBackgroundColor(android.graphics.Color.TRANSPARENT)
-                    setTextColor(android.graphics.Color.WHITE)
+                    // Use theme colors - dark background, light text
+                    val bgColor = MaterialTheme.colorScheme.surface.toArgb()
+                    val textColor = MaterialTheme.colorScheme.onSurface.toArgb()
+                    setBackgroundColor(bgColor)
+                    setTextColor(textColor)
                     setPadding(16, 16, 16, 16)
                     textSize = 14f
                     typeface = android.graphics.Typeface.MONOSPACE
@@ -86,13 +91,21 @@ fun CodeEditorScreen(
                     isVerticalScrollBarEnabled = true
                     isHorizontalScrollBarEnabled = true
                     
+                    // Store original content to detect changes
+                    var originalContent = ""
+                    tag = originalContent
+                    
                     // Listen for text changes
                     addTextChangedListener(object : android.text.TextWatcher {
                         override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
                         override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
                         override fun afterTextChanged(s: android.text.Editable?) {
-                            fileContent = s?.toString() ?: ""
-                            isModified = true
+                            val newContent = s?.toString() ?: ""
+                            val storedOriginal = tag as? String ?: ""
+                            if (newContent != storedOriginal) {
+                                fileContent = newContent
+                                isModified = true
+                            }
                         }
                     })
                 }
@@ -106,6 +119,8 @@ fun CodeEditorScreen(
                 if (currentFile != null && editText.text.toString() != fileContent) {
                     editText.setText(fileContent)
                     editText.setSelection(fileContent.length)
+                    // Store original content in tag to detect user changes
+                    editText.tag = fileContent
                     isModified = false
                 }
             }
@@ -123,6 +138,7 @@ fun CodeEditorScreen(
                     fileContent = file.readText()
                     isModified = false
                     showFilePicker = false
+                    // Reset will be handled by update block
                 } catch (e: Exception) {
                     android.util.Log.e("CodeEditor", "Error reading file", e)
                 }

@@ -21,7 +21,9 @@ import androidx.compose.ui.unit.sp
 import com.rk.terminal.api.ApiProviderManager
 import com.rk.terminal.api.ApiProviderManager.KeysExhaustedException
 import com.rk.terminal.gemini.GeminiService
+import com.rk.terminal.gemini.client.GeminiClient
 import com.rk.terminal.gemini.client.GeminiStreamEvent
+import com.rk.terminal.gemini.client.OllamaClient
 import com.rk.terminal.gemini.tools.ToolResult
 import com.rk.terminal.ui.activities.terminal.MainActivity
 import kotlinx.coroutines.delay
@@ -34,18 +36,38 @@ fun AgentScreen(
     mainActivity: MainActivity,
     sessionId: String
 ) {
+    val context = LocalContext.current
     var inputText by remember { mutableStateOf("") }
     var messages by remember { mutableStateOf<List<AgentMessage>>(emptyList()) }
+    var messageHistory by remember { mutableStateOf<List<AgentMessage>>(emptyList()) } // Persistent history
     var showKeysExhaustedDialog by remember { mutableStateOf(false) }
     var lastFailedPrompt by remember { mutableStateOf<String?>(null) }
     var retryCountdown by remember { mutableStateOf(0) }
     var currentResponseText by remember { mutableStateOf("") }
+    var workspaceRoot by remember { mutableStateOf(com.rk.libcommons.alpineDir().absolutePath) }
+    var showWorkspacePicker by remember { mutableStateOf(false) }
+    var useOllama by remember { mutableStateOf(false) }
+    var ollamaUrl by remember { mutableStateOf("http://localhost:11434") }
+    var ollamaModel by remember { mutableStateOf("llama3.2") }
+    var showOllamaSettings by remember { mutableStateOf(false) }
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
     
-    // Initialize Gemini client
-    val geminiClient = remember {
-        GeminiService.initialize()
+    // Initialize client
+    val aiClient = remember(workspaceRoot, useOllama, ollamaUrl, ollamaModel) {
+        GeminiService.initialize(workspaceRoot, useOllama, ollamaUrl, ollamaModel)
+    }
+    
+    // Load history on init
+    LaunchedEffect(Unit) {
+        messageHistory = messages
+    }
+    
+    // Save to history when messages change
+    LaunchedEffect(messages) {
+        if (messages.isNotEmpty()) {
+            messageHistory = messages
+        }
     }
     
     // Auto-scroll to bottom when new messages arrive
@@ -82,16 +104,26 @@ fun AgentScreen(
                 )
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = "Gemini AI Agent",
+                        text = if (useOllama) "Ollama AI Agent" else "Gemini AI Agent",
                         style = MaterialTheme.typography.titleLarge,
                         fontWeight = FontWeight.Bold,
                         color = MaterialTheme.colorScheme.onPrimaryContainer
                     )
                     Text(
-                        text = "Ready for gemini-cli integration",
+                        text = workspaceRoot,
                         style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.7f)
+                        color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.7f),
+                        maxLines = 1
                     )
+                }
+                IconButton(onClick = { showWorkspacePicker = true }) {
+                    Icon(Icons.Default.Add, contentDescription = "Change Workspace", tint = MaterialTheme.colorScheme.onPrimaryContainer)
+                }
+                IconButton(onClick = { showOllamaSettings = true }) {
+                    Icon(Icons.Default.Star, contentDescription = "Settings", tint = MaterialTheme.colorScheme.onPrimaryContainer)
+                }
+                IconButton(onClick = { showHistory = true }) {
+                    Icon(Icons.Default.Edit, contentDescription = "History", tint = MaterialTheme.colorScheme.onPrimaryContainer)
                 }
             }
         }
@@ -160,7 +192,37 @@ fun AgentScreen(
                                         currentResponseText = ""
                                         
                                         try {
-                                            val stream = geminiClient.sendMessageStream(
+                                            val stream = if (useOllama) {
+                                                (aiClient as OllamaClient).sendMessageStream(
+                                                    userMessage = prompt,
+                                                    onChunk = { chunk ->
+                                                        currentResponseText += chunk
+                                                        val currentMessages = messages.dropLast(1)
+                                                        messages = currentMessages + AgentMessage(
+                                                            text = currentResponseText,
+                                                            isUser = false,
+                                                            timestamp = System.currentTimeMillis()
+                                                        )
+                                                    },
+                                                    onToolCall = { functionCall ->
+                                                        val toolMessage = AgentMessage(
+                                                            text = "🔧 Calling tool: ${functionCall.name}",
+                                                            isUser = false,
+                                                            timestamp = System.currentTimeMillis()
+                                                        )
+                                                        messages = messages + toolMessage
+                                                    },
+                                                    onToolResult = { toolName, args ->
+                                                        val resultMessage = AgentMessage(
+                                                            text = "✅ Tool '$toolName' completed",
+                                                            isUser = false,
+                                                            timestamp = System.currentTimeMillis()
+                                                        )
+                                                        messages = messages + resultMessage
+                                                    }
+                                                )
+                                            } else {
+                                                (aiClient as GeminiClient).sendMessageStream(
                                                 userMessage = prompt,
                                                 onChunk = { chunk ->
                                                     currentResponseText += chunk
@@ -278,6 +340,145 @@ fun AgentScreen(
                 )
             }
         }
+    }
+    
+    // Workspace picker dialog
+    if (showWorkspacePicker) {
+        var newWorkspace by remember { mutableStateOf(workspaceRoot) }
+        AlertDialog(
+            onDismissRequest = { showWorkspacePicker = false },
+            title = { Text("Select Workspace Directory") },
+            text = {
+                Column {
+                    Text("Enter workspace directory path:")
+                    Spacer(modifier = Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = newWorkspace,
+                        onValueChange = { newWorkspace = it },
+                        label = { Text("Directory path") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        val dir = java.io.File(newWorkspace)
+                        if (dir.exists() && dir.isDirectory) {
+                            workspaceRoot = newWorkspace
+                            showWorkspacePicker = false
+                            // Reinitialize client with new workspace
+                            GeminiService.initialize(workspaceRoot, useOllama, ollamaUrl, ollamaModel)
+                        }
+                    },
+                    enabled = newWorkspace.isNotBlank()
+                ) {
+                    Text("Set")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showWorkspacePicker = false }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+    
+    // Ollama settings dialog
+    if (showOllamaSettings) {
+        var newOllamaUrl by remember { mutableStateOf(ollamaUrl) }
+        var newOllamaModel by remember { mutableStateOf(ollamaModel) }
+        var newUseOllama by remember { mutableStateOf(useOllama) }
+        AlertDialog(
+            onDismissRequest = { showOllamaSettings = false },
+            title = { Text("AI Provider Settings") },
+            text = {
+                Column {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Checkbox(
+                            checked = newUseOllama,
+                            onCheckedChange = { newUseOllama = it }
+                        )
+                        Text("Use Ollama (Local)")
+                    }
+                    if (newUseOllama) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        OutlinedTextField(
+                            value = newOllamaUrl,
+                            onValueChange = { newOllamaUrl = it },
+                            label = { Text("Ollama URL") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        OutlinedTextField(
+                            value = newOllamaModel,
+                            onValueChange = { newOllamaModel = it },
+                            label = { Text("Model name") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        useOllama = newUseOllama
+                        ollamaUrl = newOllamaUrl
+                        ollamaModel = newOllamaModel
+                        showOllamaSettings = false
+                        // Reinitialize client
+                        GeminiService.initialize(workspaceRoot, useOllama, ollamaUrl, ollamaModel)
+                    }
+                ) {
+                    Text("Save")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showOllamaSettings = false }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+    
+    // History display dialog
+    if (showHistory) {
+        AlertDialog(
+            onDismissRequest = { showHistory = false },
+            title = { Text("Conversation History") },
+            text = {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 400.dp)
+                ) {
+                    if (messageHistory.isEmpty()) {
+                        Text("No conversation history")
+                    } else {
+                        LazyColumn {
+                            items(messageHistory) { msg ->
+                                Text(
+                                    text = "${if (msg.isUser) "You" else "Agent"}: ${msg.text.take(100)}${if (msg.text.length > 100) "..." else ""}",
+                                    modifier = Modifier.padding(vertical = 4.dp)
+                                )
+                                Divider()
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showHistory = false }) {
+                    Text("Close")
+                }
+            }
+        )
     }
     
     // Keys Exhausted Dialog with Wait and Retry

@@ -38,6 +38,11 @@ fun FileExplorerScreen(
     var files by remember { mutableStateOf<List<FileItem>>(emptyList()) }
     var isLoading by remember { mutableStateOf(false) }
     var showDeleteDialog by remember { mutableStateOf<FileItem?>(null) }
+    var selectedFiles by remember { mutableStateOf<Set<File>>(emptySet()) }
+    var clipboardFiles by remember { mutableStateOf<List<Pair<File, String>>?>(null) } // Pair<File, operation> where operation is "copy" or "cut"
+    var showNewFileDialog by remember { mutableStateOf(false) }
+    var showNewDirDialog by remember { mutableStateOf(false) }
+    var isSelectionMode by remember { mutableStateOf(false) }
     
     // Load files when path changes
     LaunchedEffect(currentPath) {
@@ -51,6 +56,112 @@ fun FileExplorerScreen(
             .fillMaxSize()
             .background(MaterialTheme.colorScheme.surface)
     ) {
+        // Top bar with actions
+        TopAppBar(
+            title = { 
+                Text("File Explorer")
+            },
+            navigationIcon = {
+                if (currentPath != initialPath) {
+                    IconButton(onClick = {
+                        val parent = File(currentPath).parentFile
+                        if (parent != null) {
+                            currentPath = parent.absolutePath
+                            selectedFiles = emptySet()
+                        }
+                    }) {
+                        Icon(Icons.Default.ArrowBack, contentDescription = "Up")
+                    }
+                }
+            },
+            actions = {
+                if (isSelectionMode) {
+                    // Selection mode actions
+                    if (selectedFiles.isNotEmpty()) {
+                        IconButton(onClick = {
+                            clipboardFiles = selectedFiles.map { it to "copy" }
+                            selectedFiles = emptySet()
+                            isSelectionMode = false
+                        }) {
+                            Icon(Icons.Default.Edit, contentDescription = "Copy")
+                        }
+                        IconButton(onClick = {
+                            clipboardFiles = selectedFiles.map { it to "cut" }
+                            selectedFiles = emptySet()
+                            isSelectionMode = false
+                        }) {
+                            Icon(Icons.Default.Delete, contentDescription = "Cut")
+                        }
+                        IconButton(onClick = {
+                            showDeleteDialog = FileItem(
+                                file = selectedFiles.first(),
+                                name = if (selectedFiles.size == 1) selectedFiles.first().name else "${selectedFiles.size} items",
+                                isDirectory = selectedFiles.first().isDirectory,
+                                isFile = selectedFiles.first().isFile,
+                                icon = Icons.Default.Delete,
+                                iconColor = Color.Red,
+                                details = "",
+                                size = ""
+                            )
+                        }) {
+                            Icon(Icons.Default.Delete, contentDescription = "Delete")
+                        }
+                    }
+                    IconButton(onClick = {
+                        selectedFiles = emptySet()
+                        isSelectionMode = false
+                    }) {
+                        Icon(Icons.Default.Close, contentDescription = "Cancel Selection")
+                    }
+                } else {
+                    // Normal mode actions
+                    if (clipboardFiles != null && clipboardFiles!!.isNotEmpty()) {
+                        IconButton(onClick = {
+                            // Paste operation
+                            clipboardFiles?.forEach { (file, operation) ->
+                                var destFile = File(currentPath, file.name)
+                                // Handle duplicate names
+                                var counter = 1
+                                while (destFile.exists()) {
+                                    val nameWithoutExt = file.name.substringBeforeLast(".")
+                                    val ext = if (file.name.contains(".")) ".${file.name.substringAfterLast(".")}" else ""
+                                    val newName = if (file.isDirectory) {
+                                        "${file.name}_$counter"
+                                    } else {
+                                        "${nameWithoutExt}_$counter$ext"
+                                    }
+                                    destFile = File(currentPath, newName)
+                                    counter++
+                                }
+                                
+                                if (operation == "cut") {
+                                    file.renameTo(destFile)
+                                } else {
+                                    copyFile(file, destFile)
+                                }
+                            }
+                            clipboardFiles = null
+                            // Reload files
+                            val reloadPath = currentPath
+                            currentPath = ""
+                            currentPath = reloadPath
+                        }) {
+                            Icon(Icons.Default.Edit, contentDescription = "Paste")
+                        }
+                    }
+                    IconButton(onClick = { showNewFileDialog = true }) {
+                        Icon(Icons.Default.Add, contentDescription = "New File")
+                    }
+                    IconButton(onClick = { showNewDirDialog = true }) {
+                        Icon(Icons.Default.Add, contentDescription = "New Directory")
+                    }
+                    IconButton(onClick = { isSelectionMode = true }) {
+                        Icon(Icons.Default.Edit, contentDescription = "Select")
+                    }
+                }
+            }
+        )
+        
         // Path bar with navigation
         PathBar(
             currentPath = currentPath,
@@ -59,10 +170,12 @@ fun FileExplorerScreen(
                 val parent = File(currentPath).parentFile
                 if (parent != null && currentPath != initialPath) {
                     currentPath = parent.absolutePath
+                    selectedFiles = emptySet()
                 }
             },
             onPathClick = { path ->
                 currentPath = path
+                selectedFiles = emptySet()
             },
             modifier = Modifier.fillMaxWidth()
         )
@@ -78,19 +191,33 @@ fun FileExplorerScreen(
         } else {
             FileList(
                 files = files,
+                selectedFiles = selectedFiles,
+                isSelectionMode = isSelectionMode,
                 onFileClick = { fileItem ->
-                    when {
-                        fileItem.isDirectory -> {
-                            currentPath = fileItem.file.absolutePath
+                    if (isSelectionMode) {
+                        // Toggle selection
+                        selectedFiles = if (selectedFiles.contains(fileItem.file)) {
+                            selectedFiles - fileItem.file
+                        } else {
+                            selectedFiles + fileItem.file
                         }
-                        fileItem.isFile -> {
-                            // Open file in text editor or appropriate app
-                            openFile(context, fileItem.file)
+                    } else {
+                        when {
+                            fileItem.isDirectory -> {
+                                currentPath = fileItem.file.absolutePath
+                            }
+                            fileItem.isFile -> {
+                                // Open file in text editor or appropriate app
+                                openFile(context, fileItem.file)
+                            }
                         }
                     }
                 },
                 onFileLongPress = { fileItem ->
-                    showDeleteDialog = fileItem
+                    if (!isSelectionMode) {
+                        isSelectionMode = true
+                        selectedFiles = setOf(fileItem.file)
+                    }
                 },
                 modifier = Modifier
                     .fillMaxSize()
@@ -104,23 +231,122 @@ fun FileExplorerScreen(
         AlertDialog(
             onDismissRequest = { showDeleteDialog = null },
             title = { Text("Delete ${if (fileItem.isDirectory) "Folder" else "File"}?") },
-            text = { Text("Are you sure you want to delete \"${fileItem.name}\"?") },
+            text = { 
+                Text("Are you sure you want to delete \"${fileItem.name}\"?${if (selectedFiles.size > 1) "\n\nThis will delete ${selectedFiles.size} items." else ""}") 
+            },
             confirmButton = {
-                    TextButton(
-                        onClick = {
+                TextButton(
+                    onClick = {
+                        if (selectedFiles.isNotEmpty()) {
+                            // Delete all selected files
+                            selectedFiles.forEach { file ->
+                                deleteFile(file)
+                            }
+                            selectedFiles = emptySet()
+                            isSelectionMode = false
+                        } else {
                             deleteFile(fileItem.file)
-                            // Trigger reload
-                            val reloadPath = currentPath
-                            currentPath = ""
-                            currentPath = reloadPath
-                            showDeleteDialog = null
                         }
-                    ) {
+                        // Trigger reload
+                        val reloadPath = currentPath
+                        currentPath = ""
+                        currentPath = reloadPath
+                        showDeleteDialog = null
+                    }
+                ) {
                     Text("Delete", color = MaterialTheme.colorScheme.error)
                 }
             },
             dismissButton = {
                 TextButton(onClick = { showDeleteDialog = null }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+    
+    // New file dialog
+    if (showNewFileDialog) {
+        var fileName by remember { mutableStateOf("") }
+        AlertDialog(
+            onDismissRequest = { showNewFileDialog = false },
+            title = { Text("New File") },
+            text = {
+                Column {
+                    Text("Enter file name:")
+                    Spacer(modifier = Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = fileName,
+                        onValueChange = { fileName = it },
+                        label = { Text("File name") },
+                        singleLine = true
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        if (fileName.isNotBlank()) {
+                            val newFile = File(currentPath, fileName)
+                            newFile.createNewFile()
+                            showNewFileDialog = false
+                            // Reload files
+                            val reloadPath = currentPath
+                            currentPath = ""
+                            currentPath = reloadPath
+                        }
+                    },
+                    enabled = fileName.isNotBlank()
+                ) {
+                    Text("Create")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showNewFileDialog = false }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+    
+    // New directory dialog
+    if (showNewDirDialog) {
+        var dirName by remember { mutableStateOf("") }
+        AlertDialog(
+            onDismissRequest = { showNewDirDialog = false },
+            title = { Text("New Directory") },
+            text = {
+                Column {
+                    Text("Enter directory name:")
+                    Spacer(modifier = Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = dirName,
+                        onValueChange = { dirName = it },
+                        label = { Text("Directory name") },
+                        singleLine = true
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        if (dirName.isNotBlank()) {
+                            val newDir = File(currentPath, dirName)
+                            newDir.mkdirs()
+                            showNewDirDialog = false
+                            // Reload files
+                            val reloadPath = currentPath
+                            currentPath = ""
+                            currentPath = reloadPath
+                        }
+                    },
+                    enabled = dirName.isNotBlank()
+                ) {
+                    Text("Create")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showNewDirDialog = false }) {
                     Text("Cancel")
                 }
             }
@@ -181,6 +407,8 @@ fun PathBar(
 @Composable
 fun FileList(
     files: List<FileItem>,
+    selectedFiles: Set<File>,
+    isSelectionMode: Boolean,
     onFileClick: (FileItem) -> Unit,
     onFileLongPress: (FileItem) -> Unit,
     modifier: Modifier = Modifier
@@ -193,6 +421,8 @@ fun FileList(
         items(files) { fileItem ->
             FileItemRow(
                 fileItem = fileItem,
+                isSelected = selectedFiles.contains(fileItem.file),
+                isSelectionMode = isSelectionMode,
                 onClick = { onFileClick(fileItem) },
                 onLongClick = { onFileLongPress(fileItem) }
             )
@@ -203,6 +433,8 @@ fun FileList(
 @Composable
 fun FileItemRow(
     fileItem: FileItem,
+    isSelected: Boolean,
+    isSelectionMode: Boolean,
     onClick: () -> Unit,
     onLongClick: () -> Unit,
     modifier: Modifier = Modifier
@@ -214,7 +446,11 @@ fun FileItemRow(
             .padding(vertical = 2.dp),
         onClick = onClick,
         colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surfaceContainerLow
+            containerColor = if (isSelected) {
+                MaterialTheme.colorScheme.primaryContainer
+            } else {
+                MaterialTheme.colorScheme.surfaceContainerLow
+            }
         )
     ) {
         Row(
@@ -243,6 +479,14 @@ fun FileItemRow(
                     text = fileItem.details,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            
+            if (isSelectionMode && isSelected) {
+                Icon(
+                    imageVector = Icons.Default.Done,
+                    contentDescription = "Selected",
+                    tint = MaterialTheme.colorScheme.primary
                 )
             }
             
@@ -349,4 +593,22 @@ fun openFile(context: android.content.Context, file: File) {
     // This will be handled by the text editor or appropriate app
     // For now, we'll just log it
     android.util.Log.d("FileExplorer", "Opening file: ${file.absolutePath}")
+}
+
+fun copyFile(source: File, dest: File): Boolean {
+    return try {
+        if (source.isDirectory) {
+            dest.mkdirs()
+            source.listFiles()?.forEach { child ->
+                copyFile(child, File(dest, child.name))
+            }
+            true
+        } else {
+            source.copyTo(dest, overwrite = true)
+            true
+        }
+    } catch (e: Exception) {
+        android.util.Log.e("FileExplorer", "Error copying file", e)
+        false
+    }
 }
