@@ -87,7 +87,22 @@ object Settings {
         get() = Preference.getBoolean(key = "force_soft_keyboard", default = true)
         set(value) = Preference.setBoolean(key = "force_soft_keyboard",value)
 
-
+    // Ollama Settings
+    var use_ollama
+        get() = Preference.getBoolean(key = "use_ollama", default = false)
+        set(value) = Preference.setBoolean(key = "use_ollama", value)
+    
+    var ollama_host
+        get() = Preference.getString(key = "ollama_host", default = "localhost")
+        set(value) = Preference.setString(key = "ollama_host", value)
+    
+    var ollama_port
+        get() = Preference.getInt(key = "ollama_port", default = 11434)
+        set(value) = Preference.setInt(key = "ollama_port", value)
+    
+    var ollama_model
+        get() = Preference.getString(key = "ollama_model", default = "llama3.2")
+        set(value) = Preference.setString(key = "ollama_model", value)
 
 }
 

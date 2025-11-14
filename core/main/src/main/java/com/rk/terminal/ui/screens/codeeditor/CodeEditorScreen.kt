@@ -83,7 +83,7 @@ fun CodeEditorScreen(
         val textColor = MaterialTheme.colorScheme.onSurface.toArgb()
         AndroidView(
             factory = { ctx ->
-                EditText(ctx).apply {
+                EditText(ctx).also { editTextRef = it }.apply {
                     // Use theme colors - dark background, light text
                     setBackgroundColor(bgColor)
                     setTextColor(textColor)
