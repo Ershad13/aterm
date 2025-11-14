@@ -76,10 +76,10 @@ fun CodeEditorScreen(
         )
         
         // Code Editor using EditText with monospace font
+        val bgColor = MaterialTheme.colorScheme.surface.toArgb()
+        val textColor = MaterialTheme.colorScheme.onSurface.toArgb()
         AndroidView(
             factory = { ctx ->
-                val bgColor = MaterialTheme.colorScheme.surface.toArgb()
-                val textColor = MaterialTheme.colorScheme.onSurface.toArgb()
                 EditText(ctx).apply {
                     // Use theme colors - dark background, light text
                     setBackgroundColor(bgColor)
