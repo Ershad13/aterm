@@ -118,8 +118,14 @@ fun CodeEditorScreen(
                 .weight(1f)
                 .background(MaterialTheme.colorScheme.surface),
             update = { editText ->
+                // Clear text when file is closed
+                if (currentFile == null && editText.text.toString().isNotEmpty()) {
+                    editText.setText("")
+                    editText.tag = ""
+                    isModified = false
+                }
                 // Update content when file changes
-                if (currentFile != null && editText.text.toString() != fileContent) {
+                else if (currentFile != null && editText.text.toString() != fileContent) {
                     editText.setText(fileContent)
                     editText.setSelection(fileContent.length)
                     // Store original content in tag to detect user changes

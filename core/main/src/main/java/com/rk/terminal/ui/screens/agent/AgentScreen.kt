@@ -27,6 +27,7 @@ import com.rk.terminal.gemini.client.GeminiStreamEvent
 import com.rk.terminal.gemini.client.OllamaClient
 import com.rk.terminal.gemini.tools.ToolResult
 import com.rk.terminal.ui.activities.terminal.MainActivity
+import com.rk.settings.Settings
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
@@ -59,16 +60,19 @@ fun AgentScreen(
     var currentResponseText by remember { mutableStateOf("") }
     var workspaceRoot by remember { mutableStateOf(com.rk.libcommons.alpineDir().absolutePath) }
     var showWorkspacePicker by remember { mutableStateOf(false) }
-    var useOllama by remember { mutableStateOf(false) }
-    var ollamaUrl by remember { mutableStateOf("http://localhost:11434") }
-    var ollamaModel by remember { mutableStateOf("llama3.2") }
-    var showOllamaSettings by remember { mutableStateOf(false) }
     var showHistory by remember { mutableStateOf(false) }
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
     
+    // Read Ollama settings from Settings
+    val useOllama = Settings.use_ollama
+    val ollamaHost = Settings.ollama_host
+    val ollamaPort = Settings.ollama_port
+    val ollamaModel = Settings.ollama_model
+    val ollamaUrl = "http://$ollamaHost:$ollamaPort"
+    
     // Initialize client
-    val aiClient = remember(workspaceRoot, useOllama, ollamaUrl, ollamaModel) {
+    val aiClient = remember(workspaceRoot, useOllama, ollamaHost, ollamaPort, ollamaModel) {
         GeminiService.initialize(workspaceRoot, useOllama, ollamaUrl, ollamaModel)
     }
     
@@ -132,9 +136,6 @@ fun AgentScreen(
                 }
                 IconButton(onClick = { showWorkspacePicker = true }) {
                     Icon(Icons.Default.Add, contentDescription = "Change Workspace", tint = MaterialTheme.colorScheme.onPrimaryContainer)
-                }
-                IconButton(onClick = { showOllamaSettings = true }) {
-                    Icon(Icons.Default.Star, contentDescription = "Settings", tint = MaterialTheme.colorScheme.onPrimaryContainer)
                 }
                 IconButton(onClick = { showHistory = true }) {
                     Icon(Icons.Default.Edit, contentDescription = "History", tint = MaterialTheme.colorScheme.onPrimaryContainer)
@@ -381,7 +382,12 @@ fun AgentScreen(
                             workspaceRoot = newWorkspace
                             showWorkspacePicker = false
                             // Reinitialize client with new workspace
-                            GeminiService.initialize(workspaceRoot, useOllama, ollamaUrl, ollamaModel)
+                            val currentUseOllama = Settings.use_ollama
+                            val currentOllamaHost = Settings.ollama_host
+                            val currentOllamaPort = Settings.ollama_port
+                            val currentOllamaModel = Settings.ollama_model
+                            val currentOllamaUrl = "http://$currentOllamaHost:$currentOllamaPort"
+                            GeminiService.initialize(workspaceRoot, currentUseOllama, currentOllamaUrl, currentOllamaModel)
                         }
                     },
                     enabled = newWorkspace.isNotBlank()
@@ -391,68 +397,6 @@ fun AgentScreen(
             },
             dismissButton = {
                 TextButton(onClick = { showWorkspacePicker = false }) {
-                    Text("Cancel")
-                }
-            }
-        )
-    }
-    
-    // Ollama settings dialog
-    if (showOllamaSettings) {
-        var newOllamaUrl by remember { mutableStateOf(ollamaUrl) }
-        var newOllamaModel by remember { mutableStateOf(ollamaModel) }
-        var newUseOllama by remember { mutableStateOf(useOllama) }
-        AlertDialog(
-            onDismissRequest = { showOllamaSettings = false },
-            title = { Text("AI Provider Settings") },
-            text = {
-                Column {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Checkbox(
-                            checked = newUseOllama,
-                            onCheckedChange = { newUseOllama = it }
-                        )
-                        Text("Use Ollama (Local)")
-                    }
-                    if (newUseOllama) {
-                        Spacer(modifier = Modifier.height(8.dp))
-                        OutlinedTextField(
-                            value = newOllamaUrl,
-                            onValueChange = { newOllamaUrl = it },
-                            label = { Text("Ollama URL") },
-                            singleLine = true,
-                            modifier = Modifier.fillMaxWidth()
-                        )
-                        Spacer(modifier = Modifier.height(8.dp))
-                        OutlinedTextField(
-                            value = newOllamaModel,
-                            onValueChange = { newOllamaModel = it },
-                            label = { Text("Model name") },
-                            singleLine = true,
-                            modifier = Modifier.fillMaxWidth()
-                        )
-                    }
-                }
-            },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        useOllama = newUseOllama
-                        ollamaUrl = newOllamaUrl
-                        ollamaModel = newOllamaModel
-                        showOllamaSettings = false
-                        // Reinitialize client
-                        GeminiService.initialize(workspaceRoot, useOllama, ollamaUrl, ollamaModel)
-                    }
-                ) {
-                    Text("Save")
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { showOllamaSettings = false }) {
                     Text("Cancel")
                 }
             }
