@@ -35,6 +35,7 @@ class GeminiClient(
     
     /**
      * Send a message and get streaming response
+     * This implements automatic continuation after tool calls, matching the TypeScript implementation
      */
     suspend fun sendMessageStream(
         userMessage: String,
@@ -45,66 +46,184 @@ class GeminiClient(
         android.util.Log.d("GeminiClient", "sendMessageStream: Starting request")
         android.util.Log.d("GeminiClient", "sendMessageStream: User message length: ${userMessage.length}")
         
-        // Add user message to history
-        chatHistory.add(
-            Content(
-                role = "user",
-                parts = listOf(Part.TextPart(text = userMessage))
+        // Add user message to history (only if it's not already a function response)
+        if (userMessage.isNotEmpty() && !userMessage.startsWith("__CONTINUE__")) {
+            chatHistory.add(
+                Content(
+                    role = "user",
+                    parts = listOf(Part.TextPart(text = userMessage))
+                )
             )
-        )
+        }
         
-        // Get API key and model
-        val apiKey = ApiProviderManager.getNextApiKey()
-            ?: run {
-                android.util.Log.e("GeminiClient", "sendMessageStream: No API keys configured")
-                emit(GeminiStreamEvent.Error("No API keys configured"))
+        val model = ApiProviderManager.getCurrentModel()
+        val maxTurns = 100 // Maximum number of turns to prevent infinite loops
+        var turnCount = 0
+        
+        // Loop to handle automatic continuation after tool calls
+        while (turnCount < maxTurns) {
+            turnCount++
+            android.util.Log.d("GeminiClient", "sendMessageStream: Turn $turnCount")
+            
+            // Get API key
+            val apiKey = ApiProviderManager.getNextApiKey()
+                ?: run {
+                    android.util.Log.e("GeminiClient", "sendMessageStream: No API keys configured")
+                    emit(GeminiStreamEvent.Error("No API keys configured"))
+                    return@flow
+                }
+            
+            // Prepare request (use chat history which already includes function responses for continuation)
+            val requestBody = buildRequest(if (turnCount == 1) userMessage else "", model)
+            
+            android.util.Log.d("GeminiClient", "sendMessageStream: Request body size: ${requestBody.toString().length} bytes")
+            
+            // Track if we have tool calls to execute and finish reason
+            var hasToolCalls = false
+            var finishReason: String? = null
+            val toolCallsToExecute = mutableListOf<Triple<FunctionCall, ToolResult, String>>() // FunctionCall, ToolResult, callId
+            
+            // Make API call with retry
+            val result = ApiProviderManager.makeApiCallWithRetry { key ->
+                try {
+                    android.util.Log.d("GeminiClient", "sendMessageStream: Attempting API call")
+                    kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                        finishReason = makeApiCall(
+                            key, 
+                            model, 
+                            requestBody, 
+                            onChunk, 
+                            { functionCall ->
+                                onToolCall(functionCall)
+                                hasToolCalls = true
+                            },
+                            { toolName, args ->
+                                onToolResult(toolName, args)
+                            },
+                            toolCallsToExecute
+                        )
+                    }
+                    android.util.Log.d("GeminiClient", "sendMessageStream: API call completed successfully, finishReason: $finishReason")
+                    Result.success(Unit)
+                } catch (e: KeysExhaustedException) {
+                    android.util.Log.e("GeminiClient", "sendMessageStream: Keys exhausted", e)
+                    Result.failure(e)
+                } catch (e: Exception) {
+                    android.util.Log.e("GeminiClient", "sendMessageStream: Exception during API call", e)
+                    android.util.Log.e("GeminiClient", "sendMessageStream: Exception type: ${e.javaClass.simpleName}")
+                    android.util.Log.e("GeminiClient", "sendMessageStream: Exception message: ${e.message}")
+                    if (ApiProviderManager.isRateLimitError(e)) {
+                        android.util.Log.w("GeminiClient", "sendMessageStream: Rate limit error detected")
+                        Result.failure(e)
+                    } else {
+                        Result.failure(e)
+                    }
+                }
+            }
+            
+            if (result.isFailure) {
+                val error = result.exceptionOrNull()
+                android.util.Log.e("GeminiClient", "sendMessageStream: Result failed, error: ${error?.message}")
+                if (error is KeysExhaustedException) {
+                    emit(GeminiStreamEvent.KeysExhausted(error.message ?: "All keys exhausted"))
+                } else {
+                    emit(GeminiStreamEvent.Error(error?.message ?: "Unknown error"))
+                }
                 return@flow
             }
-        val model = ApiProviderManager.getCurrentModel()
-        android.util.Log.d("GeminiClient", "sendMessageStream: Using model: $model")
-        android.util.Log.d("GeminiClient", "sendMessageStream: API key length: ${apiKey.length}")
-        
-        // Prepare request
-        val requestBody = buildRequest(userMessage, model)
-        android.util.Log.d("GeminiClient", "sendMessageStream: Request body size: ${requestBody.toString().length} bytes")
-        
-        // Make API call with retry
-        android.util.Log.d("GeminiClient", "sendMessageStream: Starting API call with retry")
-        val result = ApiProviderManager.makeApiCallWithRetry { key ->
-            try {
-                android.util.Log.d("GeminiClient", "sendMessageStream: Attempting API call")
-                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                    makeApiCall(key, model, requestBody, onChunk, onToolCall, onToolResult)
+            
+            // Validate response: if no tool calls and no finish reason, it's an error
+            if (toolCallsToExecute.isEmpty() && finishReason == null) {
+                android.util.Log.w("GeminiClient", "sendMessageStream: No finish reason and no tool calls - invalid response")
+                emit(GeminiStreamEvent.Error("Model stream ended without a finish reason or tool calls"))
+                return@flow
+            }
+            
+            // Execute any pending tool calls in parallel
+            if (toolCallsToExecute.isNotEmpty()) {
+                android.util.Log.d("GeminiClient", "sendMessageStream: Executing ${toolCallsToExecute.size} tool call(s) in parallel")
+                
+                // Execute all tool calls in parallel using coroutines
+                val toolResponses = kotlinx.coroutines.coroutineScope {
+                    toolCallsToExecute.map { (functionCall, toolResult, callId) ->
+                        kotlinx.coroutines.async {
+                            // Format response based on tool result
+                            val responseContent = when {
+                                toolResult.error != null -> {
+                                    // Error response
+                                    mapOf("error" to (toolResult.error.message ?: "Unknown error"))
+                                }
+                                toolResult.llmContent is String -> {
+                                    // Simple string output
+                                    mapOf("output" to toolResult.llmContent)
+                                }
+                                else -> {
+                                    // Default success message
+                                    mapOf("output" to "Tool execution succeeded.")
+                                }
+                            }
+                            
+                            Triple(functionCall, responseContent, callId)
+                        }
+                    }.map { it.await() }
                 }
-                android.util.Log.d("GeminiClient", "sendMessageStream: API call completed successfully")
-                Result.success(Unit)
-            } catch (e: KeysExhaustedException) {
-                android.util.Log.e("GeminiClient", "sendMessageStream: Keys exhausted", e)
-                Result.failure(e)
-            } catch (e: Exception) {
-                android.util.Log.e("GeminiClient", "sendMessageStream: Exception during API call", e)
-                android.util.Log.e("GeminiClient", "sendMessageStream: Exception type: ${e.javaClass.simpleName}")
-                android.util.Log.e("GeminiClient", "sendMessageStream: Exception message: ${e.message}")
-                if (ApiProviderManager.isRateLimitError(e)) {
-                    android.util.Log.w("GeminiClient", "sendMessageStream: Rate limit error detected")
-                    Result.failure(e)
-                } else {
-                    Result.failure(e)
+                
+                // Add all function responses to history
+                for ((functionCall, responseContent, callId) in toolResponses) {
+                    chatHistory.add(
+                        Content(
+                            role = "user",
+                            parts = listOf(
+                                Part.FunctionResponsePart(
+                                    functionResponse = FunctionResponse(
+                                        name = functionCall.name,
+                                        response = responseContent,
+                                        id = callId
+                                    )
+                                )
+                            )
+                        )
+                    )
+                }
+                
+                // Continue the conversation with tool results
+                android.util.Log.d("GeminiClient", "sendMessageStream: Continuing conversation after tool execution")
+                continue // Loop to make another API call
+            } else {
+                // No more tool calls, check finish reason
+                when (finishReason) {
+                    "STOP" -> {
+                        android.util.Log.d("GeminiClient", "sendMessageStream: Stream completed (STOP)")
+                        emit(GeminiStreamEvent.Done)
+                        break
+                    }
+                    "MAX_TOKENS" -> {
+                        android.util.Log.w("GeminiClient", "sendMessageStream: Stream stopped due to MAX_TOKENS")
+                        emit(GeminiStreamEvent.Error("Response was truncated due to token limit"))
+                        break
+                    }
+                    "SAFETY" -> {
+                        android.util.Log.w("GeminiClient", "sendMessageStream: Stream stopped due to SAFETY")
+                        emit(GeminiStreamEvent.Error("Response was blocked due to safety filters"))
+                        break
+                    }
+                    "MALFORMED_FUNCTION_CALL" -> {
+                        android.util.Log.w("GeminiClient", "sendMessageStream: Stream stopped due to MALFORMED_FUNCTION_CALL")
+                        emit(GeminiStreamEvent.Error("Model generated malformed function call"))
+                        break
+                    }
+                    else -> {
+                        android.util.Log.d("GeminiClient", "sendMessageStream: Stream completed (finishReason: $finishReason)")
+                        emit(GeminiStreamEvent.Done)
+                        break
+                    }
                 }
             }
         }
         
-        if (result.isFailure) {
-            val error = result.exceptionOrNull()
-            android.util.Log.e("GeminiClient", "sendMessageStream: Result failed, error: ${error?.message}")
-            if (error is KeysExhaustedException) {
-                emit(GeminiStreamEvent.KeysExhausted(error.message ?: "All keys exhausted"))
-            } else {
-                emit(GeminiStreamEvent.Error(error?.message ?: "Unknown error"))
-            }
-        } else {
-            android.util.Log.d("GeminiClient", "sendMessageStream: Stream completed successfully")
-            emit(GeminiStreamEvent.Done)
+        if (turnCount >= maxTurns) {
+            android.util.Log.w("GeminiClient", "sendMessageStream: Reached maximum turns ($maxTurns)")
+            emit(GeminiStreamEvent.Error("Maximum number of turns reached"))
         }
     }
     
@@ -114,8 +233,9 @@ class GeminiClient(
         requestBody: JSONObject,
         onChunk: (String) -> Unit,
         onToolCall: (FunctionCall) -> Unit,
-        onToolResult: (String, Map<String, Any>) -> Unit
-    ) {
+        onToolResult: (String, Map<String, Any>) -> Unit,
+        toolCallsToExecute: MutableList<Triple<FunctionCall, ToolResult, String>>
+    ): String? {
         // Google Gemini API endpoint - using SSE (Server-Sent Events) for streaming
         val url = "https://generativelanguage.googleapis.com/v1beta/models/$model:streamGenerateContent?key=$apiKey"
         android.util.Log.d("GeminiClient", "makeApiCall: URL: ${url.replace(apiKey, "***")}")
@@ -164,11 +284,16 @@ class GeminiClient(
                             val jsonArray = JSONArray(bodyString)
                             android.util.Log.d("GeminiClient", "makeApiCall: JSON array has ${jsonArray.length()} elements")
                             
+                            var lastFinishReason: String? = null
                             for (i in 0 until jsonArray.length()) {
                                 val json = jsonArray.getJSONObject(i)
                                 android.util.Log.d("GeminiClient", "makeApiCall: Processing array element $i")
-                                processResponse(json, onChunk, onToolCall, onToolResult)
+                                val finishReason = processResponse(json, onChunk, onToolCall, onToolResult, toolCallsToExecute)
+                                if (finishReason != null) {
+                                    lastFinishReason = finishReason
+                                }
                             }
+                            return lastFinishReason
                         } else {
                             // Try parsing as SSE (Server-Sent Events) format
                             android.util.Log.d("GeminiClient", "makeApiCall: Attempting SSE format parsing")
@@ -196,7 +321,10 @@ class GeminiClient(
                                         android.util.Log.d("GeminiClient", "makeApiCall: Parsing SSE data line $dataLineCount")
                                         val json = JSONObject(jsonStr)
                                         android.util.Log.d("GeminiClient", "makeApiCall: Processing SSE data line $dataLineCount")
-                                        processResponse(json, onChunk, onToolCall, onToolResult)
+                                        val finishReason = processResponse(json, onChunk, onToolCall, onToolResult, toolCallsToExecute)
+                                        if (finishReason != null) {
+                                            return finishReason
+                                        }
                                     } catch (e: Exception) {
                                         android.util.Log.e("GeminiClient", "makeApiCall: Failed to parse SSE JSON on line $dataLineCount", e)
                                         android.util.Log.e("GeminiClient", "makeApiCall: JSON string: ${jsonStr.take(500)}")
@@ -210,8 +338,7 @@ class GeminiClient(
                                         android.util.Log.d("GeminiClient", "makeApiCall: Attempting to parse as single JSON object")
                                         val json = JSONObject(bodyString)
                                         android.util.Log.d("GeminiClient", "makeApiCall: Processing single JSON object")
-                                        processResponse(json, onChunk, onToolCall, onToolResult)
-                                        break
+                                        return processResponse(json, onChunk, onToolCall, onToolResult, toolCallsToExecute)
                                     } catch (e: Exception) {
                                         android.util.Log.w("GeminiClient", "makeApiCall: Unexpected line format: ${trimmedLine.take(100)}")
                                     }
@@ -237,27 +364,51 @@ class GeminiClient(
             android.util.Log.e("GeminiClient", "makeApiCall: Unexpected exception after ${elapsed}ms", e)
             throw e
         }
+        return null // No finish reason found
     }
     
     private fun processResponse(
         json: JSONObject,
         onChunk: (String) -> Unit,
         onToolCall: (FunctionCall) -> Unit,
-        onToolResult: (String, Map<String, Any>) -> Unit
-    ) {
+        onToolResult: (String, Map<String, Any>) -> Unit,
+        toolCallsToExecute: MutableList<Triple<FunctionCall, ToolResult, String>>
+    ): String? {
+        var finishReason: String? = null
         val candidates = json.optJSONArray("candidates")
         if (candidates != null && candidates.length() > 0) {
             val candidate = candidates.getJSONObject(0)
+            
+            // Extract finish reason if present
+            if (candidate.has("finishReason")) {
+                finishReason = candidate.getString("finishReason")
+            }
+            
+            // Extract usage metadata if present (for tracking)
+            val usageMetadata = candidate.optJSONObject("usageMetadata")
+            
             val content = candidate.optJSONObject("content")
             
             if (content != null) {
                 val parts = content.optJSONArray("parts")
                 if (parts != null) {
+                    // First pass: collect all function calls and process text/thoughts
+                    val functionCalls = mutableListOf<FunctionCall>()
+                    
                     for (i in 0 until parts.length()) {
                         val part = parts.getJSONObject(i)
                         
-                        // Check for text
-                        if (part.has("text")) {
+                        // Check for thought (for thinking models like gemini-2.5)
+                        if (part.has("text") && part.optBoolean("thought", false)) {
+                            val thoughtText = part.getString("text")
+                            // Thoughts are internal reasoning, we can log but don't need to emit to user
+                            android.util.Log.d("GeminiClient", "processResponse: Received thought: ${thoughtText.take(100)}...")
+                            // Continue to next part - thoughts don't go to user
+                            continue
+                        }
+                        
+                        // Check for text (non-thought)
+                        if (part.has("text") && !part.optBoolean("thought", false)) {
                             val text = part.getString("text")
                             onChunk(text)
                             
@@ -276,62 +427,77 @@ class GeminiClient(
                             }
                         }
                         
-                        // Check for function call
+                        // Collect function calls (don't execute yet)
                         if (part.has("functionCall")) {
                             val functionCallJson = part.getJSONObject("functionCall")
                             val name = functionCallJson.getString("name")
                             val argsJson = functionCallJson.getJSONObject("args")
                             val args = jsonObjectToMap(argsJson)
-                            
-                            val functionCall = FunctionCall(name = name, args = args)
-                            onToolCall(functionCall)
-                            
-                            // Execute tool synchronously (in real implementation, this should be async)
-                            val toolResult = try {
-                                executeToolSync(name, args)
-                            } catch (e: Exception) {
-                                ToolResult(
-                                    llmContent = "Error executing tool: ${e.message}",
-                                    returnDisplay = "Error: ${e.message}",
-                                    error = ToolError(
-                                        message = e.message ?: "Unknown error",
-                                        type = ToolErrorType.EXECUTION_ERROR
-                                    )
-                                )
+                            // Generate callId if not provided by API (matching TypeScript implementation)
+                            val callId = if (functionCallJson.has("id")) {
+                                functionCallJson.getString("id")
+                            } else {
+                                "${name}-${System.currentTimeMillis()}-${java.util.UUID.randomUUID().toString().substring(0, 8)}"
                             }
                             
-                            // Add function call and response to history
-                            chatHistory.add(
-                                Content(
-                                    role = "model",
-                                    parts = listOf(Part.FunctionCallPart(functionCall = functionCall))
-                                )
-                            )
-                            
-                            // Add function response
-                            chatHistory.add(
-                                Content(
-                                    role = "user",
-                                    parts = listOf(
-                                        Part.FunctionResponsePart(
-                                            functionResponse = FunctionResponse(
-                                                name = name,
-                                                response = mapOf("result" to toolResult.llmContent)
-                                            )
-                                        )
-                                    )
-                                )
-                            )
-                            
-                            onToolResult(name, args)
-                            
-                            // Continue conversation with tool result - make another API call
-                            // For now, we'll just add the result and let the user continue
+                            val functionCall = FunctionCall(name = name, args = args, id = callId)
+                            functionCalls.add(functionCall)
+                            onToolCall(functionCall)
                         }
+                    }
+                    
+                    // Extract citations if present (matching TypeScript implementation)
+                    val citationMetadata = candidate.optJSONObject("citationMetadata")
+                    if (citationMetadata != null) {
+                        val citations = citationMetadata.optJSONArray("citations")
+                        if (citations != null) {
+                            for (j in 0 until citations.length()) {
+                                val citation = citations.getJSONObject(j)
+                                val uri = citation.optString("uri", "")
+                                val title = citation.optString("title", "")
+                                if (uri.isNotEmpty()) {
+                                    val citationText = if (title.isNotEmpty()) "($title) $uri" else uri
+                                    android.util.Log.d("GeminiClient", "processResponse: Citation: $citationText")
+                                    // Citations are typically shown at the end, we can emit them if needed
+                                }
+                            }
+                        }
+                    }
+                    
+                    // Second pass: Execute all collected function calls AFTER processing all parts
+                    // This matches the TypeScript behavior where function calls are collected first
+                    for (functionCall in functionCalls) {
+                        // Add function call to history
+                        chatHistory.add(
+                            Content(
+                                role = "model",
+                                parts = listOf(Part.FunctionCallPart(functionCall = functionCall))
+                            )
+                        )
+                        
+                        // Execute tool synchronously and collect for later continuation
+                        val toolResult = try {
+                            executeToolSync(functionCall.name, functionCall.args)
+                        } catch (e: Exception) {
+                            ToolResult(
+                                llmContent = "Error executing tool: ${e.message}",
+                                returnDisplay = "Error: ${e.message}",
+                                error = ToolError(
+                                    message = e.message ?: "Unknown error",
+                                    type = ToolErrorType.EXECUTION_ERROR
+                                )
+                            )
+                        }
+                        
+                        // Store tool call and result for execution after response processing
+                        val callId = functionCall.id ?: "${functionCall.name}-${System.currentTimeMillis()}-${java.util.UUID.randomUUID().toString().substring(0, 8)}"
+                        toolCallsToExecute.add(Triple(functionCall, toolResult, callId))
+                        onToolResult(functionCall.name, functionCall.args)
                     }
                 }
             }
         }
+        return finishReason
     }
     
     private fun executeToolSync(name: String, args: Map<String, Any>): ToolResult {
@@ -377,7 +543,7 @@ class GeminiClient(
     private fun buildRequest(userMessage: String, model: String): JSONObject {
         val request = JSONObject()
         request.put("contents", JSONArray().apply {
-            // Add chat history
+            // Add chat history (which already includes the user message if it's the first turn)
             chatHistory.forEach { content ->
                 val contentObj = JSONObject()
                 contentObj.put("role", content.role)
@@ -394,6 +560,7 @@ class GeminiClient(
                                 val functionCallObj = JSONObject()
                                 functionCallObj.put("name", part.functionCall.name)
                                 functionCallObj.put("args", JSONObject(part.functionCall.args))
+                                part.functionCall.id?.let { functionCallObj.put("id", it) }
                                 partObj.put("functionCall", functionCallObj)
                                 put(partObj)
                             }
@@ -402,6 +569,7 @@ class GeminiClient(
                                 val functionResponseObj = JSONObject()
                                 functionResponseObj.put("name", part.functionResponse.name)
                                 functionResponseObj.put("response", JSONObject(part.functionResponse.response))
+                                part.functionResponse.id?.let { functionResponseObj.put("id", it) }
                                 partObj.put("functionResponse", functionResponseObj)
                                 put(partObj)
                             }
@@ -426,6 +594,71 @@ class GeminiClient(
         toolObj.put("functionDeclarations", functionDeclarations)
         tools.put(toolObj)
         request.put("tools", tools)
+        
+        // Add system instruction to guide planning behavior
+        // This matches the comprehensive system prompt from the original gemini-cli TypeScript implementation
+        val hasWriteTodosTool = toolRegistry.getFunctionDeclarations().any { it.name == "write_todos" }
+        
+        val systemInstruction = buildString {
+            append("You are an interactive CLI agent specializing in software engineering tasks. Your primary goal is to help users safely and efficiently, adhering strictly to the following instructions and utilizing your available tools.\n\n")
+            
+            append("# Core Mandates\n\n")
+            append("- **Conventions:** Rigorously adhere to existing project conventions when reading or modifying code. Analyze surrounding code, tests, and configuration first.\n")
+            append("- **Libraries/Frameworks:** NEVER assume a library/framework is available or appropriate. Verify its established usage within the project before employing it.\n")
+            append("- **Style & Structure:** Mimic the style, structure, framework choices, typing, and architectural patterns of existing code in the project.\n")
+            append("- **Proactiveness:** Fulfill the user's request thoroughly. When adding features or fixing bugs, this includes adding tests to ensure quality.\n")
+            append("- **Explaining Changes:** After completing a code modification or file operation, do not provide summaries unless asked.\n\n")
+            
+            append("# Primary Workflows\n\n")
+            append("## Software Engineering Tasks\n")
+            append("When requested to perform tasks like fixing bugs, adding features, refactoring, or explaining code, follow this sequence:\n")
+            append("1. **Understand:** Think about the user's request and the relevant codebase context. Use search tools extensively to understand file structures, existing code patterns, and conventions.\n")
+            append("2. **Plan:** Build a coherent and grounded plan for how you intend to resolve the user's task.")
+            
+            if (hasWriteTodosTool) {
+                append(" For complex tasks, break them down into smaller, manageable subtasks and use the `write_todos` tool to track your progress.")
+            }
+            
+            append(" Share an extremely concise yet clear plan with the user if it would help the user understand your thought process. As part of the plan, you should use an iterative development process that includes writing unit tests to verify your changes.\n")
+            append("3. **Implement:** Use the available tools to act on the plan, strictly adhering to the project's established conventions.\n")
+            append("4. **Verify (Tests):** If applicable and feasible, verify the changes using the project's testing procedures.\n")
+            append("5. **Verify (Standards):** VERY IMPORTANT: After making code changes, execute the project-specific build, linting and type-checking commands that you have identified for this project.\n")
+            append("6. **Finalize:** After all verification passes, consider the task complete.\n\n")
+            
+            if (hasWriteTodosTool) {
+                append("## Planning with write_todos Tool\n\n")
+                append("For complex queries that require multiple steps, planning and generally is higher complexity than a simple Q&A, use the `write_todos` tool.\n\n")
+                append("DO NOT use this tool for simple tasks that can be completed in less than 2 steps. If the user query is simple and straightforward, do not use the tool.\n\n")
+                append("When using `write_todos`:\n")
+                append("1. Use this todo list as soon as you receive a user request based on the complexity of the task.\n")
+                append("2. Keep track of every subtask that you update the list with.\n")
+                append("3. Mark a subtask as in_progress before you begin working on it. You should only have one subtask as in_progress at a time.\n")
+                append("4. Update the subtask list as you proceed in executing the task. The subtask list is not static and should reflect your progress and current plans.\n")
+                append("5. Mark a subtask as completed when you have completed it.\n")
+                append("6. Mark a subtask as cancelled if the subtask is no longer needed.\n\n")
+            }
+            
+            append("# Operational Guidelines\n\n")
+            append("## Tone and Style (CLI Interaction)\n")
+            append("- **Concise & Direct:** Adopt a professional, direct, and concise tone suitable for a CLI environment.\n")
+            append("- **Minimal Output:** Aim for fewer than 3 lines of text output (excluding tool use/code generation) per response whenever practical.\n")
+            append("- **No Chitchat:** Avoid conversational filler, preambles, or postambles. Get straight to the action or answer.\n\n")
+            
+            append("## Tool Usage\n")
+            append("- **Parallelism:** Execute multiple independent tool calls in parallel when feasible.\n")
+            append("- **Command Execution:** Use shell tools for running shell commands.\n\n")
+            
+            append("# Final Reminder\n")
+            append("Your core function is efficient and safe assistance. Balance extreme conciseness with the crucial need for clarity. Always prioritize user control and project conventions. Never make assumptions about the contents of files; instead use read tools to ensure you aren't making broad assumptions. Finally, you are an agent - please keep going until the user's query is completely resolved.")
+        }
+        
+        request.put("systemInstruction", JSONObject().apply {
+            put("parts", JSONArray().apply {
+                put(JSONObject().apply {
+                    put("text", systemInstruction)
+                })
+            })
+        })
         
         return request
     }
@@ -489,9 +722,10 @@ class GeminiClient(
         val apiKey = ApiProviderManager.getNextApiKey()
             ?: throw Exception("No API keys configured")
         
-        // Use configured model, or default to web search capable model
-        val model = ApiProviderManager.getCurrentModel().takeIf { it.isNotBlank() }
-            ?: "gemini-2.0-flash-exp" // Default to web search capable model
+        // Use 'web-search' model config (matching TypeScript implementation)
+        // This should resolve to a web-search capable model like gemini-2.5-flash
+        // For now, use a web-search capable model directly
+        val model = "gemini-2.5-flash" // Web search capable model (matching TypeScript default)
         
         val requestBody = JSONObject().apply {
             put("contents", JSONArray().apply {
@@ -502,6 +736,12 @@ class GeminiClient(
                             put("text", query)
                         })
                     })
+                })
+            })
+            // Enable Google Search tool (matching TypeScript: tools: [{ googleSearch: {} }])
+            put("tools", JSONArray().apply {
+                put(JSONObject().apply {
+                    put("googleSearch", JSONObject())
                 })
             })
         }

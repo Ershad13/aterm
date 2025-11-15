@@ -73,13 +73,16 @@ class WebSearchToolInvocation(
                 
                 // Process sources
                 if (sources != null && sources.isNotEmpty()) {
+                    // Format sources with 1-based indexing (matching TypeScript: [${index + 1}])
                     sources.forEachIndexed { index, source ->
                         val title = source.web?.title ?: "Untitled"
                         val uri = source.web?.uri ?: "No URI"
-                        sourceListFormatted.add("[$index] $title ($uri)")
+                        sourceListFormatted.add("[${index + 1}] $title ($uri)")
                     }
                     
                     // Insert citation markers using grounding supports
+                    // CRITICAL: segment indices are UTF-8 byte positions, not character positions
+                    // This is essential for multibyte characters (Japanese, emojis, etc.)
                     if (groundingSupports != null && groundingSupports.isNotEmpty()) {
                         val insertions = mutableListOf<Pair<Int, String>>()
                         
@@ -95,16 +98,32 @@ class WebSearchToolInvocation(
                         // Sort by index descending to insert from end to start
                         insertions.sortByDescending { it.first }
                         
-                        // Insert markers
-                        var currentText = modifiedResponseText
-                        for ((index, marker) in insertions) {
-                            if (index <= currentText.toByteArray(StandardCharsets.UTF_8).size) {
-                                // Convert byte index to character index (approximate)
-                                val charIndex = minOf(index, currentText.length)
-                                currentText = currentText.substring(0, charIndex) + marker + currentText.substring(charIndex)
-                            }
+                        // Use UTF-8 byte positions (matching TypeScript TextEncoder/TextDecoder approach)
+                        val responseBytes = modifiedResponseText.toByteArray(StandardCharsets.UTF_8)
+                        val parts = mutableListOf<ByteArray>()
+                        var lastIndex = responseBytes.size
+                        
+                        for ((byteIndex, marker) in insertions) {
+                            val pos = minOf(byteIndex, lastIndex)
+                            // Add text after marker
+                            parts.add(0, responseBytes.sliceArray(pos until lastIndex))
+                            // Add marker
+                            parts.add(0, marker.toByteArray(StandardCharsets.UTF_8))
+                            lastIndex = pos
                         }
-                        modifiedResponseText = currentText
+                        // Add remaining text from start
+                        parts.add(0, responseBytes.sliceArray(0 until lastIndex))
+                        
+                        // Concatenate all parts
+                        val totalLength = parts.sumOf { it.size }
+                        val finalBytes = ByteArray(totalLength)
+                        var offset = 0
+                        for (part in parts) {
+                            part.copyInto(finalBytes, offset)
+                            offset += part.size
+                        }
+                        
+                        modifiedResponseText = String(finalBytes, StandardCharsets.UTF_8)
                     }
                     
                     // Append sources list
@@ -120,12 +139,14 @@ class WebSearchToolInvocation(
                     returnDisplay = "Search results for \"${params.query}\" returned"
                 )
             } catch (e: Exception) {
+                val errorMessage = "Error during web search for query \"${params.query}\": ${e.message ?: "Unknown error"}"
+                android.util.Log.e("WebSearchTool", errorMessage, e)
                 ToolResult(
-                    llmContent = "Error during web search for query \"${params.query}\": ${e.message}",
+                    llmContent = "Error: $errorMessage",
                     returnDisplay = "Error performing web search",
                     error = ToolError(
-                        message = e.message ?: "Unknown error",
-                        type = ToolErrorType.EXECUTION_ERROR
+                        message = errorMessage,
+                        type = ToolErrorType.WEB_SEARCH_FAILED
                     )
                 )
             }
@@ -137,9 +158,9 @@ class WebSearchTool(
     private val geminiClient: GeminiClient
 ) : DeclarativeTool<WebSearchToolParams, ToolResult>() {
     
-    override val name = "web_search"
-    override val displayName = "WebSearch"
-    override val description = "Searches the web for information using Google's search capabilities. Returns relevant results with source citations."
+    override val name = "google_web_search" // Matching TypeScript WEB_SEARCH_TOOL_NAME
+    override val displayName = "GoogleSearch"
+    override val description = "Performs a web search using Google Search (via the Gemini API) and returns the results. This tool is useful for finding information on the internet based on a query."
     
     override val parameterSchema = FunctionParameters(
         type = "object",

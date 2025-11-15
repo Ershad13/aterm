@@ -22,12 +22,14 @@ sealed class Part {
 
 data class FunctionCall(
     val name: String,
-    val args: Map<String, Any>
+    val args: Map<String, Any>,
+    val id: String? = null // Optional call ID from API
 )
 
 data class FunctionResponse(
     val name: String,
-    val response: Map<String, Any>
+    val response: Map<String, Any>,
+    val id: String? = null // Call ID for tracking
 )
 
 /**
