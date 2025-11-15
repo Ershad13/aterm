@@ -42,6 +42,9 @@ class GeminiClient(
         onToolCall: (FunctionCall) -> Unit,
         onToolResult: (String, Map<String, Any>) -> Unit
     ): Flow<GeminiStreamEvent> = flow {
+        android.util.Log.d("GeminiClient", "sendMessageStream: Starting request")
+        android.util.Log.d("GeminiClient", "sendMessageStream: User message length: ${userMessage.length}")
+        
         // Add user message to history
         chatHistory.add(
             Content(
@@ -53,25 +56,37 @@ class GeminiClient(
         // Get API key and model
         val apiKey = ApiProviderManager.getNextApiKey()
             ?: run {
+                android.util.Log.e("GeminiClient", "sendMessageStream: No API keys configured")
                 emit(GeminiStreamEvent.Error("No API keys configured"))
                 return@flow
             }
         val model = ApiProviderManager.getCurrentModel()
+        android.util.Log.d("GeminiClient", "sendMessageStream: Using model: $model")
+        android.util.Log.d("GeminiClient", "sendMessageStream: API key length: ${apiKey.length}")
         
         // Prepare request
         val requestBody = buildRequest(userMessage, model)
+        android.util.Log.d("GeminiClient", "sendMessageStream: Request body size: ${requestBody.toString().length} bytes")
         
         // Make API call with retry
+        android.util.Log.d("GeminiClient", "sendMessageStream: Starting API call with retry")
         val result = ApiProviderManager.makeApiCallWithRetry { key ->
             try {
+                android.util.Log.d("GeminiClient", "sendMessageStream: Attempting API call")
                 kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
                     makeApiCall(key, model, requestBody, onChunk, onToolCall, onToolResult)
                 }
+                android.util.Log.d("GeminiClient", "sendMessageStream: API call completed successfully")
                 Result.success(Unit)
             } catch (e: KeysExhaustedException) {
+                android.util.Log.e("GeminiClient", "sendMessageStream: Keys exhausted", e)
                 Result.failure(e)
             } catch (e: Exception) {
+                android.util.Log.e("GeminiClient", "sendMessageStream: Exception during API call", e)
+                android.util.Log.e("GeminiClient", "sendMessageStream: Exception type: ${e.javaClass.simpleName}")
+                android.util.Log.e("GeminiClient", "sendMessageStream: Exception message: ${e.message}")
                 if (ApiProviderManager.isRateLimitError(e)) {
+                    android.util.Log.w("GeminiClient", "sendMessageStream: Rate limit error detected")
                     Result.failure(e)
                 } else {
                     Result.failure(e)
@@ -81,12 +96,14 @@ class GeminiClient(
         
         if (result.isFailure) {
             val error = result.exceptionOrNull()
+            android.util.Log.e("GeminiClient", "sendMessageStream: Result failed, error: ${error?.message}")
             if (error is KeysExhaustedException) {
                 emit(GeminiStreamEvent.KeysExhausted(error.message ?: "All keys exhausted"))
             } else {
                 emit(GeminiStreamEvent.Error(error?.message ?: "Unknown error"))
             }
         } else {
+            android.util.Log.d("GeminiClient", "sendMessageStream: Stream completed successfully")
             emit(GeminiStreamEvent.Done)
         }
     }
@@ -101,38 +118,72 @@ class GeminiClient(
     ) {
         // Google Gemini API endpoint - using SSE (Server-Sent Events) for streaming
         val url = "https://generativelanguage.googleapis.com/v1beta/models/$model:streamGenerateContent?key=$apiKey"
+        android.util.Log.d("GeminiClient", "makeApiCall: URL: ${url.replace(apiKey, "***")}")
+        android.util.Log.d("GeminiClient", "makeApiCall: Model: $model")
         
         val request = Request.Builder()
             .url(url)
             .post(requestBody.toString().toRequestBody("application/json".toMediaType()))
             .build()
         
-        client.newCall(request).execute().use { response ->
-            if (!response.isSuccessful) {
-                val errorBody = response.body?.string() ?: "Unknown error"
-                throw IOException("API call failed: ${response.code} - $errorBody")
-            }
-            
-            response.body?.let { body ->
-                val source = body.source().buffer()
-                var line: String?
+        android.util.Log.d("GeminiClient", "makeApiCall: Executing request...")
+        val startTime = System.currentTimeMillis()
+        
+        try {
+            client.newCall(request).execute().use { response ->
+                val elapsed = System.currentTimeMillis() - startTime
+                android.util.Log.d("GeminiClient", "makeApiCall: Response received after ${elapsed}ms")
+                android.util.Log.d("GeminiClient", "makeApiCall: Response code: ${response.code}")
+                android.util.Log.d("GeminiClient", "makeApiCall: Response successful: ${response.isSuccessful}")
                 
-                while (source.readUtf8Line().also { line = it } != null) {
-                    val trimmedLine = line?.trim()
-                    if (trimmedLine?.startsWith("data: ") == true) {
-                        val jsonStr = trimmedLine.substring(6)
-                        if (jsonStr == "[DONE]" || jsonStr.isEmpty()) continue
-                        
-                        try {
-                            val json = JSONObject(jsonStr)
-                            processResponse(json, onChunk, onToolCall, onToolResult)
-                        } catch (e: Exception) {
-                            // Skip malformed JSON - log in debug mode
-                            android.util.Log.d("GeminiClient", "Failed to parse JSON: ${e.message}")
+                if (!response.isSuccessful) {
+                    val errorBody = response.body?.string() ?: "Unknown error"
+                    android.util.Log.e("GeminiClient", "makeApiCall: API call failed: ${response.code}")
+                    android.util.Log.e("GeminiClient", "makeApiCall: Error body: $errorBody")
+                    throw IOException("API call failed: ${response.code} - $errorBody")
+                }
+                
+                android.util.Log.d("GeminiClient", "makeApiCall: Reading response body...")
+                response.body?.let { body ->
+                    val source = body.source().buffer()
+                    var line: String?
+                    var lineCount = 0
+                    var dataLineCount = 0
+                    
+                    while (source.readUtf8Line().also { line = it } != null) {
+                        lineCount++
+                        val trimmedLine = line?.trim()
+                        if (trimmedLine?.startsWith("data: ") == true) {
+                            dataLineCount++
+                            val jsonStr = trimmedLine.substring(6)
+                            if (jsonStr == "[DONE]" || jsonStr.isEmpty()) {
+                                android.util.Log.d("GeminiClient", "makeApiCall: Received [DONE] marker")
+                                continue
+                            }
+                            
+                            try {
+                                val json = JSONObject(jsonStr)
+                                android.util.Log.d("GeminiClient", "makeApiCall: Processing data line $dataLineCount")
+                                processResponse(json, onChunk, onToolCall, onToolResult)
+                            } catch (e: Exception) {
+                                android.util.Log.e("GeminiClient", "makeApiCall: Failed to parse JSON on line $dataLineCount", e)
+                                android.util.Log.e("GeminiClient", "makeApiCall: JSON string: ${jsonStr.take(200)}")
+                            }
                         }
                     }
+                    android.util.Log.d("GeminiClient", "makeApiCall: Finished reading. Total lines: $lineCount, Data lines: $dataLineCount")
+                } ?: run {
+                    android.util.Log.w("GeminiClient", "makeApiCall: Response body is null")
                 }
             }
+        } catch (e: IOException) {
+            val elapsed = System.currentTimeMillis() - startTime
+            android.util.Log.e("GeminiClient", "makeApiCall: IOException after ${elapsed}ms", e)
+            throw e
+        } catch (e: Exception) {
+            val elapsed = System.currentTimeMillis() - startTime
+            android.util.Log.e("GeminiClient", "makeApiCall: Unexpected exception after ${elapsed}ms", e)
+            throw e
         }
     }
     

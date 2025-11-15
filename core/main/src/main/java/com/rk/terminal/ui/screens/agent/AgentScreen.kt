@@ -369,6 +369,7 @@ fun AgentScreen(
                                     
                                     // Send to Gemini API with tools
                                     scope.launch {
+                                        android.util.Log.d("AgentScreen", "Starting message send for: ${prompt.take(50)}...")
                                         val loadingMessage = AgentMessage(
                                             text = "Thinking...",
                                             isUser = false,
@@ -378,6 +379,7 @@ fun AgentScreen(
                                         currentResponseText = ""
                                         
                                         try {
+                                            android.util.Log.d("AgentScreen", "Creating stream, useOllama: $useOllama")
                                             val stream = if (useOllama) {
                                                 (aiClient as OllamaClient).sendMessageStream(
                                                     userMessage = prompt,
@@ -439,7 +441,9 @@ fun AgentScreen(
                                             }
                                             
                                             // Collect stream events
+                                            android.util.Log.d("AgentScreen", "Starting to collect stream events")
                                             stream.collect { event ->
+                                                android.util.Log.d("AgentScreen", "Received stream event: ${event.javaClass.simpleName}")
                                                 when (event) {
                                                     is GeminiStreamEvent.Chunk -> {
                                                         currentResponseText += event.text
@@ -485,11 +489,13 @@ fun AgentScreen(
                                                         messages = messages.dropLast(1) + exhaustedMessage
                                                     }
                                                     is GeminiStreamEvent.Done -> {
-                                                        // Stream completed
+                                                        android.util.Log.d("AgentScreen", "Stream completed (Done event)")
                                                     }
                                                 }
                                             }
+                                            android.util.Log.d("AgentScreen", "Finished collecting stream events")
                                         } catch (e: KeysExhaustedException) {
+                                            android.util.Log.e("AgentScreen", "KeysExhaustedException caught", e)
                                             lastFailedPrompt = prompt
                                             showKeysExhaustedDialog = true
                                             val exhaustedMessage = AgentMessage(
@@ -499,6 +505,9 @@ fun AgentScreen(
                                             )
                                             messages = messages.dropLast(1) + exhaustedMessage
                                         } catch (e: Exception) {
+                                            android.util.Log.e("AgentScreen", "Exception caught in message send", e)
+                                            android.util.Log.e("AgentScreen", "Exception type: ${e.javaClass.simpleName}")
+                                            android.util.Log.e("AgentScreen", "Exception message: ${e.message}")
                                             val errorMessage = AgentMessage(
                                                 text = "❌ Error: ${e.message ?: "Unknown error"}",
                                                 isUser = false,
@@ -813,7 +822,8 @@ suspend fun readLogcatLogs(maxLines: Int = 200): String = withContext(Dispatcher
         // Relevant tags to filter for
         val relevantTags = listOf(
             "GeminiClient", "OllamaClient", "AgentScreen", "ApiProviderManager",
-            "GeminiService", "OkHttp", "Okio", "AndroidRuntime"
+            "GeminiService", "OkHttp", "Okio", "AndroidRuntime", "ApiProvider",
+            "OkHttpClient", "OkHttp3", "Okio", "System.err"
         )
         
         while (reader.readLine().also { line = it } != null && lineCount < maxLines) {
@@ -831,7 +841,11 @@ suspend fun readLogcatLogs(maxLines: Int = 200): String = withContext(Dispatcher
                         logLine.contains("Network", ignoreCase = true) ||
                         logLine.contains("HTTP", ignoreCase = true) ||
                         logLine.contains("Failed", ignoreCase = true) ||
-                        logLine.contains("Timeout", ignoreCase = true)
+                        logLine.contains("Timeout", ignoreCase = true) ||
+                        logLine.contains("streamGenerateContent", ignoreCase = true) ||
+                        logLine.contains("generativelanguage", ignoreCase = true) ||
+                        logLine.contains("API", ignoreCase = true) ||
+                        logLine.contains("api", ignoreCase = true)
                 
                 if (containsRelevantTag || isErrorOrWarning) {
                     logs.appendLine(logLine)
