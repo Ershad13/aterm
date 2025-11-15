@@ -166,9 +166,7 @@ class GeminiClient(
                     val callId = triple.third
                     
                     // Emit ToolResult event for UI
-                    // Use fully qualified name to avoid conflict with GeminiStreamEvent.ToolResult
-                    val toolsToolResult: com.rk.terminal.gemini.tools.ToolResult = toolResult
-                    emit(GeminiStreamEvent.ToolResult(functionCall.name, toolsToolResult))
+                    emit(GeminiStreamEvent.ToolResult(functionCall.name, toolResult))
                     
                     // Format response based on tool result
                     val responseContent = when {
@@ -942,7 +940,7 @@ class GeminiClient(
 sealed class GeminiStreamEvent {
     data class Chunk(val text: String) : GeminiStreamEvent()
     data class ToolCall(val functionCall: FunctionCall) : GeminiStreamEvent()
-    data class ToolResult(val toolName: String, val result: ToolResult) : GeminiStreamEvent()
+    data class ToolResult(val toolName: String, val result: com.rk.terminal.gemini.tools.ToolResult) : GeminiStreamEvent()
     data class Error(val message: String) : GeminiStreamEvent()
     data class KeysExhausted(val message: String) : GeminiStreamEvent()
     object Done : GeminiStreamEvent()
