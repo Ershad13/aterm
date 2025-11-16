@@ -1225,11 +1225,13 @@ class GeminiClient(
     
     /**
      * Simple API call that returns the full response text (non-streaming)
+     * Note: This is a blocking function, should be called from within withContext(Dispatchers.IO)
      */
-    private suspend fun makeApiCallSimple(
+    private fun makeApiCallSimple(
         apiKey: String,
         model: String,
-        requestBody: JSONObject
+        requestBody: JSONObject,
+        useLongTimeout: Boolean = false
     ): String {
         val url = "https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent?key=$apiKey"
         val request = Request.Builder()
@@ -1237,7 +1239,11 @@ class GeminiClient(
             .post(requestBody.toString().toRequestBody("application/json".toMediaType()))
             .build()
         
-        client.newCall(request).execute().use { response ->
+        val httpClient = if (useLongTimeout) longTimeoutClient else client
+        android.util.Log.d("GeminiClient", "makeApiCallSimple: Using ${if (useLongTimeout) "long" else "normal"} timeout client")
+        
+        httpClient.newCall(request).execute().use { response ->
+            android.util.Log.d("GeminiClient", "makeApiCallSimple: Response code: ${response.code}")
             if (!response.isSuccessful) {
                 val errorBody = response.body?.string() ?: "Unknown error"
                 throw IOException("API call failed: ${response.code} - $errorBody")
