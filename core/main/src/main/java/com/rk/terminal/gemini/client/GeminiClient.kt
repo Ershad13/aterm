@@ -33,6 +33,13 @@ class GeminiClient(
         .writeTimeout(60, TimeUnit.SECONDS)
         .build()
     
+    // Client with longer timeout for non-streaming mode (metadata generation can take longer)
+    private val longTimeoutClient = OkHttpClient.Builder()
+        .connectTimeout(30, TimeUnit.SECONDS)
+        .readTimeout(180, TimeUnit.SECONDS) // 3 minutes for complex metadata generation
+        .writeTimeout(60, TimeUnit.SECONDS)
+        .build()
+    
     private val chatHistory = mutableListOf<Content>()
     
     /**
@@ -1046,17 +1053,34 @@ class GeminiClient(
         
         val metadataResult = ApiProviderManager.makeApiCallWithRetry { key ->
             try {
+                android.util.Log.d("GeminiClient", "sendMessageNonStreaming: Making metadata request...")
                 kotlinx.coroutines.withContext(Dispatchers.IO) {
-                    val response = makeApiCallSimple(key, model, metadataRequest)
+                    val response = makeApiCallSimple(key, model, metadataRequest, useLongTimeout = true)
+                    android.util.Log.d("GeminiClient", "sendMessageNonStreaming: Metadata request completed, response length: ${response.length}")
                     Result.success(response)
                 }
+            } catch (e: java.net.SocketTimeoutException) {
+                android.util.Log.e("GeminiClient", "sendMessageNonStreaming: Timeout generating metadata", e)
+                Result.failure(IOException("Request timed out. The metadata generation is taking too long. Try enabling streaming mode or using a simpler request.", e))
             } catch (e: Exception) {
+                android.util.Log.e("GeminiClient", "sendMessageNonStreaming: Error generating metadata", e)
                 Result.failure(e)
             }
         }
         
         if (metadataResult.isFailure) {
-            emit(GeminiStreamEvent.Error(metadataResult.exceptionOrNull()?.message ?: "Failed to generate metadata"))
+            val error = metadataResult.exceptionOrNull()
+            val errorMessage = when {
+                error is IOException && error.message?.contains("timeout", ignoreCase = true) == true -> {
+                    error.message ?: "Request timed out"
+                }
+                error != null -> {
+                    error.message ?: "Failed to generate metadata: ${error.javaClass.simpleName}"
+                }
+                else -> "Failed to generate metadata"
+            }
+            android.util.Log.e("GeminiClient", "sendMessageNonStreaming: Metadata generation failed: $errorMessage")
+            emit(GeminiStreamEvent.Error(errorMessage))
             return@flow
         }
         
@@ -1126,17 +1150,26 @@ class GeminiClient(
             
             val codeResult = ApiProviderManager.makeApiCallWithRetry { key ->
                 try {
+                    android.util.Log.d("GeminiClient", "sendMessageNonStreaming: Generating code for $filePath...")
                     kotlinx.coroutines.withContext(Dispatchers.IO) {
-                        val response = makeApiCallSimple(key, model, codeRequest)
+                        val response = makeApiCallSimple(key, model, codeRequest, useLongTimeout = true)
+                        android.util.Log.d("GeminiClient", "sendMessageNonStreaming: Code generation completed for $filePath")
                         Result.success(response)
                     }
+                } catch (e: java.net.SocketTimeoutException) {
+                    android.util.Log.e("GeminiClient", "sendMessageNonStreaming: Timeout generating code for $filePath", e)
+                    Result.failure(IOException("Request timed out while generating code for $filePath", e))
                 } catch (e: Exception) {
+                    android.util.Log.e("GeminiClient", "sendMessageNonStreaming: Error generating code for $filePath", e)
                     Result.failure(e)
                 }
             }
             
             if (codeResult.isFailure) {
-                android.util.Log.e("GeminiClient", "sendMessageNonStreaming: Failed to generate code for $filePath")
+                val error = codeResult.exceptionOrNull()
+                android.util.Log.e("GeminiClient", "sendMessageNonStreaming: Failed to generate code for $filePath: ${error?.message}")
+                emit(GeminiStreamEvent.Chunk("⚠️ Failed to generate: $filePath (${error?.message ?: "Unknown error"})\n"))
+                onChunk("⚠️ Failed to generate: $filePath (${error?.message ?: "Unknown error"})\n")
                 continue
             }
             
