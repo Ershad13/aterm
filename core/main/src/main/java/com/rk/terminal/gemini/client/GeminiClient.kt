@@ -62,6 +62,19 @@ class GeminiClient(
             return@flow
         }
         
+        // Use internal streaming function
+        emitAll(sendMessageStreamInternal(userMessage, onChunk, onToolCall, onToolResult))
+    }
+    
+    /**
+     * Internal streaming function (bypasses settings check)
+     */
+    private suspend fun sendMessageStreamInternal(
+        userMessage: String,
+        onChunk: (String) -> Unit,
+        onToolCall: (FunctionCall) -> Unit,
+        onToolResult: (String, Map<String, Any>) -> Unit
+    ): Flow<GeminiStreamEvent> = flow {
         // Add user message to history (only if it's not already a function response)
         if (userMessage.isNotEmpty() && !userMessage.startsWith("__CONTINUE__")) {
             chatHistory.add(
@@ -1074,12 +1087,30 @@ class GeminiClient(
                 error is IOException && error.message?.contains("timeout", ignoreCase = true) == true -> {
                     error.message ?: "Request timed out"
                 }
+                error is IOException && (error.message?.contains("503", ignoreCase = true) == true || 
+                                         error.message?.contains("overloaded", ignoreCase = true) == true ||
+                                         error.message?.contains("unavailable", ignoreCase = true) == true) -> {
+                    "Model is temporarily overloaded. Falling back to streaming mode..."
+                }
                 error != null -> {
                     error.message ?: "Failed to generate metadata: ${error.javaClass.simpleName}"
                 }
                 else -> "Failed to generate metadata"
             }
             android.util.Log.e("GeminiClient", "sendMessageNonStreaming: Metadata generation failed: $errorMessage")
+            
+            // If it's a 503/overloaded error, fallback to streaming mode
+            if (error is IOException && (error.message?.contains("503", ignoreCase = true) == true || 
+                                         error.message?.contains("overloaded", ignoreCase = true) == true ||
+                                         error.message?.contains("unavailable", ignoreCase = true) == true)) {
+                android.util.Log.d("GeminiClient", "sendMessageNonStreaming: Falling back to streaming mode due to 503 error")
+                emit(GeminiStreamEvent.Chunk("⚠️ Non-streaming mode unavailable (model overloaded). Switching to streaming mode...\n"))
+                onChunk("⚠️ Non-streaming mode unavailable (model overloaded). Switching to streaming mode...\n")
+                // Fallback to streaming mode (bypass settings check)
+                emitAll(sendMessageStreamInternal(userMessage, onChunk, onToolCall, onToolResult))
+                return@flow
+            }
+            
             emit(GeminiStreamEvent.Error(errorMessage))
             return@flow
         }

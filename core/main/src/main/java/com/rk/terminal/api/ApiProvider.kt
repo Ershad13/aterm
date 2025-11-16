@@ -157,7 +157,7 @@ object ApiProviderManager {
         currentKeyIndex = 0
     }
     
-    // Check if error is rate limit related
+    // Check if error is rate limit or service unavailable related (retryable)
     fun isRateLimitError(error: Throwable?): Boolean {
         if (error == null) return false
         val message = error.message?.lowercase() ?: ""
@@ -165,6 +165,9 @@ object ApiProviderManager {
                message.contains("rpm") ||
                message.contains("rpd") ||
                message.contains("429") ||
+               message.contains("503") ||
+               message.contains("unavailable") ||
+               message.contains("overloaded") ||
                message.contains("quota") ||
                message.contains("too many requests")
     }
