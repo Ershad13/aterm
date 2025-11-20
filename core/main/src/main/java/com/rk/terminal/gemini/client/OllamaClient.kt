@@ -6,6 +6,7 @@ import com.rk.terminal.gemini.tools.*
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.withContext
 import okhttp3.*
 import okhttp3.MediaType.Companion.toMediaType
@@ -34,6 +35,10 @@ class OllamaClient(
     
     /**
      * Send a message and get streaming response
+     * 
+     * This function returns a Flow that runs entirely on the IO dispatcher to avoid
+     * NetworkOnMainThreadException. The flow builder itself is moved to IO using flowOn(),
+     * ensuring all network operations happen off the main thread.
      */
     suspend fun sendMessageStream(
         userMessage: String,
@@ -41,19 +46,24 @@ class OllamaClient(
         onToolCall: (FunctionCall) -> Unit,
         onToolResult: (String, Map<String, Any>) -> Unit
     ): Flow<GeminiStreamEvent> = flow {
-        // Add user message to history
-        chatHistory.add(mapOf("role" to "user", "content" to userMessage))
+        // Add user message to history (thread-safe operation on mutable list)
+        synchronized(chatHistory) {
+            chatHistory.add(mapOf("role" to "user", "content" to userMessage))
+        }
         
         try {
-            // For now, simple streaming chat - tool support can be added later
+            // Build request body
             val requestBody = JSONObject().apply {
                 put("model", model)
                 put("messages", JSONArray().apply {
-                    chatHistory.forEach { msg ->
-                        put(JSONObject().apply {
-                            put("role", msg["role"])
-                            put("content", msg["content"])
-                        })
+                    // Access chat history in synchronized block
+                    synchronized(chatHistory) {
+                        chatHistory.forEach { msg ->
+                            put(JSONObject().apply {
+                                put("role", msg["role"])
+                                put("content", msg["content"])
+                            })
+                        }
                     }
                 })
                 put("stream", true)
@@ -64,47 +74,52 @@ class OllamaClient(
                 .post(requestBody.toString().toRequestBody("application/json".toMediaType()))
                 .build()
             
-            // Execute network call on IO dispatcher to avoid NetworkOnMainThreadException
-            withContext(Dispatchers.IO) {
-                client.newCall(request).execute().use { response ->
-                    if (!response.isSuccessful) {
-                        val errorBody = try {
-                            response.body?.string() ?: "Unknown error"
-                        } catch (e: Exception) {
-                            "Failed to read error body: ${e.message}"
-                        }
-                        emit(GeminiStreamEvent.Error("Ollama API error: ${response.code} - $errorBody"))
-                        return@withContext
+            // Execute network call - flow is already on IO dispatcher due to flowOn()
+            client.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) {
+                    val errorBody = try {
+                        response.body?.string() ?: "Unknown error"
+                    } catch (e: Exception) {
+                        "Failed to read error body: ${e.message}"
                     }
-                    
-                    response.body?.source()?.let { source ->
-                        var buffer = ""
-                        while (true) {
-                            val line = source.readUtf8Line() ?: break
-                            if (line.isBlank()) continue
+                    emit(GeminiStreamEvent.Error("Ollama API error: ${response.code} - $errorBody"))
+                    return@flow
+                }
+                
+                response.body?.source()?.let { source ->
+                    var buffer = ""
+                    while (true) {
+                        val line = source.readUtf8Line() ?: break
+                        if (line.isBlank()) continue
+                        
+                        try {
+                            val json = JSONObject(line)
+                            val message = json.optJSONObject("message")
+                            val content = message?.optString("content", "") ?: ""
                             
-                            try {
-                                val json = JSONObject(line)
-                                val message = json.optJSONObject("message")
-                                val content = message?.optString("content", "") ?: ""
-                                
-                                if (content.isNotEmpty()) {
-                                    buffer += content
+                            if (content.isNotEmpty()) {
+                                buffer += content
+                                // Emit event immediately (flow collection handles threading)
+                                emit(GeminiStreamEvent.Chunk(content))
+                                // Dispatch callback to main thread for immediate UI updates
+                                // Note: This is called from IO thread, so we dispatch to Main
+                                withContext(Dispatchers.Main) {
                                     onChunk(content)
-                                    emit(GeminiStreamEvent.Chunk(content))
                                 }
-                                
-                                if (json.optBoolean("done", false)) {
-                                    // Add assistant response to history
+                            }
+                            
+                            if (json.optBoolean("done", false)) {
+                                // Add assistant response to history (thread-safe)
+                                synchronized(chatHistory) {
                                     chatHistory.add(mapOf("role" to "assistant", "content" to buffer))
-                                    break
                                 }
-                            } catch (e: Exception) {
-                                // Skip malformed JSON
-                                android.util.Log.d("OllamaClient", "Failed to parse JSON: ${e.message}")
-                                emit(GeminiStreamEvent.Error("Failed to parse Ollama response: ${e.message ?: "Unknown error"}"))
                                 break
                             }
+                        } catch (e: Exception) {
+                            // Skip malformed JSON
+                            android.util.Log.d("OllamaClient", "Failed to parse JSON: ${e.message}")
+                            emit(GeminiStreamEvent.Error("Failed to parse Ollama response: ${e.message ?: "Unknown error"}"))
+                            break
                         }
                     }
                 }
@@ -118,11 +133,15 @@ class OllamaClient(
             android.util.Log.e("OllamaClient", "Error", e)
             emit(GeminiStreamEvent.Error("Error: $errorMsg"))
         }
-    }
+    }.flowOn(Dispatchers.IO) // Move entire flow execution to IO dispatcher
     
     fun resetChat() {
-        chatHistory.clear()
+        synchronized(chatHistory) {
+            chatHistory.clear()
+        }
     }
     
-    fun getHistory(): List<Map<String, Any>> = chatHistory.toList()
+    fun getHistory(): List<Map<String, Any>> = synchronized(chatHistory) {
+        chatHistory.toList()
+    }
 }

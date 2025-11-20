@@ -7,6 +7,8 @@ import com.rk.terminal.api.ApiProviderManager.KeysExhaustedException
 import com.rk.terminal.gemini.tools.DeclarativeTool
 import com.rk.terminal.gemini.core.*
 import com.rk.terminal.gemini.tools.*
+import com.rk.terminal.gemini.SystemInfoService
+import java.io.File
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
@@ -59,7 +61,16 @@ class GeminiClient(
         // Check if streaming is enabled
         if (!Settings.enable_streaming) {
             android.util.Log.d("GeminiClient", "sendMessageStream: Streaming disabled, using non-streaming mode")
-            emitAll(sendMessageNonStreaming(userMessage, onChunk, onToolCall, onToolResult))
+            
+            // Detect intent: create new project vs debug/upgrade existing
+            val intent = detectIntent(userMessage)
+            android.util.Log.d("GeminiClient", "sendMessageStream: Detected intent: $intent")
+            
+            if (intent == IntentType.DEBUG_UPGRADE) {
+                emitAll(sendMessageNonStreamingReverse(userMessage, onChunk, onToolCall, onToolResult))
+            } else {
+                emitAll(sendMessageNonStreaming(userMessage, onChunk, onToolCall, onToolResult))
+            }
             return@flow
         }
         
@@ -677,6 +688,10 @@ class GeminiClient(
         val systemInstruction = buildString {
             append("You are an interactive CLI agent specializing in software engineering tasks. Your primary goal is to help users safely and efficiently, adhering strictly to the following instructions and utilizing your available tools.\n\n")
             
+            // Add system information
+            append(SystemInfoService.generateSystemContext())
+            append("\n")
+            
             append("# Core Mandates\n\n")
             append("- **Conventions:** Rigorously adhere to existing project conventions when reading or modifying code. Analyze surrounding code, tests, and configuration first.\n")
             append("- **Libraries/Frameworks:** NEVER assume a library/framework is available or appropriate. Verify its established usage within the project before employing it.\n")
@@ -722,7 +737,14 @@ class GeminiClient(
             
             append("## Tool Usage\n")
             append("- **Parallelism:** Execute multiple independent tool calls in parallel when feasible.\n")
-            append("- **Command Execution:** Use shell tools for running shell commands.\n\n")
+            append("- **Command Execution:** Use shell tools for running shell commands.\n")
+            append("- **Web Search:** ALWAYS use web search tools (google_web_search or custom_web_search) when:\n")
+            append("  - The user asks about current information, recent events, or real-world data\n")
+            append("  - You need to find documentation, tutorials, or examples for libraries/frameworks\n")
+            append("  - The user asks questions that require up-to-date information from the internet\n")
+            append("  - You need to verify facts, find solutions to problems, or gather information\n")
+            append("  - The task involves external APIs, services, or online resources\n")
+            append("  **IMPORTANT:** If you're unsure whether information is current or need to verify something, use web search. Don't rely on potentially outdated training data.\n\n")
             
             append("# Final Reminder\n")
             append("Your core function is efficient and safe assistance. Balance extreme conciseness with the crucial need for clarity. Always prioritize user control and project conventions. Never make assumptions about the contents of files; instead use read tools to ensure you aren't making broad assumptions.\n\n")
@@ -1006,9 +1028,57 @@ class GeminiClient(
     }
     
     /**
-     * Non-streaming mode: Metadata-first approach
-     * 1. First request: Generate metadata (file structure, classes, functions, imports, relationships)
-     * 2. Second request: Generate code using metadata tags
+     * Intent types for non-streaming mode
+     */
+    private enum class IntentType {
+        CREATE_NEW,
+        DEBUG_UPGRADE
+    }
+    
+    /**
+     * Detect user intent: create new project or debug/upgrade existing
+     */
+    private suspend fun detectIntent(userMessage: String): IntentType {
+        val debugKeywords = listOf(
+            "debug", "fix", "repair", "error", "bug", "issue", "problem",
+            "upgrade", "update", "improve", "refactor", "modify", "change",
+            "enhance", "optimize", "correct", "resolve", "solve"
+        )
+        
+        val createKeywords = listOf(
+            "create", "new", "build", "generate", "make", "start", "init",
+            "setup", "scaffold", "bootstrap"
+        )
+        
+        val messageLower = userMessage.lowercase()
+        
+        val debugScore = debugKeywords.count { messageLower.contains(it) }
+        val createScore = createKeywords.count { messageLower.contains(it) }
+        
+        // Check if workspace has existing files
+        val workspaceDir = File(workspaceRoot)
+        val hasExistingFiles = workspaceDir.exists() && 
+            workspaceDir.listFiles()?.any { it.isFile && !it.name.startsWith(".") } == true
+        
+        // If workspace has files and debug keywords are present, likely debug/upgrade
+        if (hasExistingFiles && (debugScore > createScore || debugScore > 0)) {
+            return IntentType.DEBUG_UPGRADE
+        }
+        
+        // If create keywords dominate, likely create new
+        if (createScore > debugScore && !hasExistingFiles) {
+            return IntentType.CREATE_NEW
+        }
+        
+        // Default: if workspace has files, assume debug/upgrade
+        return if (hasExistingFiles) IntentType.DEBUG_UPGRADE else IntentType.CREATE_NEW
+    }
+    
+    /**
+     * Non-streaming mode: Enhanced 3-phase approach
+     * Phase 1: Get list of all files needed
+     * Phase 2: Get comprehensive metadata for all files (relationships, imports, classes, functions, etc.)
+     * Phase 3: Generate each file separately with full code using only the metadata provided
      */
     private suspend fun sendMessageNonStreaming(
         userMessage: String,
@@ -1016,6 +1086,7 @@ class GeminiClient(
         onToolCall: (FunctionCall) -> Unit,
         onToolResult: (String, Map<String, Any>) -> Unit
     ): Flow<GeminiStreamEvent> = flow {
+        val signal = CancellationSignal() // Create local signal for non-streaming mode
         android.util.Log.d("GeminiClient", "sendMessageNonStreaming: Starting non-streaming mode")
         
         // Add user message to history
@@ -1027,124 +1098,196 @@ class GeminiClient(
         )
         
         val model = ApiProviderManager.getCurrentModel()
+        val systemInfo = SystemInfoService.detectSystemInfo()
+        val systemContext = SystemInfoService.generateSystemContext()
         
-        // Step 1: Request metadata generation
-        val metadataPrompt = """
-            Analyze the user's request and generate a comprehensive metadata structure for all files that need to be created.
+        // Initialize todos for tracking
+        var currentTodos = mutableListOf<Todo>()
+        val updateTodos = { todos: List<Todo> ->
+            currentTodos = todos.toMutableList()
+            val todoCall = FunctionCall(
+                name = "write_todos",
+                args = mapOf("todos" to todos.map { mapOf("description" to it.description, "status" to it.status.name) })
+            )
+            emit(GeminiStreamEvent.ToolCall(todoCall))
+            onToolCall(todoCall)
+            try {
+                val todoResult = executeToolSync("write_todos", todoCall.args)
+                emit(GeminiStreamEvent.ToolResult("write_todos", todoResult))
+                onToolResult("write_todos", todoCall.args)
+            } catch (e: Exception) {
+                android.util.Log.e("GeminiClient", "Failed to update todos", e)
+            }
+        }
+        
+        // Phase 1: Get list of all files needed
+        emit(GeminiStreamEvent.Chunk("📋 Phase 1: Identifying files needed...\n"))
+        onChunk("📋 Phase 1: Identifying files needed...\n")
+        
+        updateTodos(listOf(
+            Todo("Phase 1: Get file list", TodoStatus.IN_PROGRESS),
+            Todo("Phase 2: Get metadata for all files", TodoStatus.PENDING),
+            Todo("Phase 3: Generate code for each file", TodoStatus.PENDING)
+        ))
+        
+        val fileListPrompt = """
+            $systemContext
             
-            For each file, provide:
-            - file_path: The relative path of the file
-            - classes: List of class names in this file
-            - functions: List of function names in this file
-            - imports: List of imports (use relative paths or metadata tags)
-            - metadata_tags: Unique tags for this file (e.g., "db", "auth", "api", "ui")
-            - relationships: List of files this file depends on (use metadata tags)
-            - description: Brief description of the file's purpose
+            Analyze the user's request and provide a complete list of ALL files that need to be created.
             
-            Format your response as a JSON array of file metadata objects.
+            For each file, provide ONLY:
+            - file_path: The relative path from the project root
+            
+            Format your response as a JSON array of file objects with only the file_path field.
             Example format:
             [
-              {
-                "file_path": "server.js",
-                "classes": ["Server", "Database"],
-                "functions": ["startServer", "initDB"],
-                "imports": ["./config", "./routes"],
-                "metadata_tags": ["server", "main"],
-                "relationships": ["config.js", "routes.js"],
-                "description": "Main server file"
-              }
+              {"file_path": "src/main.js"},
+              {"file_path": "src/config.js"},
+              {"file_path": "package.json"}
             ]
+            
+            Be comprehensive - include all files needed: source files, config files, documentation, tests, etc.
             
             User request: $userMessage
         """.trimIndent()
         
-        emit(GeminiStreamEvent.Chunk("📋 Generating project metadata...\n"))
-        onChunk("📋 Generating project metadata...\n")
-        
-        // Make metadata request (non-streaming, no tools)
-        val metadataRequest = buildRequest(metadataPrompt, model)
-        metadataRequest.remove("tools") // Remove tools for metadata generation
-        
-        // Retry metadata generation with exponential backoff for 503 errors
-        var metadataResult: Result<String>? = null
-        var retryCount = 0
-        val maxRetries = 5
-        var lastError: Throwable? = null
-        
-        while (retryCount < maxRetries && metadataResult?.isSuccess != true) {
-            if (retryCount > 0) {
-                val backoffMs = minOf(1000L * (1 shl retryCount), 30000L) // Exponential backoff, max 30s
-                android.util.Log.d("GeminiClient", "sendMessageNonStreaming: Retrying metadata request (attempt ${retryCount + 1}/$maxRetries) after ${backoffMs}ms...")
-                emit(GeminiStreamEvent.Chunk("⏳ Retrying metadata generation (attempt ${retryCount + 1}/$maxRetries)...\n"))
-                onChunk("⏳ Retrying metadata generation (attempt ${retryCount + 1}/$maxRetries)...\n")
-                kotlinx.coroutines.delay(backoffMs)
-            }
-            
-            metadataResult = ApiProviderManager.makeApiCallWithRetry { key ->
-                try {
-                    android.util.Log.d("GeminiClient", "sendMessageNonStreaming: Making metadata request (attempt ${retryCount + 1})...")
-                    kotlinx.coroutines.withContext(Dispatchers.IO) {
-                        val response = makeApiCallSimple(key, model, metadataRequest, useLongTimeout = true)
-                        android.util.Log.d("GeminiClient", "sendMessageNonStreaming: Metadata request completed, response length: ${response.length}")
-                        Result.success(response)
-                    }
-                } catch (e: java.net.SocketTimeoutException) {
-                    android.util.Log.e("GeminiClient", "sendMessageNonStreaming: Timeout generating metadata", e)
-                    lastError = e
-                    Result.failure(IOException("Request timed out. The metadata generation is taking too long.", e))
-                } catch (e: Exception) {
-                    android.util.Log.e("GeminiClient", "sendMessageNonStreaming: Error generating metadata", e)
-                    lastError = e
-                    Result.failure(e)
-                }
-            }
-            
-            retryCount++
-            
-            // If it's a 503/overloaded error, retry
-            if (metadataResult.isFailure) {
-                val error = metadataResult.exceptionOrNull()
-                if (error is IOException && (error.message?.contains("503", ignoreCase = true) == true || 
-                                             error.message?.contains("overloaded", ignoreCase = true) == true ||
-                                             error.message?.contains("unavailable", ignoreCase = true) == true)) {
-                    android.util.Log.d("GeminiClient", "sendMessageNonStreaming: Got 503 error, will retry (attempt $retryCount/$maxRetries)")
-                    lastError = error
-                    continue // Retry
-                } else {
-                    // Non-retryable error, break
-                    break
-                }
-            }
+        // Get file list with retry mechanism
+        val fileListRequest = JSONObject().apply {
+            put("contents", JSONArray().apply {
+                put(JSONObject().apply {
+                    put("role", "user")
+                    put("parts", JSONArray().apply {
+                        put(JSONObject().apply {
+                            put("text", fileListPrompt)
+                        })
+                    })
+                })
+            })
+            put("systemInstruction", JSONObject().apply {
+                put("parts", JSONArray().apply {
+                    put(JSONObject().apply {
+                        put("text", SystemInfoService.generateSystemContext())
+                    })
+                })
+            })
         }
         
-        if (metadataResult?.isFailure == true) {
-            val error = metadataResult.exceptionOrNull() ?: lastError
-            val errorMessage = when {
-                error is IOException && error.message?.contains("timeout", ignoreCase = true) == true -> {
-                    error.message ?: "Request timed out"
-                }
-                error is IOException && (error.message?.contains("503", ignoreCase = true) == true || 
-                                         error.message?.contains("overloaded", ignoreCase = true) == true ||
-                                         error.message?.contains("unavailable", ignoreCase = true) == true) -> {
-                    "Model is temporarily overloaded. Tried $retryCount times. Please try again in a moment."
-                }
-                error != null -> {
-                    error.message ?: "Failed to generate metadata: ${error.javaClass.simpleName}"
-                }
-                else -> "Failed to generate metadata"
-            }
-            android.util.Log.e("GeminiClient", "sendMessageNonStreaming: Metadata generation failed after $retryCount attempts: $errorMessage")
-            emit(GeminiStreamEvent.Error(errorMessage))
+        var fileListResult = makeApiCallWithRetryAndCorrection(
+            model, fileListRequest, "file list", signal, updateOutput, emit, onChunk
+        )
+        
+        if (fileListResult == null) {
+            emit(GeminiStreamEvent.Error("Failed to get file list after retries"))
             return@flow
         }
         
-        val metadataText = metadataResult.getOrNull() ?: ""
-        emit(GeminiStreamEvent.Chunk("✅ Metadata generated\n"))
-        onChunk("✅ Metadata generated\n")
+        // Parse file list
+        val fileListJson = try {
+            val jsonStart = fileListResult.indexOf('[')
+            val jsonEnd = fileListResult.lastIndexOf(']') + 1
+            if (jsonStart >= 0 && jsonEnd > jsonStart) {
+                JSONArray(fileListResult.substring(jsonStart, jsonEnd))
+            } else {
+                null
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("GeminiClient", "Failed to parse file list", e)
+            null
+        }
         
-        // Parse metadata (try to extract JSON from response)
+        if (fileListJson == null || fileListJson.length() == 0) {
+            emit(GeminiStreamEvent.Error("Failed to parse file list or no files found"))
+            return@flow
+        }
+        
+        val filePaths = (0 until fileListJson.length()).mapNotNull { i ->
+            try {
+                fileListJson.getJSONObject(i).getString("file_path")
+            } catch (e: Exception) {
+                null
+            }
+        }
+        
+        emit(GeminiStreamEvent.Chunk("✅ Found ${filePaths.size} files to create\n"))
+        onChunk("✅ Found ${filePaths.size} files to create\n")
+        
+        updateTodos(listOf(
+            Todo("Phase 1: Get file list", TodoStatus.COMPLETED),
+            Todo("Phase 2: Get metadata for all files", TodoStatus.IN_PROGRESS),
+            Todo("Phase 3: Generate code for each file", TodoStatus.PENDING)
+        ))
+        
+        // Phase 2: Get comprehensive metadata for all files
+        emit(GeminiStreamEvent.Chunk("📊 Phase 2: Generating metadata for all files...\n"))
+        onChunk("📊 Phase 2: Generating metadata for all files...\n")
+        
+        val metadataPrompt = """
+            $systemContext
+            
+            Now that we know all the files that need to be created, generate comprehensive metadata for ALL files.
+            
+            Files to create:
+            ${filePaths.joinToString("\n") { "- $it" }}
+            
+            For each file, provide COMPREHENSIVE metadata:
+            - file_path: The relative path from project root
+            - classes: List of all class names in this file (empty array if none)
+            - functions: List of all function/method names in this file (empty array if none)
+            - imports: List of all imports/dependencies (use relative paths or file names)
+            - exports: List of what this file exports (classes, functions, constants, etc.)
+            - metadata_tags: Unique tags for categorization (e.g., "db", "auth", "api", "ui", "config", "test")
+            - relationships: List of other files this file depends on (use file_path values)
+            - dependencies: List of external dependencies/packages needed
+            - description: Detailed description of the file's purpose and role
+            - expectations: What this file should accomplish and how it fits in the project
+            - file_type: Type of file (e.g., "javascript", "typescript", "python", "html", "css", "json", "config")
+            
+            For HTML files, also include:
+            - links: CSS files, JS files, images, etc. referenced
+            - ids: HTML element IDs used
+            - classes: CSS classes used
+            
+            For CSS files, also include:
+            - selectors: CSS selectors defined
+            - imports: @import statements
+            - variables: CSS variables defined
+            
+            Format your response as a JSON array of file metadata objects.
+            
+            User's original request: $userMessage
+        """.trimIndent()
+        
+        val metadataRequest = JSONObject().apply {
+            put("contents", JSONArray().apply {
+                put(JSONObject().apply {
+                    put("role", "user")
+                    put("parts", JSONArray().apply {
+                        put(JSONObject().apply {
+                            put("text", metadataPrompt)
+                        })
+                    })
+                })
+            })
+            put("systemInstruction", JSONObject().apply {
+                put("parts", JSONArray().apply {
+                    put(JSONObject().apply {
+                        put("text", SystemInfoService.generateSystemContext())
+                    })
+                })
+            })
+        }
+        
+        var metadataText = makeApiCallWithRetryAndCorrection(
+            model, metadataRequest, "metadata", signal, updateOutput, emit, onChunk
+        )
+        
+        if (metadataText == null) {
+            emit(GeminiStreamEvent.Error("Failed to generate metadata after retries"))
+            return@flow
+        }
+        
+        // Parse metadata
         val metadataJson = try {
-            // Try to find JSON array in the response
             val jsonStart = metadataText.indexOf('[')
             val jsonEnd = metadataText.lastIndexOf(']') + 1
             if (jsonStart >= 0 && jsonEnd > jsonStart) {
@@ -1153,116 +1296,142 @@ class GeminiClient(
                 null
             }
         } catch (e: Exception) {
-            android.util.Log.e("GeminiClient", "sendMessageNonStreaming: Failed to parse metadata", e)
+            android.util.Log.e("GeminiClient", "Failed to parse metadata", e)
             null
         }
         
-        if (metadataJson == null) {
-            emit(GeminiStreamEvent.Error("Failed to parse metadata. Please try again or enable streaming mode."))
+        if (metadataJson == null || metadataJson.length() != filePaths.size) {
+            emit(GeminiStreamEvent.Error("Failed to parse metadata or metadata count mismatch"))
             return@flow
         }
         
-        // Step 2: Generate code for each file using metadata
-        emit(GeminiStreamEvent.Chunk("💻 Generating code files...\n"))
-        onChunk("💻 Generating code files...\n")
+        emit(GeminiStreamEvent.Chunk("✅ Metadata generated for ${metadataJson.length()} files\n"))
+        onChunk("✅ Metadata generated for ${metadataJson.length()} files\n")
+        
+        updateTodos(listOf(
+            Todo("Phase 1: Get file list", TodoStatus.COMPLETED),
+            Todo("Phase 2: Get metadata for all files", TodoStatus.COMPLETED),
+            Todo("Phase 3: Generate code for each file", TodoStatus.IN_PROGRESS)
+        ))
+        
+        // Phase 3: Generate each file separately with full code
+        emit(GeminiStreamEvent.Chunk("💻 Phase 3: Generating code for each file...\n"))
+        onChunk("💻 Phase 3: Generating code for each file...\n")
         
         val files = mutableListOf<Pair<String, String>>() // file_path to content
+        val metadataMap = mutableMapOf<String, JSONObject>()
         
+        // Build metadata map for easy lookup
         for (i in 0 until metadataJson.length()) {
             val fileMeta = metadataJson.getJSONObject(i)
             val filePath = fileMeta.getString("file_path")
-            val metadataTags = if (fileMeta.has("metadata_tags")) {
-                fileMeta.getJSONArray("metadata_tags").let { tags ->
-                    (0 until tags.length()).map { tags.getString(it) }
+            metadataMap[filePath] = fileMeta
+        }
+        
+        // Generate code for each file
+        for ((fileIndex, filePath) in filePaths.withIndex()) {
+            val fileMeta = metadataMap[filePath] ?: continue
+            
+            emit(GeminiStreamEvent.Chunk("📝 Generating: $filePath (${fileIndex + 1}/${filePaths.size})\n"))
+            onChunk("📝 Generating: $filePath (${fileIndex + 1}/${filePaths.size})\n")
+            
+            // Build comprehensive code generation prompt
+            val classes = if (fileMeta.has("classes")) {
+                fileMeta.getJSONArray("classes").let { arr ->
+                    (0 until arr.length()).map { arr.getString(it) }
+                }
+            } else emptyList()
+            
+            val functions = if (fileMeta.has("functions")) {
+                fileMeta.getJSONArray("functions").let { arr ->
+                    (0 until arr.length()).map { arr.getString(it) }
+                }
+            } else emptyList()
+            
+            val imports = if (fileMeta.has("imports")) {
+                fileMeta.getJSONArray("imports").let { arr ->
+                    (0 until arr.length()).map { arr.getString(it) }
+                }
+            } else emptyList()
+            
+            val exports = if (fileMeta.has("exports")) {
+                fileMeta.getJSONArray("exports").let { arr ->
+                    (0 until arr.length()).map { arr.getString(it) }
                 }
             } else emptyList()
             
             val relationships = if (fileMeta.has("relationships")) {
-                fileMeta.getJSONArray("relationships").let { rels ->
-                    (0 until rels.length()).map { rels.getString(it) }
+                fileMeta.getJSONArray("relationships").let { arr ->
+                    (0 until arr.length()).map { arr.getString(it) }
                 }
             } else emptyList()
             
-            // Build code generation prompt with metadata context
+            val description = fileMeta.optString("description", "")
+            val expectations = fileMeta.optString("expectations", "")
+            val fileType = fileMeta.optString("file_type", "")
+            
             val codePrompt = """
-                Generate the complete code for file: $filePath
-            
-                Metadata:
-                - Tags: ${metadataTags.joinToString(", ")}
-                - Relationships: ${relationships.joinToString(", ")}
-                - Description: ${fileMeta.optString("description", "")}
-            
-                When referencing other files, use their metadata tags or relative paths.
-                Generate complete, working code that integrates with the related files.
-            
-                User's original request: $userMessage
+                $systemContext
+                
+                Generate the COMPLETE, FULL code for file: $filePath
+                
+                **CRITICAL INSTRUCTIONS:**
+                - You MUST use ONLY the metadata provided below
+                - You MUST include ALL classes, functions, imports, and exports specified
+                - You MUST respect the relationships and dependencies
+                - Generate complete, working, production-ready code
+                - Do NOT use placeholders or TODOs unless explicitly needed
+                - Ensure all imports are correct and match the metadata
+                - Follow the file type conventions: $fileType
+                
+                **File Metadata:**
+                - Description: $description
+                - Expectations: $expectations
+                - File Type: $fileType
+                - Classes to include: ${classes.joinToString(", ")}
+                - Functions to include: ${functions.joinToString(", ")}
+                - Imports to use: ${imports.joinToString(", ")}
+                - Exports: ${exports.joinToString(", ")}
+                - Related files: ${relationships.joinToString(", ")}
+                
+                **Project Context:**
+                - User's original request: $userMessage
+                - All files in project: ${filePaths.joinToString(", ")}
+                
+                Generate the complete code now. Return ONLY the code, no explanations or markdown formatting.
             """.trimIndent()
             
             // Make code generation request
-            val codeRequest = buildRequest(codePrompt, model)
-            codeRequest.remove("tools") // No tools for code generation
-            
-            // Retry code generation with exponential backoff for 503 errors
-            var codeResult: Result<String>? = null
-            var codeRetryCount = 0
-            val maxCodeRetries = 3
-            var codeLastError: Throwable? = null
-            
-            while (codeRetryCount < maxCodeRetries && codeResult?.isSuccess != true) {
-                if (codeRetryCount > 0) {
-                    val backoffMs = minOf(1000L * (1 shl codeRetryCount), 20000L) // Exponential backoff, max 20s
-                    android.util.Log.d("GeminiClient", "sendMessageNonStreaming: Retrying code generation for $filePath (attempt ${codeRetryCount + 1}/$maxCodeRetries) after ${backoffMs}ms...")
-                    emit(GeminiStreamEvent.Chunk("⏳ Retrying code generation for $filePath (attempt ${codeRetryCount + 1}/$maxCodeRetries)...\n"))
-                    onChunk("⏳ Retrying code generation for $filePath (attempt ${codeRetryCount + 1}/$maxCodeRetries)...\n")
-                    kotlinx.coroutines.delay(backoffMs)
-                }
-                
-                codeResult = ApiProviderManager.makeApiCallWithRetry { key ->
-                    try {
-                        android.util.Log.d("GeminiClient", "sendMessageNonStreaming: Generating code for $filePath (attempt ${codeRetryCount + 1})...")
-                        kotlinx.coroutines.withContext(Dispatchers.IO) {
-                            val response = makeApiCallSimple(key, model, codeRequest, useLongTimeout = true)
-                            android.util.Log.d("GeminiClient", "sendMessageNonStreaming: Code generation completed for $filePath")
-                            Result.success(response)
-                        }
-                    } catch (e: java.net.SocketTimeoutException) {
-                        android.util.Log.e("GeminiClient", "sendMessageNonStreaming: Timeout generating code for $filePath", e)
-                        codeLastError = e
-                        Result.failure(IOException("Request timed out while generating code for $filePath", e))
-                    } catch (e: Exception) {
-                        android.util.Log.e("GeminiClient", "sendMessageNonStreaming: Error generating code for $filePath", e)
-                        codeLastError = e
-                        Result.failure(e)
-                    }
-                }
-                
-                codeRetryCount++
-                
-                // If it's a 503/overloaded error, retry
-                if (codeResult.isFailure) {
-                    val error = codeResult.exceptionOrNull()
-                    if (error is IOException && (error.message?.contains("503", ignoreCase = true) == true || 
-                                                 error.message?.contains("overloaded", ignoreCase = true) == true ||
-                                                 error.message?.contains("unavailable", ignoreCase = true) == true)) {
-                        android.util.Log.d("GeminiClient", "sendMessageNonStreaming: Got 503 error for $filePath, will retry (attempt $codeRetryCount/$maxCodeRetries)")
-                        codeLastError = error
-                        continue // Retry
-                    } else {
-                        // Non-retryable error, break
-                        break
-                    }
-                }
+            val codeRequest = JSONObject().apply {
+                put("contents", JSONArray().apply {
+                    put(JSONObject().apply {
+                        put("role", "user")
+                        put("parts", JSONArray().apply {
+                            put(JSONObject().apply {
+                                put("text", codePrompt)
+                            })
+                        })
+                    })
+                })
+                put("systemInstruction", JSONObject().apply {
+                    put("parts", JSONArray().apply {
+                        put(JSONObject().apply {
+                            put("text", SystemInfoService.generateSystemContext())
+                        })
+                    })
+                })
             }
             
-            if (codeResult?.isFailure == true) {
-                val error = codeResult.exceptionOrNull() ?: codeLastError
-                android.util.Log.e("GeminiClient", "sendMessageNonStreaming: Failed to generate code for $filePath after $codeRetryCount attempts: ${error?.message}")
-                emit(GeminiStreamEvent.Chunk("⚠️ Failed to generate: $filePath (${error?.message ?: "Unknown error"})\n"))
-                onChunk("⚠️ Failed to generate: $filePath (${error?.message ?: "Unknown error"})\n")
+            val codeContent = makeApiCallWithRetryAndCorrection(
+                model, codeRequest, "code for $filePath", signal, updateOutput, emit, onChunk
+            )
+            
+            if (codeContent == null) {
+                emit(GeminiStreamEvent.Chunk("⚠️ Failed to generate: $filePath\n"))
+                onChunk("⚠️ Failed to generate: $filePath\n")
                 continue
             }
             
-            val codeContent = codeResult.getOrNull() ?: ""
             // Extract code (remove markdown code blocks if present)
             val cleanCode = codeContent
                 .replace(Regex("```[\\w]*\\n"), "")
@@ -1307,9 +1476,830 @@ class GeminiClient(
             onToolResult(functionCall.name, functionCall.args)
         }
         
+        updateTodos(listOf(
+            Todo("Phase 1: Get file list", TodoStatus.COMPLETED),
+            Todo("Phase 2: Get metadata for all files", TodoStatus.COMPLETED),
+            Todo("Phase 3: Generate code for each file", TodoStatus.COMPLETED)
+        ))
+        
         emit(GeminiStreamEvent.Chunk("\n✨ Project generation complete!\n"))
         onChunk("\n✨ Project generation complete!\n")
         emit(GeminiStreamEvent.Done)
+    }
+    
+    /**
+     * Helper function for API calls with retry and AI-powered error correction
+     * Handles bash command failures by asking AI to correct them
+     */
+    private suspend fun makeApiCallWithRetryAndCorrection(
+        model: String,
+        requestBody: JSONObject,
+        operationName: String,
+        signal: CancellationSignal?,
+        updateOutput: ((String) -> Unit)?,
+        emit: (GeminiStreamEvent) -> Unit,
+        onChunk: (String) -> Unit
+    ): String? {
+        var retryCount = 0
+        val maxRetries = 3
+        var lastError: Throwable? = null
+        var lastResponse: String? = null
+        
+        while (retryCount < maxRetries && signal?.isAborted() != true) {
+            if (retryCount > 0) {
+                val backoffMs = minOf(1000L * (1 shl retryCount), 20000L)
+                emit(GeminiStreamEvent.Chunk("⏳ Retrying $operationName (attempt ${retryCount + 1}/$maxRetries)...\n"))
+                onChunk("⏳ Retrying $operationName (attempt ${retryCount + 1}/$maxRetries)...\n")
+                kotlinx.coroutines.delay(backoffMs)
+            }
+            
+            val result = ApiProviderManager.makeApiCallWithRetry { key ->
+                try {
+                    kotlinx.coroutines.withContext(Dispatchers.IO) {
+                        val response = makeApiCallSimple(key, model, requestBody, useLongTimeout = true)
+                        Result.success(response)
+                    }
+                } catch (e: Exception) {
+                    lastError = e
+                    Result.failure(e)
+                }
+            }
+            
+            if (result.isSuccess) {
+                lastResponse = result.getOrNull()
+                return lastResponse
+            }
+            
+            val error = result.exceptionOrNull() ?: lastError
+            retryCount++
+            
+            // Check if it's a bash command error that can be corrected
+            val errorMessage = error?.message ?: ""
+            if (errorMessage.contains("command not found", ignoreCase = true) ||
+                errorMessage.contains("No such file or directory", ignoreCase = true) ||
+                errorMessage.contains("Permission denied", ignoreCase = true) ||
+                (errorMessage.contains("exit code") && errorMessage.contains("non-zero", ignoreCase = true))) {
+                
+                // Ask AI to correct the command
+                emit(GeminiStreamEvent.Chunk("🔧 Command failed, asking AI to correct...\n"))
+                onChunk("🔧 Command failed, asking AI to correct...\n")
+                
+                val correctionPrompt = """
+                    A bash command failed with this error: $errorMessage
+                    
+                    The operation was: $operationName
+                    
+                    Please provide a corrected command or approach that will work on this system:
+                    ${SystemInfoService.generateSystemContext()}
+                    
+                    If this is not a command issue, provide guidance on how to proceed.
+                """.trimIndent()
+                
+                val correctionRequest = JSONObject().apply {
+                    put("contents", JSONArray().apply {
+                        put(JSONObject().apply {
+                            put("role", "user")
+                            put("parts", JSONArray().apply {
+                                put(JSONObject().apply {
+                                    put("text", correctionPrompt)
+                                })
+                            })
+                        })
+                    })
+                    put("systemInstruction", JSONObject().apply {
+                        put("parts", JSONArray().apply {
+                            put(JSONObject().apply {
+                                put("text", SystemInfoService.generateSystemContext())
+                            })
+                        })
+                    })
+                }
+                
+                val correctionResult = ApiProviderManager.makeApiCallWithRetry { key ->
+                    try {
+                        kotlinx.coroutines.withContext(Dispatchers.IO) {
+                            val response = makeApiCallSimple(key, model, correctionRequest, useLongTimeout = false)
+                            Result.success(response)
+                        }
+                    } catch (e: Exception) {
+                        Result.failure(e)
+                    }
+                }
+                
+                if (correctionResult.isSuccess) {
+                    val correction = correctionResult.getOrNull() ?: ""
+                    emit(GeminiStreamEvent.Chunk("💡 AI suggestion: ${correction.take(200)}\n"))
+                    onChunk("💡 AI suggestion: ${correction.take(200)}\n")
+                }
+            }
+            
+            // If it's a 503/overloaded error, retry
+            if (error is IOException && (errorMessage.contains("503", ignoreCase = true) ||
+                                        errorMessage.contains("overloaded", ignoreCase = true) ||
+                                        errorMessage.contains("unavailable", ignoreCase = true))) {
+                continue // Retry
+            }
+            
+            // For other errors, break after max retries
+            if (retryCount >= maxRetries) {
+                break
+            }
+        }
+        
+        return null
+    }
+    
+    /**
+     * Non-streaming reverse flow: Debug/Upgrade existing project
+     * 1. Extract project structure (classes, functions, imports, tree)
+     * 2. Analyze what needs fixing
+     * 3. Read specific lines/functions
+     * 4. Get fixes with assurance
+     * 5. Apply fixes using edit tools
+     */
+    private suspend fun sendMessageNonStreamingReverse(
+        userMessage: String,
+        onChunk: (String) -> Unit,
+        onToolCall: (FunctionCall) -> Unit,
+        onToolResult: (String, Map<String, Any>) -> Unit
+    ): Flow<GeminiStreamEvent> = flow {
+        val signal = CancellationSignal()
+        android.util.Log.d("GeminiClient", "sendMessageNonStreamingReverse: Starting reverse flow for debug/upgrade")
+        
+        // Add user message to history
+        chatHistory.add(
+            Content(
+                role = "user",
+                parts = listOf(Part.TextPart(text = userMessage))
+            )
+        )
+        
+        val model = ApiProviderManager.getCurrentModel()
+        val systemContext = SystemInfoService.generateSystemContext()
+        
+        // Initialize todos
+        var currentTodos = mutableListOf<Todo>()
+        val updateTodos = { todos: List<Todo> ->
+            currentTodos = todos.toMutableList()
+            val todoCall = FunctionCall(
+                name = "write_todos",
+                args = mapOf("todos" to todos.map { mapOf("description" to it.description, "status" to it.status.name) })
+            )
+            emit(GeminiStreamEvent.ToolCall(todoCall))
+            onToolCall(todoCall)
+            try {
+                val todoResult = executeToolSync("write_todos", todoCall.args)
+                emit(GeminiStreamEvent.ToolResult("write_todos", todoResult))
+                onToolResult("write_todos", todoCall.args)
+            } catch (e: Exception) {
+                android.util.Log.e("GeminiClient", "Failed to update todos", e)
+            }
+        }
+        
+        updateTodos(listOf(
+            Todo("Phase 1: Extract project structure", TodoStatus.IN_PROGRESS),
+            Todo("Phase 2: Analyze what needs fixing", TodoStatus.PENDING),
+            Todo("Phase 3: Read specific lines/functions", TodoStatus.PENDING),
+            Todo("Phase 4: Get fixes with assurance", TodoStatus.PENDING),
+            Todo("Phase 5: Apply fixes", TodoStatus.PENDING)
+        ))
+        
+        // Phase 1: Extract project structure
+        emit(GeminiStreamEvent.Chunk("📊 Phase 1: Extracting project structure...\n"))
+        onChunk("📊 Phase 1: Extracting project structure...\n")
+        
+        val projectStructure = extractProjectStructure(workspaceRoot, signal, emit, onChunk)
+        
+        if (projectStructure.isEmpty()) {
+            emit(GeminiStreamEvent.Error("No source files found in project"))
+            return@flow
+        }
+        
+        val fileCount = projectStructure.split("===").size - 1
+        emit(GeminiStreamEvent.Chunk("✅ Extracted structure from $fileCount files\n"))
+        onChunk("✅ Extracted structure from $fileCount files\n")
+        
+        updateTodos(listOf(
+            Todo("Phase 1: Extract project structure", TodoStatus.COMPLETED),
+            Todo("Phase 2: Analyze what needs fixing", TodoStatus.IN_PROGRESS),
+            Todo("Phase 3: Read specific lines/functions", TodoStatus.PENDING),
+            Todo("Phase 4: Get fixes with assurance", TodoStatus.PENDING),
+            Todo("Phase 5: Apply fixes", TodoStatus.PENDING)
+        ))
+        
+        // Phase 2: Analyze what needs fixing
+        emit(GeminiStreamEvent.Chunk("🔍 Phase 2: Analyzing what needs fixing...\n"))
+        onChunk("🔍 Phase 2: Analyzing what needs fixing...\n")
+        
+        val analysisPrompt = """
+            $systemContext
+            
+            **Project Goal:** $userMessage
+            
+            **Project Structure:**
+            $projectStructure
+            
+            Analyze this project and identify:
+            1. Which functions/classes need fixing or updating
+            2. Which specific lines need to be read for context
+            3. What issues exist that need to be resolved
+            
+            Format your response as JSON:
+            {
+              "files_to_read": [
+                {
+                  "file_path": "path/to/file.ext",
+                  "functions": ["functionName1", "functionName2"],
+                  "line_ranges": [[start1, end1], [start2, end2]],
+                  "reason": "Why this needs to be read"
+                }
+              ],
+              "issues": [
+                {
+                  "file_path": "path/to/file.ext",
+                  "function": "functionName",
+                  "line_range": [start, end],
+                  "issue": "Description of the issue",
+                  "priority": "high|medium|low"
+                }
+              ]
+            }
+        """.trimIndent()
+        
+        val analysisRequest = JSONObject().apply {
+            put("contents", JSONArray().apply {
+                put(JSONObject().apply {
+                    put("role", "user")
+                    put("parts", JSONArray().apply {
+                        put(JSONObject().apply {
+                            put("text", analysisPrompt)
+                        })
+                    })
+                })
+            })
+            put("systemInstruction", JSONObject().apply {
+                put("parts", JSONArray().apply {
+                    put(JSONObject().apply {
+                        put("text", systemContext)
+                    })
+                })
+            })
+        }
+        
+        var analysisText = makeApiCallWithRetryAndCorrection(
+            model, analysisRequest, "analysis", signal, null, emit, onChunk
+        )
+        
+        if (analysisText == null) {
+            emit(GeminiStreamEvent.Error("Failed to analyze project"))
+            return@flow
+        }
+        
+        // Parse analysis
+        val analysisJson = try {
+            val jsonStart = analysisText.indexOf('{')
+            val jsonEnd = analysisText.lastIndexOf('}') + 1
+            if (jsonStart >= 0 && jsonEnd > jsonStart) {
+                JSONObject(analysisText.substring(jsonStart, jsonEnd))
+            } else {
+                null
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("GeminiClient", "Failed to parse analysis", e)
+            null
+        }
+        
+        if (analysisJson == null) {
+            emit(GeminiStreamEvent.Error("Failed to parse analysis results"))
+            return@flow
+        }
+        
+        emit(GeminiStreamEvent.Chunk("✅ Analysis complete\n"))
+        onChunk("✅ Analysis complete\n")
+        
+        updateTodos(listOf(
+            Todo("Phase 1: Extract project structure", TodoStatus.COMPLETED),
+            Todo("Phase 2: Analyze what needs fixing", TodoStatus.COMPLETED),
+            Todo("Phase 3: Read specific lines/functions", TodoStatus.IN_PROGRESS),
+            Todo("Phase 4: Get fixes with assurance", TodoStatus.PENDING),
+            Todo("Phase 5: Apply fixes", TodoStatus.PENDING)
+        ))
+        
+        // Phase 3: Read specific lines/functions
+        emit(GeminiStreamEvent.Chunk("📖 Phase 3: Reading specific code sections...\n"))
+        onChunk("📖 Phase 3: Reading specific code sections...\n")
+        
+        val filesToRead = analysisJson.optJSONArray("files_to_read")
+        val codeSections = mutableMapOf<String, String>() // file_path -> code content
+        
+        if (filesToRead != null) {
+            for (i in 0 until filesToRead.length()) {
+                val fileInfo = filesToRead.getJSONObject(i)
+                val filePath = fileInfo.getString("file_path")
+                
+                try {
+                    val readResult = executeToolSync("read_file", mapOf("file_path" to filePath))
+                    val fullContent = readResult.llmContent
+                    
+                    // Extract specific functions or line ranges
+                    val functions = if (fileInfo.has("functions")) {
+                        fileInfo.getJSONArray("functions").let { arr ->
+                            (0 until arr.length()).map { arr.getString(it) }
+                        }
+                    } else emptyList()
+                    
+                    val lineRanges = if (fileInfo.has("line_ranges")) {
+                        fileInfo.getJSONArray("line_ranges").let { arr ->
+                            (0 until arr.length()).mapNotNull { idx ->
+                                val range = arr.getJSONArray(idx)
+                                if (range.length() >= 2) {
+                                    Pair(range.getInt(0), range.getInt(1))
+                                } else null
+                            }
+                        }
+                    } else emptyList()
+                    
+                    val extractedCode = if (functions.isEmpty() && lineRanges.isEmpty()) {
+                        // If no specific functions/ranges, use full content
+                        fullContent
+                    } else {
+                        extractCodeSections(fullContent, filePath, functions, lineRanges)
+                    }
+                    codeSections[filePath] = extractedCode
+                    
+                    emit(GeminiStreamEvent.Chunk("📄 Read: $filePath\n"))
+                    onChunk("📄 Read: $filePath\n")
+                } catch (e: Exception) {
+                    android.util.Log.e("GeminiClient", "Failed to read $filePath", e)
+                }
+            }
+        }
+        
+        updateTodos(listOf(
+            Todo("Phase 1: Extract project structure", TodoStatus.COMPLETED),
+            Todo("Phase 2: Analyze what needs fixing", TodoStatus.COMPLETED),
+            Todo("Phase 3: Read specific lines/functions", TodoStatus.COMPLETED),
+            Todo("Phase 4: Get fixes with assurance", TodoStatus.IN_PROGRESS),
+            Todo("Phase 5: Apply fixes", TodoStatus.PENDING)
+        ))
+        
+        // Phase 4: Get fixes with assurance
+        emit(GeminiStreamEvent.Chunk("🔧 Phase 4: Getting fixes with assurance...\n"))
+        onChunk("🔧 Phase 4: Getting fixes with assurance...\n")
+        
+        val codeContext = codeSections.entries.joinToString("\n\n") { (path, code) ->
+            "=== $path ===\n$code"
+        }
+        
+        val issues = analysisJson.optJSONArray("issues")
+        val issuesText = if (issues != null) {
+            (0 until issues.length()).joinToString("\n") { i ->
+                val issue = issues.getJSONObject(i)
+                "- ${issue.getString("file_path")}: ${issue.getString("issue")} (${issue.optString("priority", "medium")})"
+            }
+        } else "No specific issues identified"
+        
+        val fixPrompt = """
+            $systemContext
+            
+            **Project Goal:** $userMessage
+            
+            **Code Sections to Fix:**
+            $codeContext
+            
+            **Identified Issues:**
+            $issuesText
+            
+            **Project Structure:**
+            $projectStructure
+            
+            Provide fixes for all identified issues. For each fix, provide:
+            1. The file path
+            2. The exact old_string to replace (include enough context)
+            3. The exact new_string (complete fixed code)
+            4. Confidence level (high/medium/low)
+            
+            Format as JSON array:
+            [
+              {
+                "file_path": "path/to/file.ext",
+                "old_string": "exact code to replace with context",
+                "new_string": "complete fixed code",
+                "confidence": "high|medium|low",
+                "description": "What this fix does"
+              }
+            ]
+            
+            Be thorough and ensure all fixes are complete and correct.
+        """.trimIndent()
+        
+        val fixRequest = JSONObject().apply {
+            put("contents", JSONArray().apply {
+                put(JSONObject().apply {
+                    put("role", "user")
+                    put("parts", JSONArray().apply {
+                        put(JSONObject().apply {
+                            put("text", fixPrompt)
+                        })
+                    })
+                })
+            })
+            put("systemInstruction", JSONObject().apply {
+                put("parts", JSONArray().apply {
+                    put(JSONObject().apply {
+                        put("text", systemContext)
+                    })
+                })
+            })
+        }
+        
+        var fixText = makeApiCallWithRetryAndCorrection(
+            model, fixRequest, "fixes", signal, null, emit, onChunk
+        )
+        
+        if (fixText == null) {
+            emit(GeminiStreamEvent.Error("Failed to generate fixes"))
+            return@flow
+        }
+        
+        // Parse fixes
+        val fixesJson = try {
+            val jsonStart = fixText.indexOf('[')
+            val jsonEnd = fixText.lastIndexOf(']') + 1
+            if (jsonStart >= 0 && jsonEnd > jsonStart) {
+                JSONArray(fixText.substring(jsonStart, jsonEnd))
+            } else {
+                null
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("GeminiClient", "Failed to parse fixes", e)
+            null
+        }
+        
+        if (fixesJson == null || fixesJson.length() == 0) {
+            emit(GeminiStreamEvent.Error("No fixes generated"))
+            return@flow
+        }
+        
+        emit(GeminiStreamEvent.Chunk("✅ Generated ${fixesJson.length()} fixes\n"))
+        onChunk("✅ Generated ${fixesJson.length()} fixes\n")
+        
+        updateTodos(listOf(
+            Todo("Phase 1: Extract project structure", TodoStatus.COMPLETED),
+            Todo("Phase 2: Analyze what needs fixing", TodoStatus.COMPLETED),
+            Todo("Phase 3: Read specific lines/functions", TodoStatus.COMPLETED),
+            Todo("Phase 4: Get fixes with assurance", TodoStatus.COMPLETED),
+            Todo("Phase 5: Apply fixes", TodoStatus.IN_PROGRESS)
+        ))
+        
+        // Phase 5: Apply fixes (group by file for efficiency)
+        emit(GeminiStreamEvent.Chunk("✏️ Phase 5: Applying fixes...\n"))
+        onChunk("✏️ Phase 5: Applying fixes...\n")
+        
+        // Group fixes by file
+        val fixesByFile = mutableMapOf<String, MutableList<JSONObject>>()
+        for (i in 0 until fixesJson.length()) {
+            val fix = fixesJson.getJSONObject(i)
+            val filePath = fix.getString("file_path")
+            fixesByFile.getOrPut(filePath) { mutableListOf() }.add(fix)
+        }
+        
+        // Apply fixes file by file
+        for ((filePath, fixes) in fixesByFile) {
+            emit(GeminiStreamEvent.Chunk("🔨 Applying ${fixes.size} fix(es) to $filePath...\n"))
+            onChunk("🔨 Applying ${fixes.size} fix(es) to $filePath...\n")
+            
+            var successCount = 0
+            var failCount = 0
+            
+            for (fix in fixes) {
+                val oldString = fix.getString("old_string")
+                val newString = fix.getString("new_string")
+                val confidence = fix.optString("confidence", "medium")
+                val description = fix.optString("description", "")
+                
+                val editCall = FunctionCall(
+                    name = "edit_file",
+                    args = mapOf(
+                        "file_path" to filePath,
+                        "old_string" to oldString,
+                        "new_string" to newString
+                    )
+                )
+                
+                emit(GeminiStreamEvent.ToolCall(editCall))
+                onToolCall(editCall)
+                
+                val editResult = try {
+                    executeToolSync("edit_file", editCall.args)
+                } catch (e: Exception) {
+                    ToolResult(
+                        llmContent = "Error: ${e.message}",
+                        returnDisplay = "Error",
+                        error = ToolError(
+                            message = e.message ?: "Unknown error",
+                            type = ToolErrorType.EXECUTION_ERROR
+                        )
+                    )
+                }
+                
+                emit(GeminiStreamEvent.ToolResult("edit_file", editResult))
+                onToolResult("edit_file", editCall.args)
+                
+                if (editResult.error == null) {
+                    successCount++
+                } else {
+                    failCount++
+                    emit(GeminiStreamEvent.Chunk("⚠️ Fix failed: ${editResult.error.message}\n"))
+                    onChunk("⚠️ Fix failed: ${editResult.error.message}\n")
+                }
+            }
+            
+            if (successCount > 0) {
+                emit(GeminiStreamEvent.Chunk("✅ $filePath: $successCount fix(es) applied${if (failCount > 0) ", $failCount failed" else ""}\n"))
+                onChunk("✅ $filePath: $successCount fix(es) applied${if (failCount > 0) ", $failCount failed" else ""}\n")
+            } else {
+                emit(GeminiStreamEvent.Chunk("❌ $filePath: All fixes failed\n"))
+                onChunk("❌ $filePath: All fixes failed\n")
+            }
+        }
+        
+        updateTodos(listOf(
+            Todo("Phase 1: Extract project structure", TodoStatus.COMPLETED),
+            Todo("Phase 2: Analyze what needs fixing", TodoStatus.COMPLETED),
+            Todo("Phase 3: Read specific lines/functions", TodoStatus.COMPLETED),
+            Todo("Phase 4: Get fixes with assurance", TodoStatus.COMPLETED),
+            Todo("Phase 5: Apply fixes", TodoStatus.COMPLETED)
+        ))
+        
+        emit(GeminiStreamEvent.Chunk("\n✨ Debug/upgrade complete!\n"))
+        onChunk("\n✨ Debug/upgrade complete!\n")
+        emit(GeminiStreamEvent.Done)
+    }
+    
+    /**
+     * Extract project structure: classes, functions, imports, tree
+     */
+    private suspend fun extractProjectStructure(
+        workspaceRoot: String,
+        signal: CancellationSignal?,
+        emit: (GeminiStreamEvent) -> Unit,
+        onChunk: (String) -> Unit
+    ): String {
+        val structure = StringBuilder()
+        val workspaceDir = File(workspaceRoot)
+        
+        if (!workspaceDir.exists() || !workspaceDir.isDirectory) {
+            return ""
+        }
+        
+        // Get project tree
+        val projectTree = buildProjectTree(workspaceDir, maxDepth = 3)
+        structure.append("**Project Tree:**\n$projectTree\n\n")
+        
+        // Extract from source files
+        val sourceFiles = findSourceFiles(workspaceDir)
+        structure.append("**Files with Code Structure:**\n\n")
+        
+        for (file in sourceFiles.take(50)) { // Limit to 50 files
+            if (signal?.isAborted() == true) break
+            
+            try {
+                val relativePath = file.relativeTo(workspaceDir).path
+                val content = file.readText()
+                
+                structure.append("=== $relativePath ===\n")
+                
+                // Extract imports
+                val imports = extractImports(content, file.extension)
+                if (imports.isNotEmpty()) {
+                    structure.append("Imports: ${imports.joinToString(", ")}\n")
+                }
+                
+                // Extract classes
+                val classes = extractClasses(content, file.extension)
+                if (classes.isNotEmpty()) {
+                    classes.forEach { (name, line) ->
+                        structure.append("Class: $name (line $line)\n")
+                    }
+                }
+                
+                // Extract functions
+                val functions = extractFunctions(content, file.extension)
+                if (functions.isNotEmpty()) {
+                    functions.forEach { (name, line) ->
+                        structure.append("Function: $name (line $line)\n")
+                    }
+                }
+                
+                structure.append("\n")
+            } catch (e: Exception) {
+                android.util.Log.e("GeminiClient", "Failed to extract from ${file.name}", e)
+            }
+        }
+        
+        return structure.toString()
+    }
+    
+    /**
+     * Build project tree structure
+     */
+    private fun buildProjectTree(dir: File, prefix: String = "", maxDepth: Int = 3, currentDepth: Int = 0): String {
+        if (currentDepth >= maxDepth) return ""
+        
+        val builder = StringBuilder()
+        val files = dir.listFiles()?.sortedBy { !it.isDirectory } ?: return ""
+        
+        for ((index, file) in files.withIndex()) {
+            if (file.name.startsWith(".")) continue
+            
+            val isLast = index == files.size - 1
+            val currentPrefix = if (isLast) "└── " else "├── "
+            builder.append("$prefix$currentPrefix${file.name}\n")
+            
+            if (file.isDirectory) {
+                val nextPrefix = prefix + if (isLast) "    " else "│   "
+                builder.append(buildProjectTree(file, nextPrefix, maxDepth, currentDepth + 1))
+            }
+        }
+        
+        return builder.toString()
+    }
+    
+    /**
+     * Find source files in project
+     */
+    private fun findSourceFiles(dir: File): List<File> {
+        val sourceExtensions = setOf(
+            "kt", "java", "js", "ts", "jsx", "tsx", "py", "go", "rs", "cpp", "c", "h",
+            "html", "css", "xml", "json", "yaml", "yml", "md"
+        )
+        
+        val files = mutableListOf<File>()
+        
+        fun traverse(currentDir: File) {
+            if (!currentDir.exists() || !currentDir.isDirectory) return
+            
+            currentDir.listFiles()?.forEach { file ->
+                if (file.name.startsWith(".")) return
+                if (file.isDirectory && file.name != "node_modules" && file.name != ".git") {
+                    traverse(file)
+                } else if (file.isFile) {
+                    val ext = file.extension.lowercase()
+                    if (ext in sourceExtensions) {
+                        files.add(file)
+                    }
+                }
+            }
+        }
+        
+        traverse(dir)
+        return files
+    }
+    
+    /**
+     * Extract imports from file content
+     */
+    private fun extractImports(content: String, extension: String): List<String> {
+        return when (extension.lowercase()) {
+            "kt", "java" -> {
+                Regex("^import\\s+([^;]+);", RegexOption.MULTILINE)
+                    .findAll(content)
+                    .map { it.groupValues[1].trim() }
+                    .toList()
+            }
+            "js", "ts", "jsx", "tsx" -> {
+                Regex("^import\\s+.*?from\\s+['\"]([^'\"]+)['\"]", RegexOption.MULTILINE)
+                    .findAll(content)
+                    .map { it.groupValues[1].trim() }
+                    .toList()
+            }
+            "py" -> {
+                Regex("^import\\s+([^\\n]+)|^from\\s+([^\\s]+)\\s+import", RegexOption.MULTILINE)
+                    .findAll(content)
+                    .mapNotNull { it.groupValues[1].takeIf { it.isNotEmpty() } ?: it.groupValues[2] }
+                    .toList()
+            }
+            else -> emptyList()
+        }
+    }
+    
+    /**
+     * Extract classes from file content
+     */
+    private fun extractClasses(content: String, extension: String): List<Pair<String, Int>> {
+        val classes = mutableListOf<Pair<String, Int>>()
+        val lines = content.lines()
+        
+        when (extension.lowercase()) {
+            "kt", "java" -> {
+                lines.forEachIndexed { index, line ->
+                    Regex("(?:class|interface|enum)\\s+(\\w+)").find(line)?.let {
+                        classes.add(Pair(it.groupValues[1], index + 1))
+                    }
+                }
+            }
+            "js", "ts", "jsx", "tsx" -> {
+                lines.forEachIndexed { index, line ->
+                    Regex("(?:class|interface|enum|type|const)\\s+(\\w+)").find(line)?.let {
+                        classes.add(Pair(it.groupValues[1], index + 1))
+                    }
+                }
+            }
+            "py" -> {
+                lines.forEachIndexed { index, line ->
+                    Regex("class\\s+(\\w+)").find(line)?.let {
+                        classes.add(Pair(it.groupValues[1], index + 1))
+                    }
+                }
+            }
+        }
+        
+        return classes
+    }
+    
+    /**
+     * Extract functions from file content
+     */
+    private fun extractFunctions(content: String, extension: String): List<Pair<String, Int>> {
+        val functions = mutableListOf<Pair<String, Int>>()
+        val lines = content.lines()
+        
+        when (extension.lowercase()) {
+            "kt", "java" -> {
+                lines.forEachIndexed { index, line ->
+                    Regex("(?:fun|private|public|protected)?\\s*(?:fun)?\\s*(\\w+)\\s*\\(").find(line)?.let {
+                        functions.add(Pair(it.groupValues[1], index + 1))
+                    }
+                }
+            }
+            "js", "ts", "jsx", "tsx" -> {
+                lines.forEachIndexed { index, line ->
+                    Regex("(?:function|const|let|var)\\s+(\\w+)\\s*[=(]|(\\w+)\\s*:\\s*function").find(line)?.let {
+                        val name = it.groupValues[1].takeIf { it.isNotEmpty() } ?: it.groupValues[2]
+                        if (name.isNotEmpty()) {
+                            functions.add(Pair(name, index + 1))
+                        }
+                    }
+                }
+            }
+            "py" -> {
+                lines.forEachIndexed { index, line ->
+                    Regex("def\\s+(\\w+)\\s*\\(").find(line)?.let {
+                        functions.add(Pair(it.groupValues[1], index + 1))
+                    }
+                }
+            }
+        }
+        
+        return functions
+    }
+    
+    /**
+     * Extract specific code sections (functions or line ranges)
+     */
+    private fun extractCodeSections(
+        content: String,
+        filePath: String,
+        functionNames: List<String>,
+        lineRanges: List<Pair<Int, Int>>
+    ): String {
+        val lines = content.lines()
+        val sections = mutableListOf<String>()
+        
+        // Extract functions
+        for (funcName in functionNames) {
+            val funcPattern = when {
+                filePath.endsWith(".kt") || filePath.endsWith(".java") -> 
+                    Regex("fun\\s+$funcName\\s*\\(")
+                filePath.endsWith(".js") || filePath.endsWith(".ts") -> 
+                    Regex("(?:function|const|let|var)\\s+$funcName\\s*[=(]")
+                filePath.endsWith(".py") -> 
+                    Regex("def\\s+$funcName\\s*\\(")
+                else -> Regex("$funcName\\s*\\(")
+            }
+            
+            lines.forEachIndexed { index, line ->
+                if (funcPattern.find(line) != null) {
+                    // Extract function with context (next 50 lines or until next function)
+                    val endLine = minOf(index + 50, lines.size)
+                    val funcCode = lines.subList(index, endLine).joinToString("\n")
+                    sections.add("// Function: $funcName (line ${index + 1})\n$funcCode")
+                }
+            }
+        }
+        
+        // Extract line ranges
+        for ((start, end) in lineRanges) {
+            val startIdx = (start - 1).coerceAtLeast(0)
+            val endIdx = end.coerceAtMost(lines.size)
+            if (startIdx < endIdx) {
+                val rangeCode = lines.subList(startIdx, endIdx).joinToString("\n")
+                sections.add("// Lines $start-$end\n$rangeCode")
+            }
+        }
+        
+        return sections.joinToString("\n\n---\n\n")
     }
     
     /**

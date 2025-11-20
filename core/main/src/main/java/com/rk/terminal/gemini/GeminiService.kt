@@ -29,6 +29,12 @@ object GeminiService {
             if (ollamaClient == null || workspaceChanged || useOllamaChanged) {
                 val toolRegistry = ToolRegistry()
                 registerAllTools(toolRegistry, workspaceRoot)
+                
+                // For Ollama, we need a GeminiClient for custom search (it uses Gemini API for AI analysis)
+                // Create a temporary client just for custom search tool
+                val tempGeminiClient = GeminiClient(toolRegistry, workspaceRoot)
+                toolRegistry.registerTool(CustomWebSearchTool(tempGeminiClient, workspaceRoot))
+                
                 ollamaClient = OllamaClient(toolRegistry, workspaceRoot, ollamaUrl, ollamaModel)
             }
             return ollamaClient!!
@@ -42,7 +48,10 @@ object GeminiService {
                 client = newClient
                 
                 // Register web search tool (requires client reference)
-                toolRegistry.registerTool(WebSearchTool(newClient))
+                toolRegistry.registerTool(WebSearchTool(newClient, workspaceRoot))
+                
+                // Register custom web search tool (always available as fallback)
+                toolRegistry.registerTool(CustomWebSearchTool(newClient, workspaceRoot))
             }
             return client!!
         }

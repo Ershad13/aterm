@@ -108,6 +108,15 @@ object Settings {
     var enable_streaming
         get() = Preference.getBoolean(key = "enable_streaming", default = true)
         set(value) = Preference.setBoolean(key = "enable_streaming", value)
+    
+    // Search Settings
+    var use_api_search
+        get() = Preference.getBoolean(key = "use_api_search", default = true)
+        set(value) = Preference.setBoolean(key = "use_api_search", value)
+    
+    var custom_search_recursive_curls
+        get() = Preference.getInt(key = "custom_search_recursive_curls", default = 3)
+        set(value) = Preference.setInt(key = "custom_search_recursive_curls", value.coerceIn(1, 8))
 
 }
 

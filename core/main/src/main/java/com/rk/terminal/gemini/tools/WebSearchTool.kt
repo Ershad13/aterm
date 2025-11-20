@@ -1,5 +1,6 @@
 package com.rk.terminal.gemini.tools
 
+import com.rk.settings.Settings
 import com.rk.terminal.gemini.client.GeminiClient
 import com.rk.terminal.gemini.core.*
 import com.rk.terminal.gemini.core.FunctionDeclaration
@@ -15,7 +16,8 @@ data class WebSearchToolParams(
 
 class WebSearchToolInvocation(
     toolParams: WebSearchToolParams,
-    private val geminiClient: GeminiClient
+    private val geminiClient: GeminiClient,
+    private val workspaceRoot: String
 ) : ToolInvocation<WebSearchToolParams, ToolResult> {
     
     override val params: WebSearchToolParams = toolParams
@@ -41,7 +43,24 @@ class WebSearchToolInvocation(
         
         return withContext(Dispatchers.IO) {
             try {
-                val response = geminiClient.generateContentWithWebSearch(params.query, signal)
+                // Check if we should use API search or custom search
+                val useApiSearch = Settings.use_api_search
+                
+                if (!useApiSearch) {
+                    // Use custom search engine
+                    android.util.Log.d("WebSearchTool", "Using custom search engine (API search disabled)")
+                    val customTool = CustomWebSearchTool(geminiClient, workspaceRoot)
+                    val customInvocation = customTool.createInvocation(
+                        CustomWebSearchToolParams(query = params.query),
+                        null,
+                        null
+                    )
+                    return@withContext customInvocation.execute(signal, updateOutput)
+                }
+                
+                // Try API search first
+                try {
+                    val response = geminiClient.generateContentWithWebSearch(params.query, signal)
                 
                 val candidate = response.candidates?.firstOrNull()
                 if (candidate == null) {
@@ -138,6 +157,32 @@ class WebSearchToolInvocation(
                     llmContent = "Web search results for \"${params.query}\":\n\n$modifiedResponseText",
                     returnDisplay = "Search results for \"${params.query}\" returned"
                 )
+                } catch (apiError: Exception) {
+                    // API search failed, fallback to custom search
+                    android.util.Log.w("WebSearchTool", "API search failed, reverting to custom search", apiError)
+                    updateOutput?.invoke("⚠️ API search failed. Reverting to Custom offapi search engine...")
+                    
+                    try {
+                        val customTool = CustomWebSearchTool(geminiClient, workspaceRoot)
+                        val customInvocation = customTool.createInvocation(
+                            CustomWebSearchToolParams(query = params.query),
+                            null,
+                            null
+                        )
+                        return@withContext customInvocation.execute(signal, updateOutput)
+                    } catch (customError: Exception) {
+                        val errorMessage = "Both API and custom search failed. API error: ${apiError.message}, Custom error: ${customError.message}"
+                        android.util.Log.e("WebSearchTool", errorMessage, customError)
+                        ToolResult(
+                            llmContent = "Error: $errorMessage",
+                            returnDisplay = "Error: Search failed",
+                            error = ToolError(
+                                message = errorMessage,
+                                type = ToolErrorType.WEB_SEARCH_FAILED
+                            )
+                        )
+                    }
+                }
             } catch (e: Exception) {
                 val errorMessage = "Error during web search for query \"${params.query}\": ${e.message ?: "Unknown error"}"
                 android.util.Log.e("WebSearchTool", errorMessage, e)
@@ -155,7 +200,8 @@ class WebSearchToolInvocation(
 }
 
 class WebSearchTool(
-    private val geminiClient: GeminiClient
+    private val geminiClient: GeminiClient,
+    private val workspaceRoot: String
 ) : DeclarativeTool<WebSearchToolParams, ToolResult>() {
     
     override val name = "google_web_search" // Matching TypeScript WEB_SEARCH_TOOL_NAME
@@ -186,7 +232,7 @@ class WebSearchTool(
         toolName: String?,
         toolDisplayName: String?
     ): ToolInvocation<WebSearchToolParams, ToolResult> {
-        return WebSearchToolInvocation(params, geminiClient)
+        return WebSearchToolInvocation(params, geminiClient, workspaceRoot)
     }
     
     override fun validateAndConvertParams(params: Map<String, Any>): WebSearchToolParams {
