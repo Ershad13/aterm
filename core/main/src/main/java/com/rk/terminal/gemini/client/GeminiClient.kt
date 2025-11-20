@@ -1287,7 +1287,7 @@ class GeminiClient(
         }
         
         var fileListResult = makeApiCallWithRetryAndCorrection(
-            model, fileListRequest, "file list", signal, null, emit, onChunk
+            model, fileListRequest, "file list", signal, null, { event -> emit(event) }, onChunk
         )
         
         if (fileListResult == null) {
@@ -1398,7 +1398,7 @@ class GeminiClient(
         }
         
         var metadataText = makeApiCallWithRetryAndCorrection(
-            model, metadataRequest, "metadata", signal, null, emit, onChunk
+            model, metadataRequest, "metadata", signal, null, { event -> emit(event) }, onChunk
         )
         
         if (metadataText == null) {
@@ -1549,7 +1549,7 @@ class GeminiClient(
             }
             
             val codeContent = makeApiCallWithRetryAndCorrection(
-                model, codeRequest, "code for $filePath", signal, null, emit, onChunk
+                model, codeRequest, "code for $filePath", signal, null, { event -> emit(event) }, onChunk
             )
             
             if (codeContent == null) {
@@ -1822,7 +1822,7 @@ class GeminiClient(
         emit(GeminiStreamEvent.Chunk("📊 Phase 1: Extracting project structure...\n"))
         onChunk("📊 Phase 1: Extracting project structure...\n")
         
-        val projectStructure = extractProjectStructure(workspaceRoot, signal, emit, onChunk)
+        val projectStructure = extractProjectStructure(workspaceRoot, signal, { event -> emit(event) }, onChunk)
         
         if (projectStructure.isEmpty()) {
             emit(GeminiStreamEvent.Error("No source files found in project"))
@@ -1903,7 +1903,7 @@ class GeminiClient(
         }
         
         var analysisText = makeApiCallWithRetryAndCorrection(
-            model, analysisRequest, "analysis", signal, null, emit, onChunk
+            model, analysisRequest, "analysis", signal, null, { event -> emit(event) }, onChunk
         )
         
         if (analysisText == null) {
@@ -2079,7 +2079,7 @@ class GeminiClient(
         }
         
         var fixText = makeApiCallWithRetryAndCorrection(
-            model, fixRequest, "fixes", signal, null, emit, onChunk
+            model, fixRequest, "fixes", signal, null, { event -> emit(event) }, onChunk
         )
         
         if (fixText == null) {
