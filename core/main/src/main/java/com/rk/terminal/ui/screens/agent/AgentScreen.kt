@@ -14,6 +14,7 @@ import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.Button
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -27,6 +28,7 @@ import androidx.compose.ui.unit.sp
 import com.rk.terminal.api.ApiProviderManager
 import com.rk.terminal.api.ApiProviderManager.KeysExhaustedException
 import com.rk.terminal.gemini.GeminiService
+import com.rk.terminal.gemini.HistoryPersistenceService
 import com.rk.terminal.gemini.client.GeminiClient
 import com.rk.terminal.gemini.client.GeminiStreamEvent
 import com.rk.terminal.gemini.client.OllamaClient
@@ -218,13 +220,14 @@ fun AgentScreen(
 ) {
     val context = LocalContext.current
     var inputText by remember { mutableStateOf("") }
-    var messages by remember { mutableStateOf<List<AgentMessage>>(emptyList()) }
-    var messageHistory by remember { mutableStateOf<List<AgentMessage>>(emptyList()) } // Persistent history
+    // Use remember with sessionId as key to preserve state per session (persistence handled by HistoryPersistenceService)
+    var messages by remember(sessionId) { mutableStateOf<List<AgentMessage>>(emptyList()) }
+    var messageHistory by remember(sessionId) { mutableStateOf<List<AgentMessage>>(emptyList()) } // Persistent history
     var showKeysExhaustedDialog by remember { mutableStateOf(false) }
     var lastFailedPrompt by remember { mutableStateOf<String?>(null) }
     var retryCountdown by remember { mutableStateOf(0) }
     var currentResponseText by remember { mutableStateOf("") }
-    var workspaceRoot by remember { mutableStateOf(com.rk.libcommons.alpineDir().absolutePath) }
+    var workspaceRoot by remember(sessionId) { mutableStateOf(com.rk.libcommons.alpineDir().absolutePath) }
     var showWorkspacePicker by remember { mutableStateOf(false) }
     var showHistory by remember { mutableStateOf(false) }
     var showDebugDialog by remember { mutableStateOf(false) }
@@ -239,20 +242,62 @@ fun AgentScreen(
     val ollamaModel = Settings.ollama_model
     val ollamaUrl = "http://$ollamaHost:$ollamaPort"
     
-    // Initialize client
-    val aiClient = remember(workspaceRoot, useOllama, ollamaHost, ollamaPort, ollamaModel) {
+    // Initialize client - use sessionId in key to ensure per-session clients
+    val aiClient = remember(sessionId, workspaceRoot, useOllama, ollamaHost, ollamaPort, ollamaModel) {
         GeminiService.initialize(workspaceRoot, useOllama, ollamaUrl, ollamaModel)
     }
     
-    // Load history on init
-    LaunchedEffect(Unit) {
-        messageHistory = messages
+    // Load history on init for this session and restore to client
+    LaunchedEffect(sessionId, aiClient) {
+        val loadedHistory = HistoryPersistenceService.loadHistory(sessionId)
+        if (loadedHistory.isNotEmpty()) {
+            messages = loadedHistory
+            messageHistory = loadedHistory
+            // Restore history to client for context in API calls
+            if (aiClient is GeminiClient) {
+                aiClient.restoreHistoryFromMessages(loadedHistory)
+            }
+            android.util.Log.d("AgentScreen", "Loaded ${loadedHistory.size} messages for session $sessionId")
+        } else {
+            messages = emptyList()
+            messageHistory = emptyList()
+            // Clear client history if no saved history
+            if (aiClient is GeminiClient) {
+                aiClient.resetChat()
+            }
+        }
     }
     
-    // Save to history when messages change
-    LaunchedEffect(messages) {
+    // Save history whenever messages change (debounced to avoid too frequent saves)
+    // Also save immediately when sessionId changes to preserve work when switching tabs
+    LaunchedEffect(messages, sessionId) {
         if (messages.isNotEmpty()) {
-            messageHistory = messages
+            // Save immediately (no debounce) when session changes to preserve work
+            val shouldDebounce = true // Can be made configurable
+            if (!shouldDebounce) {
+                HistoryPersistenceService.saveHistory(sessionId, messages)
+                messageHistory = messages
+                android.util.Log.d("AgentScreen", "Saved ${messages.size} messages for session $sessionId (immediate)")
+            } else {
+                // Debounce saves to avoid too frequent disk writes
+                kotlinx.coroutines.delay(500)
+                HistoryPersistenceService.saveHistory(sessionId, messages)
+                messageHistory = messages
+                android.util.Log.d("AgentScreen", "Saved ${messages.size} messages for session $sessionId")
+            }
+        }
+    }
+    
+    // Save messages when component is about to be disposed (when switching away from this session)
+    DisposableEffect(sessionId) {
+        onDispose {
+            // Save messages one final time when leaving this session
+            if (messages.isNotEmpty()) {
+                kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+                    HistoryPersistenceService.saveHistory(sessionId, messages)
+                    android.util.Log.d("AgentScreen", "Final save: ${messages.size} messages for session $sessionId on dispose")
+                }
+            }
         }
     }
     
@@ -548,27 +593,92 @@ fun AgentScreen(
         )
     }
     
-    // History display dialog
+    // History display dialog - shows current messages (which includes history)
     if (showHistory) {
         AlertDialog(
             onDismissRequest = { showHistory = false },
-            title = { Text("Conversation History") },
+            title = { 
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        imageVector = Icons.Default.Edit,
+                        contentDescription = null,
+                        modifier = Modifier.padding(end = 8.dp)
+                    )
+                    Text("Conversation History")
+                }
+            },
             text = {
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
                         .heightIn(max = 400.dp)
                 ) {
-                    if (messageHistory.isEmpty()) {
-                        Text("No conversation history")
+                    if (messages.isEmpty()) {
+                        Text(
+                            "No conversation history",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
                     } else {
+                        Text(
+                            "Total messages: ${messages.size}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(bottom = 8.dp)
+                        )
                         LazyColumn {
-                            items(messageHistory) { msg ->
-                                Text(
-                                    text = "${if (msg.isUser) "You" else "Agent"}: ${msg.text.take(100)}${if (msg.text.length > 100) "..." else ""}",
-                                    modifier = Modifier.padding(vertical = 4.dp)
-                                )
-                                Divider()
+                            items(messages) { msg ->
+                                Card(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(vertical = 4.dp),
+                                    colors = CardDefaults.cardColors(
+                                        containerColor = if (msg.isUser) {
+                                            MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.3f)
+                                        } else {
+                                            MaterialTheme.colorScheme.surfaceContainerHigh
+                                        }
+                                    )
+                                ) {
+                                    Column(
+                                        modifier = Modifier.padding(12.dp)
+                                    ) {
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Text(
+                                                text = if (msg.isUser) "You" else "Agent",
+                                                style = MaterialTheme.typography.labelMedium,
+                                                fontWeight = FontWeight.Bold,
+                                                color = if (msg.isUser) {
+                                                    MaterialTheme.colorScheme.onPrimaryContainer
+                                                } else {
+                                                    MaterialTheme.colorScheme.onSurface
+                                                }
+                                            )
+                                            Text(
+                                                text = formatTimestamp(msg.timestamp),
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                fontSize = 10.sp
+                                            )
+                                        }
+                                        Spacer(modifier = Modifier.height(4.dp))
+                                        SelectionContainer {
+                                            Text(
+                                                text = msg.text,
+                                                style = MaterialTheme.typography.bodyMedium,
+                                                color = if (msg.isUser) {
+                                                    MaterialTheme.colorScheme.onPrimaryContainer
+                                                } else {
+                                                    MaterialTheme.colorScheme.onSurface
+                                                }
+                                            )
+                                        }
+                                    }
+                                }
                             }
                         }
                     }

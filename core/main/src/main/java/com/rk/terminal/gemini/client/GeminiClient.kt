@@ -8,6 +8,7 @@ import com.rk.terminal.gemini.tools.DeclarativeTool
 import com.rk.terminal.gemini.core.*
 import com.rk.terminal.gemini.tools.*
 import com.rk.terminal.gemini.SystemInfoService
+import com.rk.terminal.gemini.MemoryService
 import java.io.File
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -692,6 +693,13 @@ class GeminiClient(
             append(SystemInfoService.generateSystemContext())
             append("\n")
             
+            // Add memory context if available
+            val memoryContext = MemoryService.getSummarizedMemory()
+            if (memoryContext.isNotEmpty()) {
+                append(memoryContext)
+                append("\n")
+            }
+            
             append("# Core Mandates\n\n")
             append("- **Conventions:** Rigorously adhere to existing project conventions when reading or modifying code. Analyze surrounding code, tests, and configuration first.\n")
             append("- **Libraries/Frameworks:** NEVER assume a library/framework is available or appropriate. Verify its established usage within the project before employing it.\n")
@@ -719,14 +727,21 @@ class GeminiClient(
                 append("## Planning with write_todos Tool\n\n")
                 append("For complex queries that require multiple steps, planning and generally is higher complexity than a simple Q&A, use the `write_todos` tool.\n\n")
                 append("DO NOT use this tool for simple tasks that can be completed in less than 2 steps. If the user query is simple and straightforward, do not use the tool.\n\n")
+                append("**IMPORTANT - Documentation Search Planning:**\n")
+                append("If the task involves unfamiliar libraries, frameworks, APIs, or requires up-to-date documentation/examples, you MUST include a todo item for web search/documentation lookup in your todo list. Examples:\n")
+                append("- \"Search for [library/framework] documentation and best practices\"\n")
+                append("- \"Find examples and tutorials for [technology]\"\n")
+                append("- \"Look up current API documentation for [service/API]\"\n")
+                append("This ensures you have the latest information before implementing.\n\n")
                 append("When using `write_todos`:\n")
                 append("1. Use this todo list as soon as you receive a user request based on the complexity of the task.\n")
-                append("2. Keep track of every subtask that you update the list with.\n")
-                append("3. Mark a subtask as in_progress before you begin working on it. You should only have one subtask as in_progress at a time.\n")
-                append("4. Update the subtask list as you proceed in executing the task. The subtask list is not static and should reflect your progress and current plans.\n")
-                append("5. Mark a subtask as completed when you have completed it.\n")
-                append("6. Mark a subtask as cancelled if the subtask is no longer needed.\n")
-                append("7. **CRITICAL:** After creating a todo list, you MUST continue working on the todos. Creating the plan is NOT completing the task. You must execute each todo item until all are completed or cancelled. Do NOT stop after creating the todo list - continue implementing the tasks.\n\n")
+                append("2. **If task needs documentation search, add it as the FIRST or early todo item** before implementation.\n")
+                append("3. Keep track of every subtask that you update the list with.\n")
+                append("4. Mark a subtask as in_progress before you begin working on it. You should only have one subtask as in_progress at a time.\n")
+                append("5. Update the subtask list as you proceed in executing the task. The subtask list is not static and should reflect your progress and current plans.\n")
+                append("6. Mark a subtask as completed when you have completed it.\n")
+                append("7. Mark a subtask as cancelled if the subtask is no longer needed.\n")
+                append("8. **CRITICAL:** After creating a todo list, you MUST continue working on the todos. Creating the plan is NOT completing the task. You must execute each todo item until all are completed or cancelled. Do NOT stop after creating the todo list - continue implementing the tasks.\n\n")
             }
             
             append("# Operational Guidelines\n\n")
@@ -1028,6 +1043,30 @@ class GeminiClient(
     }
     
     /**
+     * Restore chat history from AgentMessages
+     * This is used to restore conversation context when switching tabs/sessions
+     */
+    fun restoreHistoryFromMessages(agentMessages: List<com.rk.terminal.ui.screens.agent.AgentMessage>) {
+        chatHistory.clear()
+        agentMessages.forEach { msg ->
+            // Skip loading messages and tool messages, only restore actual conversation
+            if (msg.text != "Thinking..." && 
+                !msg.text.startsWith("🔧") && 
+                !msg.text.startsWith("✅") &&
+                !msg.text.startsWith("❌") &&
+                !msg.text.startsWith("⚠️")) {
+                chatHistory.add(
+                    Content(
+                        role = if (msg.isUser) "user" else "model",
+                        parts = listOf(Part.TextPart(text = msg.text))
+                    )
+                )
+            }
+        }
+        android.util.Log.d("GeminiClient", "Restored ${chatHistory.size} messages to chat history")
+    }
+    
+    /**
      * Intent types for non-streaming mode
      */
     private enum class IntentType {
@@ -1037,8 +1076,13 @@ class GeminiClient(
     
     /**
      * Detect user intent: create new project or debug/upgrade existing
+     * Uses memory context and keyword analysis
+     * Also detects if task needs documentation search or planning
      */
     private suspend fun detectIntent(userMessage: String): IntentType {
+        // Load memory context for better intent detection
+        val memoryContext = MemoryService.getSummarizedMemory()
+        
         val debugKeywords = listOf(
             "debug", "fix", "repair", "error", "bug", "issue", "problem",
             "upgrade", "update", "improve", "refactor", "modify", "change",
@@ -1051,17 +1095,28 @@ class GeminiClient(
         )
         
         val messageLower = userMessage.lowercase()
+        val contextLower = (userMessage + " " + memoryContext).lowercase()
         
-        val debugScore = debugKeywords.count { messageLower.contains(it) }
-        val createScore = createKeywords.count { messageLower.contains(it) }
+        val debugScore = debugKeywords.count { contextLower.contains(it) }
+        val createScore = createKeywords.count { contextLower.contains(it) }
         
         // Check if workspace has existing files
         val workspaceDir = File(workspaceRoot)
         val hasExistingFiles = workspaceDir.exists() && 
             workspaceDir.listFiles()?.any { it.isFile && !it.name.startsWith(".") } == true
         
+        // Check memory for project context
+        val hasProjectContext = memoryContext.contains("project", ignoreCase = true) ||
+                                memoryContext.contains("codebase", ignoreCase = true) ||
+                                memoryContext.contains("repository", ignoreCase = true)
+        
         // If workspace has files and debug keywords are present, likely debug/upgrade
         if (hasExistingFiles && (debugScore > createScore || debugScore > 0)) {
+            return IntentType.DEBUG_UPGRADE
+        }
+        
+        // If memory indicates existing project and debug keywords, likely debug/upgrade
+        if (hasProjectContext && hasExistingFiles && debugScore >= createScore) {
             return IntentType.DEBUG_UPGRADE
         }
         
@@ -1072,6 +1127,43 @@ class GeminiClient(
         
         // Default: if workspace has files, assume debug/upgrade
         return if (hasExistingFiles) IntentType.DEBUG_UPGRADE else IntentType.CREATE_NEW
+    }
+    
+    /**
+     * Detect if task needs documentation search or planning phase
+     * Returns true if task likely needs web search for documentation, tutorials, or examples
+     */
+    private fun needsDocumentationSearch(userMessage: String): Boolean {
+        val messageLower = userMessage.lowercase()
+        val memoryContext = MemoryService.getSummarizedMemory().lowercase()
+        val contextLower = (userMessage + " " + memoryContext).lowercase()
+        
+        // Keywords indicating need for documentation/search
+        val docSearchKeywords = listOf(
+            "documentation", "docs", "tutorial", "example", "guide", "how to",
+            "api", "library", "framework", "package", "npm", "pip", "crate",
+            "learn", "understand", "reference", "specification", "spec",
+            "unknown", "unfamiliar", "new", "first time", "don't know",
+            "latest", "current", "up to date", "recent", "modern"
+        )
+        
+        // Framework/library names that might need documentation
+        val frameworkKeywords = listOf(
+            "react", "vue", "angular", "svelte", "next", "nuxt",
+            "express", "fastapi", "django", "flask", "spring",
+            "tensorflow", "pytorch", "keras", "pandas", "numpy"
+        )
+        
+        // Check for documentation search indicators
+        val hasDocKeywords = docSearchKeywords.any { contextLower.contains(it) }
+        val hasFrameworkKeywords = frameworkKeywords.any { contextLower.contains(it) }
+        val mentionsLibrary = contextLower.contains("library") || contextLower.contains("package") || 
+                             contextLower.contains("framework") || contextLower.contains("tool")
+        
+        // If task mentions unfamiliar libraries/frameworks or asks for documentation
+        return hasDocKeywords || (hasFrameworkKeywords && mentionsLibrary) ||
+               messageLower.contains("how do i") || messageLower.contains("what is") ||
+               messageLower.contains("show me") || messageLower.contains("find")
     }
     
     /**
@@ -1101,9 +1193,12 @@ class GeminiClient(
         val systemInfo = SystemInfoService.detectSystemInfo()
         val systemContext = SystemInfoService.generateSystemContext()
         
-        // Initialize todos for tracking
+        // Check if task needs documentation search
+        val needsDocSearch = needsDocumentationSearch(userMessage)
+        
+        // Initialize todos for tracking - allow custom todos including documentation search
         var currentTodos = mutableListOf<Todo>()
-        val updateTodos = { todos: List<Todo> ->
+        val updateTodos: suspend (List<Todo>) -> Unit = { todos ->
             currentTodos = todos.toMutableList()
             val todoCall = FunctionCall(
                 name = "write_todos",
@@ -1120,15 +1215,34 @@ class GeminiClient(
             }
         }
         
+        // Pre-planning phase: Check if documentation search is needed and add to todos
+        val initialTodos = mutableListOf<Todo>()
+        if (needsDocSearch) {
+            emit(GeminiStreamEvent.Chunk("🔍 Task may need documentation search - adding to plan...\n"))
+            onChunk("🔍 Task may need documentation search - adding to plan...\n")
+            initialTodos.add(Todo("Search for relevant documentation and examples", TodoStatus.PENDING))
+        }
+        initialTodos.addAll(listOf(
+            Todo("Phase 1: Get file list", TodoStatus.PENDING),
+            Todo("Phase 2: Get metadata for all files", TodoStatus.PENDING),
+            Todo("Phase 3: Generate code for each file", TodoStatus.PENDING)
+        ))
+        
         // Phase 1: Get list of all files needed
         emit(GeminiStreamEvent.Chunk("📋 Phase 1: Identifying files needed...\n"))
         onChunk("📋 Phase 1: Identifying files needed...\n")
         
-        updateTodos(listOf(
-            Todo("Phase 1: Get file list", TodoStatus.IN_PROGRESS),
-            Todo("Phase 2: Get metadata for all files", TodoStatus.PENDING),
-            Todo("Phase 3: Generate code for each file", TodoStatus.PENDING)
-        ))
+        kotlinx.coroutines.withContext(Dispatchers.Main) {
+            // Mark Phase 1 as in progress
+            val todosWithProgress = initialTodos.map { todo ->
+                if (todo.description == "Phase 1: Get file list") {
+                    todo.copy(status = TodoStatus.IN_PROGRESS)
+                } else {
+                    todo
+                }
+            }
+            updateTodos(todosWithProgress)
+        }
         
         val fileListPrompt = """
             $systemContext
@@ -1173,7 +1287,7 @@ class GeminiClient(
         }
         
         var fileListResult = makeApiCallWithRetryAndCorrection(
-            model, fileListRequest, "file list", signal, updateOutput, emit, onChunk
+            model, fileListRequest, "file list", signal, null, emit, onChunk
         )
         
         if (fileListResult == null) {
@@ -1211,11 +1325,17 @@ class GeminiClient(
         emit(GeminiStreamEvent.Chunk("✅ Found ${filePaths.size} files to create\n"))
         onChunk("✅ Found ${filePaths.size} files to create\n")
         
-        updateTodos(listOf(
-            Todo("Phase 1: Get file list", TodoStatus.COMPLETED),
-            Todo("Phase 2: Get metadata for all files", TodoStatus.IN_PROGRESS),
-            Todo("Phase 3: Generate code for each file", TodoStatus.PENDING)
-        ))
+        kotlinx.coroutines.withContext(Dispatchers.Main) {
+            // Update todos - preserve documentation search todo if it exists
+            val updatedTodos = currentTodos.map { todo ->
+                when {
+                    todo.description == "Phase 1: Get file list" -> todo.copy(status = TodoStatus.COMPLETED)
+                    todo.description == "Phase 2: Get metadata for all files" -> todo.copy(status = TodoStatus.IN_PROGRESS)
+                    else -> todo
+                }
+            }
+            updateTodos(updatedTodos)
+        }
         
         // Phase 2: Get comprehensive metadata for all files
         emit(GeminiStreamEvent.Chunk("📊 Phase 2: Generating metadata for all files...\n"))
@@ -1278,7 +1398,7 @@ class GeminiClient(
         }
         
         var metadataText = makeApiCallWithRetryAndCorrection(
-            model, metadataRequest, "metadata", signal, updateOutput, emit, onChunk
+            model, metadataRequest, "metadata", signal, null, emit, onChunk
         )
         
         if (metadataText == null) {
@@ -1308,11 +1428,17 @@ class GeminiClient(
         emit(GeminiStreamEvent.Chunk("✅ Metadata generated for ${metadataJson.length()} files\n"))
         onChunk("✅ Metadata generated for ${metadataJson.length()} files\n")
         
-        updateTodos(listOf(
-            Todo("Phase 1: Get file list", TodoStatus.COMPLETED),
-            Todo("Phase 2: Get metadata for all files", TodoStatus.COMPLETED),
-            Todo("Phase 3: Generate code for each file", TodoStatus.IN_PROGRESS)
-        ))
+        kotlinx.coroutines.withContext(Dispatchers.Main) {
+            // Update todos - preserve all existing todos
+            val updatedTodos = currentTodos.map { todo ->
+                when {
+                    todo.description == "Phase 2: Get metadata for all files" -> todo.copy(status = TodoStatus.COMPLETED)
+                    todo.description == "Phase 3: Generate code for each file" -> todo.copy(status = TodoStatus.IN_PROGRESS)
+                    else -> todo
+                }
+            }
+            updateTodos(updatedTodos)
+        }
         
         // Phase 3: Generate each file separately with full code
         emit(GeminiStreamEvent.Chunk("💻 Phase 3: Generating code for each file...\n"))
@@ -1423,7 +1549,7 @@ class GeminiClient(
             }
             
             val codeContent = makeApiCallWithRetryAndCorrection(
-                model, codeRequest, "code for $filePath", signal, updateOutput, emit, onChunk
+                model, codeRequest, "code for $filePath", signal, null, emit, onChunk
             )
             
             if (codeContent == null) {
@@ -1476,11 +1602,17 @@ class GeminiClient(
             onToolResult(functionCall.name, functionCall.args)
         }
         
-        updateTodos(listOf(
-            Todo("Phase 1: Get file list", TodoStatus.COMPLETED),
-            Todo("Phase 2: Get metadata for all files", TodoStatus.COMPLETED),
-            Todo("Phase 3: Generate code for each file", TodoStatus.COMPLETED)
-        ))
+        kotlinx.coroutines.withContext(Dispatchers.Main) {
+            // Mark Phase 3 as completed
+            val updatedTodos = currentTodos.map { todo ->
+                if (todo.description == "Phase 3: Generate code for each file") {
+                    todo.copy(status = TodoStatus.COMPLETED)
+                } else {
+                    todo
+                }
+            }
+            updateTodos(updatedTodos)
+        }
         
         emit(GeminiStreamEvent.Chunk("\n✨ Project generation complete!\n"))
         onChunk("\n✨ Project generation complete!\n")
@@ -1637,9 +1769,12 @@ class GeminiClient(
         val model = ApiProviderManager.getCurrentModel()
         val systemContext = SystemInfoService.generateSystemContext()
         
-        // Initialize todos
+        // Check if task needs documentation search
+        val needsDocSearch = needsDocumentationSearch(userMessage)
+        
+        // Initialize todos - allow custom todos including documentation search
         var currentTodos = mutableListOf<Todo>()
-        val updateTodos = { todos: List<Todo> ->
+        val updateTodos: suspend (List<Todo>) -> Unit = { todos ->
             currentTodos = todos.toMutableList()
             val todoCall = FunctionCall(
                 name = "write_todos",
@@ -1656,13 +1791,32 @@ class GeminiClient(
             }
         }
         
-        updateTodos(listOf(
-            Todo("Phase 1: Extract project structure", TodoStatus.IN_PROGRESS),
+        // Pre-planning phase: Check if documentation search is needed and add to todos
+        val initialTodos = mutableListOf<Todo>()
+        if (needsDocSearch) {
+            emit(GeminiStreamEvent.Chunk("🔍 Task may need documentation search - adding to plan...\n"))
+            onChunk("🔍 Task may need documentation search - adding to plan...\n")
+            initialTodos.add(Todo("Search for relevant documentation and examples", TodoStatus.PENDING))
+        }
+        initialTodos.addAll(listOf(
+            Todo("Phase 1: Extract project structure", TodoStatus.PENDING),
             Todo("Phase 2: Analyze what needs fixing", TodoStatus.PENDING),
             Todo("Phase 3: Read specific lines/functions", TodoStatus.PENDING),
             Todo("Phase 4: Get fixes with assurance", TodoStatus.PENDING),
             Todo("Phase 5: Apply fixes", TodoStatus.PENDING)
         ))
+        
+        kotlinx.coroutines.withContext(Dispatchers.Main) {
+            // Mark Phase 1 as in progress
+            val todosWithProgress = initialTodos.map { todo ->
+                if (todo.description == "Phase 1: Extract project structure") {
+                    todo.copy(status = TodoStatus.IN_PROGRESS)
+                } else {
+                    todo
+                }
+            }
+            updateTodos(todosWithProgress)
+        }
         
         // Phase 1: Extract project structure
         emit(GeminiStreamEvent.Chunk("📊 Phase 1: Extracting project structure...\n"))
@@ -1679,13 +1833,15 @@ class GeminiClient(
         emit(GeminiStreamEvent.Chunk("✅ Extracted structure from $fileCount files\n"))
         onChunk("✅ Extracted structure from $fileCount files\n")
         
-        updateTodos(listOf(
-            Todo("Phase 1: Extract project structure", TodoStatus.COMPLETED),
-            Todo("Phase 2: Analyze what needs fixing", TodoStatus.IN_PROGRESS),
-            Todo("Phase 3: Read specific lines/functions", TodoStatus.PENDING),
-            Todo("Phase 4: Get fixes with assurance", TodoStatus.PENDING),
-            Todo("Phase 5: Apply fixes", TodoStatus.PENDING)
-        ))
+        kotlinx.coroutines.withContext(Dispatchers.Main) {
+            updateTodos(listOf(
+                Todo("Phase 1: Extract project structure", TodoStatus.COMPLETED),
+                Todo("Phase 2: Analyze what needs fixing", TodoStatus.IN_PROGRESS),
+                Todo("Phase 3: Read specific lines/functions", TodoStatus.PENDING),
+                Todo("Phase 4: Get fixes with assurance", TodoStatus.PENDING),
+                Todo("Phase 5: Apply fixes", TodoStatus.PENDING)
+            ))
+        }
         
         // Phase 2: Analyze what needs fixing
         emit(GeminiStreamEvent.Chunk("🔍 Phase 2: Analyzing what needs fixing...\n"))
@@ -1777,13 +1933,18 @@ class GeminiClient(
         emit(GeminiStreamEvent.Chunk("✅ Analysis complete\n"))
         onChunk("✅ Analysis complete\n")
         
-        updateTodos(listOf(
-            Todo("Phase 1: Extract project structure", TodoStatus.COMPLETED),
-            Todo("Phase 2: Analyze what needs fixing", TodoStatus.COMPLETED),
-            Todo("Phase 3: Read specific lines/functions", TodoStatus.IN_PROGRESS),
-            Todo("Phase 4: Get fixes with assurance", TodoStatus.PENDING),
-            Todo("Phase 5: Apply fixes", TodoStatus.PENDING)
-        ))
+        kotlinx.coroutines.withContext(Dispatchers.Main) {
+            // Update todos - preserve documentation search todo if it exists
+            val updatedTodos = currentTodos.map { todo ->
+                when {
+                    todo.description == "Phase 1: Extract project structure" -> todo.copy(status = TodoStatus.COMPLETED)
+                    todo.description == "Phase 2: Analyze what needs fixing" -> todo.copy(status = TodoStatus.COMPLETED)
+                    todo.description == "Phase 3: Read specific lines/functions" -> todo.copy(status = TodoStatus.IN_PROGRESS)
+                    else -> todo
+                }
+            }
+            updateTodos(updatedTodos)
+        }
         
         // Phase 3: Read specific lines/functions
         emit(GeminiStreamEvent.Chunk("📖 Phase 3: Reading specific code sections...\n"))
@@ -1835,13 +1996,17 @@ class GeminiClient(
             }
         }
         
-        updateTodos(listOf(
-            Todo("Phase 1: Extract project structure", TodoStatus.COMPLETED),
-            Todo("Phase 2: Analyze what needs fixing", TodoStatus.COMPLETED),
-            Todo("Phase 3: Read specific lines/functions", TodoStatus.COMPLETED),
-            Todo("Phase 4: Get fixes with assurance", TodoStatus.IN_PROGRESS),
-            Todo("Phase 5: Apply fixes", TodoStatus.PENDING)
-        ))
+        kotlinx.coroutines.withContext(Dispatchers.Main) {
+            // Update todos - preserve documentation search todo if it exists
+            val updatedTodos = currentTodos.map { todo ->
+                when {
+                    todo.description == "Phase 3: Read specific lines/functions" -> todo.copy(status = TodoStatus.COMPLETED)
+                    todo.description == "Phase 4: Get fixes with assurance" -> todo.copy(status = TodoStatus.IN_PROGRESS)
+                    else -> todo
+                }
+            }
+            updateTodos(updatedTodos)
+        }
         
         // Phase 4: Get fixes with assurance
         emit(GeminiStreamEvent.Chunk("🔧 Phase 4: Getting fixes with assurance...\n"))
@@ -1944,13 +2109,17 @@ class GeminiClient(
         emit(GeminiStreamEvent.Chunk("✅ Generated ${fixesJson.length()} fixes\n"))
         onChunk("✅ Generated ${fixesJson.length()} fixes\n")
         
-        updateTodos(listOf(
-            Todo("Phase 1: Extract project structure", TodoStatus.COMPLETED),
-            Todo("Phase 2: Analyze what needs fixing", TodoStatus.COMPLETED),
-            Todo("Phase 3: Read specific lines/functions", TodoStatus.COMPLETED),
-            Todo("Phase 4: Get fixes with assurance", TodoStatus.COMPLETED),
-            Todo("Phase 5: Apply fixes", TodoStatus.IN_PROGRESS)
-        ))
+        kotlinx.coroutines.withContext(Dispatchers.Main) {
+            // Update todos - preserve documentation search todo if it exists
+            val updatedTodos = currentTodos.map { todo ->
+                when {
+                    todo.description == "Phase 4: Get fixes with assurance" -> todo.copy(status = TodoStatus.COMPLETED)
+                    todo.description == "Phase 5: Apply fixes" -> todo.copy(status = TodoStatus.IN_PROGRESS)
+                    else -> todo
+                }
+            }
+            updateTodos(updatedTodos)
+        }
         
         // Phase 5: Apply fixes (group by file for efficiency)
         emit(GeminiStreamEvent.Chunk("✏️ Phase 5: Applying fixes...\n"))
@@ -2024,13 +2193,17 @@ class GeminiClient(
             }
         }
         
-        updateTodos(listOf(
-            Todo("Phase 1: Extract project structure", TodoStatus.COMPLETED),
-            Todo("Phase 2: Analyze what needs fixing", TodoStatus.COMPLETED),
-            Todo("Phase 3: Read specific lines/functions", TodoStatus.COMPLETED),
-            Todo("Phase 4: Get fixes with assurance", TodoStatus.COMPLETED),
-            Todo("Phase 5: Apply fixes", TodoStatus.COMPLETED)
-        ))
+        kotlinx.coroutines.withContext(Dispatchers.Main) {
+            // Mark Phase 5 as completed - preserve documentation search todo if it exists
+            val updatedTodos = currentTodos.map { todo ->
+                if (todo.description == "Phase 5: Apply fixes") {
+                    todo.copy(status = TodoStatus.COMPLETED)
+                } else {
+                    todo
+                }
+            }
+            updateTodos(updatedTodos)
+        }
         
         emit(GeminiStreamEvent.Chunk("\n✨ Debug/upgrade complete!\n"))
         onChunk("\n✨ Debug/upgrade complete!\n")

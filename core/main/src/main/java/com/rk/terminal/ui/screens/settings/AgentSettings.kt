@@ -1,11 +1,11 @@
 package com.rk.terminal.ui.screens.settings
 
+import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.rk.components.compose.preferences.base.PreferenceGroup
-import com.rk.components.compose.preferences.normal.SettingsCard
 import com.rk.settings.Settings
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -72,31 +72,29 @@ fun AgentSettings() {
             SettingsCard(
                 title = { Text("Custom Search Recursive Levels") },
                 description = { 
-                    Text(
-                        "Number of recursive search levels (1-8). Higher values gather more comprehensive information but take longer. Current: $recursiveCurls"
-                    )
+                    Column {
+                        Text(
+                            "Number of recursive search levels (1-8). Higher values gather more comprehensive information but take longer. Current: $recursiveCurls"
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Slider(
+                            value = recursiveCurls.toFloat(),
+                            onValueChange = { newValue ->
+                                recursiveCurls = newValue.toInt().coerceIn(1, 8)
+                                Settings.custom_search_recursive_curls = recursiveCurls
+                            },
+                            valueRange = 1f..8f,
+                            steps = 6,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        Text(
+                            text = "Levels: $recursiveCurls",
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
                 },
-                onClick = { /* Slider handled below */ }
-            ) {
-                Column(
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
-                ) {
-                    Slider(
-                        value = recursiveCurls.toFloat(),
-                        onValueChange = { newValue ->
-                            recursiveCurls = newValue.toInt().coerceIn(1, 8)
-                            Settings.custom_search_recursive_curls = recursiveCurls
-                        },
-                        valueRange = 1f..8f,
-                        steps = 6
-                    )
-                    Text(
-                        text = "Levels: $recursiveCurls",
-                        style = MaterialTheme.typography.bodySmall,
-                        modifier = Modifier.padding(top = 4.dp)
-                    )
-                }
-            }
+                onClick = { /* No action needed, slider handles interaction */ }
+            )
         }
     }
 }

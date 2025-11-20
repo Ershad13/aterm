@@ -85,7 +85,7 @@ class CustomWebSearchToolInvocation(
                 // Step 2: Use AI to analyze initial results and suggest related searches/links
                 updateOutput?.invoke("🤖 AI analyzing initial results...")
                 val analysisPrompt = buildAnalysisPrompt(searchGoal, initialResults)
-                val aiAnalysis = askAIForAnalysis(analysisPrompt, signal)
+                var aiAnalysis = askAIForAnalysis(analysisPrompt, signal)
                 
                 // Step 3: Perform recursive searches based on AI suggestions
                 val allCollectedInfo = mutableListOf<SearchResult>()
