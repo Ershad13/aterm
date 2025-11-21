@@ -197,6 +197,7 @@ fun TerminalScreen(
     val context = LocalContext.current
     val isDarkMode = isSystemInDarkTheme()
     val scope = rememberCoroutineScope()
+    val keyboardController = LocalSoftwareKeyboardController.current
     
     // Track current active tab (per session)
     val currentMainSessionId = mainActivityActivity.sessionBinder?.getService()?.currentSession?.value?.first ?: "main"
@@ -264,7 +265,6 @@ fun TerminalScreen(
     // Handle tab changes - switch session when tab changes
     LaunchedEffect(selectedTabIndex, currentMainSessionId) {
         // Hide keyboard when switching tabs
-        val keyboardController = LocalSoftwareKeyboardController.current
         keyboardController?.hide()
         
         terminalView.get()?.let { view ->
@@ -544,7 +544,6 @@ fun TerminalScreen(
                                             selected = selectedTabIndex == index,
                                             onClick = { 
                                                 // Hide keyboard when switching tabs
-                                                val keyboardController = LocalSoftwareKeyboardController.current
                                                 keyboardController?.hide()
                                                 selectedTabIndex = index
                                             },
