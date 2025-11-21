@@ -53,10 +53,15 @@ object MkSession {
             }
 
 
+            // Use Ubuntu-specific init script for Ubuntu, Alpine init for others
+            val initScriptName = when (workingMode) {
+                WorkingMode.UBUNTU -> "init-ubuntu.sh"
+                else -> "init.sh"
+            }
             localBinDir().child("init").apply {
                 if (exists().not()){
                     createFileIfNot()
-                    writeText(assets.open("init.sh").bufferedReader().use { it.readText() })
+                    writeText(assets.open(initScriptName).bufferedReader().use { it.readText() })
                 }
             }
 

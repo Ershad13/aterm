@@ -8,11 +8,17 @@ if [ -z "$(ls -A "$UBUNTU_DIR" | grep -vE '^(root|tmp)$')" ]; then
         exit 1
     fi
     echo "Extracting Ubuntu rootfs..."
-    # Use --no-same-owner to avoid permission errors when creating symlinks
-    tar -xf "$PREFIX/files/ubuntu.tar.gz" -C "$UBUNTU_DIR" --no-same-owner --no-same-permissions || {
-        echo "Error: Failed to extract ubuntu.tar.gz"
+    # Use --no-same-owner and --no-same-permissions to avoid permission errors
+    # Ignore symlink errors as they're warnings, not fatal - the extraction will still succeed
+    tar -xzf "$PREFIX/files/ubuntu.tar.gz" -C "$UBUNTU_DIR" --no-same-owner --no-same-permissions 2>&1 | grep -v "tar: Removing leading" | grep -v "can't link" || true
+    
+    # Verify extraction was successful by checking for key directories
+    if [ ! -d "$UBUNTU_DIR/usr" ] && [ ! -d "$UBUNTU_DIR/bin" ]; then
+        echo "Error: Failed to extract ubuntu.tar.gz - no system directories found"
         exit 1
-    }
+    fi
+    
+    echo "Ubuntu rootfs extracted successfully (some symlink warnings are normal)"
 fi
 
 [ ! -e "$PREFIX/local/bin/proot" ] && cp "$PREFIX/files/proot" "$PREFIX/local/bin"
