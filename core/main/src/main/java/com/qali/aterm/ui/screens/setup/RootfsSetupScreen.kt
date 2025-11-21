@@ -27,7 +27,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
 import android.os.Environment
-import android.os.Build
 import android.content.Context
 
 enum class RootfsType {
