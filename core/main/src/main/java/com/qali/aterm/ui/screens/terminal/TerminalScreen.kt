@@ -516,7 +516,8 @@ fun TerminalScreen(
             content = {
                 Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                         BackgroundImage()
-                        val color = getComposeColor()
+                        // Use theme colors directly for proper dark mode support
+                        val textColor = MaterialTheme.colorScheme.onSurface
                         Column {
 
                             fun getNameOfWorkingMode(workingMode:Int?):String{
@@ -538,22 +539,26 @@ fun TerminalScreen(
                                     ),
                                     title = {
                                         Column {
-                                            Text(text = "aTerm",color = color)
-                                            Text(style = MaterialTheme.typography.bodySmall,text = mainActivityActivity.sessionBinder?.getService()?.currentSession?.value?.first + " (${getNameOfWorkingMode(mainActivityActivity.sessionBinder?.getService()?.currentSession?.value?.second)})",color = color)
+                                            Text(text = "aTerm", color = textColor)
+                                            Text(
+                                                style = MaterialTheme.typography.bodySmall,
+                                                text = mainActivityActivity.sessionBinder?.getService()?.currentSession?.value?.first + " (${getNameOfWorkingMode(mainActivityActivity.sessionBinder?.getService()?.currentSession?.value?.second)})",
+                                                color = textColor
+                                            )
                                         }
                                     },
                                     navigationIcon = {
                                         IconButton(onClick = {
                                             scope.launch { drawerState.open() }
                                         }) {
-                                            Icon(Icons.Default.Menu, null, tint = color)
+                                            Icon(Icons.Default.Menu, null, tint = textColor)
                                         }
                                     },
                                     actions = {
                                         IconButton(onClick = {
                                             showAddDialog = true
                                         }) {
-                                            Icon(Icons.Default.Add,null, tint = color)
+                                            Icon(Icons.Default.Add, null, tint = textColor)
                                         }
                                     }
                                 )

@@ -8,7 +8,8 @@ if [ -z "$(ls -A "$UBUNTU_DIR" | grep -vE '^(root|tmp)$')" ]; then
         exit 1
     fi
     echo "Extracting Ubuntu rootfs..."
-    tar -xf "$PREFIX/files/ubuntu.tar.gz" -C "$UBUNTU_DIR" || {
+    # Use --no-same-owner to avoid permission errors when creating symlinks
+    tar -xf "$PREFIX/files/ubuntu.tar.gz" -C "$UBUNTU_DIR" --no-same-owner --no-same-permissions || {
         echo "Error: Failed to extract ubuntu.tar.gz"
         exit 1
     }

@@ -122,6 +122,11 @@ fun KarbonTheme(
                                 onSurfaceVariant = Color(0xFFE0E0E0)
                             )
                     darkTheme -> dynamicDarkColorScheme(context)
+                        .copy(
+                            onBackground = Color.White,
+                            onSurface = Color.White,
+                            onSurfaceVariant = Color(0xFFE0E0E0)
+                        )
                     else -> dynamicLightColorScheme(context)
                 }
             }
@@ -134,7 +139,11 @@ fun KarbonTheme(
                     onSurface = Color.White,
                     onSurfaceVariant = Color(0xFFE0E0E0)
                 )
-            darkTheme -> DarkColorScheme
+            darkTheme -> DarkColorScheme.copy(
+                onBackground = Color.White,
+                onSurface = Color.White,
+                onSurfaceVariant = Color(0xFFE0E0E0)
+            )
             else -> LightColorScheme
         }
     val view = LocalView.current
