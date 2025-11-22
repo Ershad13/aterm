@@ -1,55 +1,3 @@
-set -e  # Exit immediately on Failure
-
-export PATH=/bin:/sbin:/usr/bin:/usr/sbin:/usr/share/bin:/usr/share/sbin:/usr/local/bin:/usr/local/sbin:/system/bin:/system/xbin
-export HOME=/root
-
-if [ ! -s /etc/resolv.conf ]; then
-    echo "nameserver 8.8.8.8" > /etc/resolv.conf
-fi
-
-
-export PS1="\[\e[38;5;46m\]\u\[\033[39m\]@reterm \[\033[39m\]\w \[\033[0m\]\\$ "
-# shellcheck disable=SC2034
-export PIP_BREAK_SYSTEM_PACKAGES=1
-required_packages="bash gcompat glib nano"
-missing_packages=""
-for pkg in $required_packages; do
-    if ! apk info -e $pkg >/dev/null 2>&1; then
-        missing_packages="$missing_packages $pkg"
-    fi
-done
-if [ -n "$missing_packages" ]; then
-    echo -e "\e[34;1m[*] \e[0mInstalling Important packages\e[0m"
-    apk update && apk upgrade
-    apk add $missing_packages
-    if [ $? -eq 0 ]; then
-        echo -e "\e[32;1m[+] \e[0mSuccessfully Installed\e[0m"
-    fi
-    echo -e "\e[34m[*] \e[0mUse \e[32mapk\e[0m to install new packages\e[0m"
-fi
-
-# Install fish shell if not already installed
-if ! command -v fish >/dev/null 2>&1; then
-    echo -e "\e[34;1m[*] \e[0mInstalling fish shell\e[0m"
-    apk add fish 2>/dev/null || true
-    if command -v fish >/dev/null 2>&1; then
-        echo -e "\e[32;1m[+] \e[0mFish shell installed\e[0m"
-    fi
-fi
-
-# Install cron if not already installed
-if ! command -v crond >/dev/null 2>&1; then
-    apk add dcron 2>/dev/null || true
-fi
-
-# Copy fish color update script
-if [ -f "$PREFIX/local/bin/update-fish-colors.sh" ]; then
-    # Script already exists, just make it executable
-    chmod +x "$PREFIX/local/bin/update-fish-colors.sh" 2>/dev/null || true
-else
-    # Create the script
-    mkdir -p "$PREFIX/local/bin" 2>/dev/null || true
-    cat > "$PREFIX/local/bin/update-fish-colors.sh" << 'SCRIPTEOF'
 #!/bin/sh
 # Script to update fish shell colors based on app theme
 # This script reads the Android app's SharedPreferences to detect theme
@@ -73,6 +21,7 @@ for PREF_PATH in $PREF_PATHS; do
                 IS_DARK_MODE=0
             else
                 # MODE_NIGHT_FOLLOW_SYSTEM - try to detect system theme
+                # This is a simple heuristic - in practice, you might want to check system settings
                 IS_DARK_MODE=1  # Default to dark
             fi
             break
@@ -148,32 +97,3 @@ fi
 
 # Make script executable
 chmod +x ~/.config/fish/config.fish 2>/dev/null || true
-SCRIPTEOF
-    chmod +x "$PREFIX/local/bin/update-fish-colors.sh" 2>/dev/null || true
-fi
-
-# Run the script once to set initial colors
-"$PREFIX/local/bin/update-fish-colors.sh" 2>/dev/null || true
-
-# Add to crontab to run every minute (checks for theme changes)
-(crontab -l 2>/dev/null | grep -v "update-fish-colors.sh"; echo "* * * * * $PREFIX/local/bin/update-fish-colors.sh >/dev/null 2>&1") | crontab - 2>/dev/null || true
-
-# Start cron daemon if not running
-if ! pgrep -x crond >/dev/null 2>&1; then
-    crond -b -S -l 0 2>/dev/null || true
-fi
-
-#fix linker warning
-if [[ ! -f /linkerconfig/ld.config.txt ]];then
-    mkdir -p /linkerconfig
-    touch /linkerconfig/ld.config.txt
-fi
-
-if [ "$#" -eq 0 ]; then
-    source /etc/profile
-    export PS1="\[\e[38;5;46m\]\u\[\033[39m\]@reterm \[\033[39m\]\w \[\033[0m\]\\$ "
-    cd $HOME
-    /bin/ash
-else
-    exec "$@"
-fi

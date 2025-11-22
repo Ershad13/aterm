@@ -64,33 +64,59 @@ public final class TerminalBuffer {
         if (selY1 < -getActiveTranscriptRows()) selY1 = -getActiveTranscriptRows();
         if (selY2 >= mScreenRows) selY2 = mScreenRows - 1;
 
-        for (int row = selY1; row <= selY2; row++) {
-            int x1 = (row == selY1) ? selX1 : 0;
-            int x2;
-            if (row == selY2) {
-                x2 = selX2 + 1;
-                if (x2 > columns) x2 = columns;
+        // Normalize selection coordinates (ensure x1,y1 is before x2,y2)
+        int x1, y1, x2, y2;
+        if (selY1 < selY2 || (selY1 == selY2 && selX1 <= selX2)) {
+            x1 = selX1;
+            y1 = selY1;
+            x2 = selX2;
+            y2 = selY2;
+        } else {
+            // Selection is reversed, swap coordinates
+            x1 = selX2;
+            y1 = selY2;
+            x2 = selX1;
+            y2 = selY1;
+        }
+
+        for (int row = y1; row <= y2; row++) {
+            int startX = (row == y1) ? x1 : 0;
+            int endX;
+            if (row == y2) {
+                endX = x2 + 1;
+                if (endX > columns) endX = columns;
             } else {
-                x2 = columns;
+                // For intermediate lines, select full width when joinBackLines is true
+                // This allows character-by-character selection across lines
+                endX = columns;
             }
+            
             TerminalRow lineObject = mLines[externalToInternalRow(row)];
-            int x1Index = lineObject.findStartOfColumn(x1);
-            int x2Index = (x2 < mColumns) ? lineObject.findStartOfColumn(x2) : lineObject.getSpaceUsed();
-            if (x2Index == x1Index) {
+            int x1Index = lineObject.findStartOfColumn(startX);
+            int x2Index = (endX < mColumns) ? lineObject.findStartOfColumn(endX) : lineObject.getSpaceUsed();
+            if (x2Index == x1Index && endX < columns) {
                 // Selected the start of a wide character.
-                x2Index = lineObject.findStartOfColumn(x2 + 1);
+                x2Index = lineObject.findStartOfColumn(endX + 1);
             }
             char[] line = lineObject.mText;
             int lastPrintingCharIndex = -1;
             int i;
             boolean rowLineWrap = getLineWrap(row);
-            if (rowLineWrap && x2 == columns) {
+            if (rowLineWrap && endX == columns) {
                 // If the line was wrapped, we shouldn't lose trailing space:
                 lastPrintingCharIndex = x2Index - 1;
             } else {
-                for (i = x1Index; i < x2Index; ++i) {
-                    char c = line[i];
-                    if (c != ' ') lastPrintingCharIndex = i;
+                // Include all characters in selection, including trailing spaces for character-by-character selection
+                // Only trim if it's the last line and we want to remove trailing spaces
+                if (row == y2 && endX < columns) {
+                    // On the last line, find the last non-space character up to endX
+                    for (i = x1Index; i < x2Index; ++i) {
+                        char c = line[i];
+                        if (c != ' ') lastPrintingCharIndex = i;
+                    }
+                } else {
+                    // For intermediate lines or full line selections, include all characters
+                    lastPrintingCharIndex = x2Index - 1;
                 }
             }
 
@@ -99,8 +125,9 @@ public final class TerminalBuffer {
                 builder.append(line, x1Index, len);
 
             boolean lineFillsWidth = lastPrintingCharIndex == x2Index - 1;
+            // Add newline between lines, but join wrapped lines if joinBackLines is true
             if ((!joinBackLines || !rowLineWrap) && (!joinFullLines || !lineFillsWidth)
-                && row < selY2 && row < mScreenRows - 1) builder.append('\n');
+                && row < y2 && row < mScreenRows - 1) builder.append('\n');
         }
         return builder.toString();
     }
