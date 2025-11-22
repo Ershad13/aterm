@@ -245,43 +245,46 @@ fun RootfsSetupScreen(
                     modifier = Modifier.padding(start = 16.dp, top = 4.dp)
                 )
             }
-        } else if (selectedType != null && selectedDistro != null && selectedDistro != DistroType.CUSTOM && selectedDistro.hasPredefinedInit) {
-            // Optional custom init script override for predefined distros
-            Spacer(modifier = Modifier.height(8.dp))
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                Text(
-                    text = "Custom Init Script (Optional - overrides default):",
-                    style = MaterialTheme.typography.labelMedium,
-                    modifier = Modifier.weight(1f)
-                )
-                IconButton(
-                    onClick = { showInitScriptInfo = true },
-                    modifier = Modifier.size(24.dp)
+        } else {
+            val currentDistro = selectedDistro
+            if (selectedType != null && currentDistro != null && currentDistro != DistroType.CUSTOM && currentDistro.hasPredefinedInit) {
+                // Optional custom init script override for predefined distros
+                Spacer(modifier = Modifier.height(8.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    Icon(
-                        imageVector = Icons.Outlined.Info,
-                        contentDescription = "Init script help",
-                        modifier = Modifier.size(20.dp),
-                        tint = MaterialTheme.colorScheme.primary
+                    Text(
+                        text = "Custom Init Script (Optional - overrides default):",
+                        style = MaterialTheme.typography.labelMedium,
+                        modifier = Modifier.weight(1f)
                     )
+                    IconButton(
+                        onClick = { showInitScriptInfo = true },
+                        modifier = Modifier.size(24.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Outlined.Info,
+                            contentDescription = "Init script help",
+                            modifier = Modifier.size(20.dp),
+                            tint = MaterialTheme.colorScheme.primary
+                        )
+                    }
                 }
+                OutlinedTextField(
+                    value = customInitScript,
+                    onValueChange = { customInitScript = it },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 150.dp, max = 300.dp),
+                    label = { Text("Custom Init Script (optional)") },
+                    placeholder = { Text("Leave empty to use default ${currentDistro.displayName} init script") },
+                    leadingIcon = { Icon(Icons.Default.Edit, contentDescription = null) },
+                    minLines = 6,
+                    maxLines = 15
+                )
             }
-            OutlinedTextField(
-                value = customInitScript,
-                onValueChange = { customInitScript = it },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .heightIn(min = 150.dp, max = 300.dp),
-                label = { Text("Custom Init Script (optional)") },
-                placeholder = { Text("Leave empty to use default ${selectedDistro?.displayName} init script") },
-                leadingIcon = { Icon(Icons.Default.Edit, contentDescription = null) },
-                minLines = 6,
-                maxLines = 15
-            )
         }
 
         // Name input (for all types except predefined)
