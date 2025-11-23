@@ -1523,6 +1523,750 @@ class GeminiClient(
     }
     
     /**
+     * Detect if project is a web framework (Node.js, Python Flask/FastAPI, etc.)
+     */
+    private fun detectWebFramework(workspaceRoot: String): Boolean {
+        val workspaceDir = File(workspaceRoot)
+        if (!workspaceDir.exists()) return false
+        
+        // Check for Node.js frameworks
+        val hasNodeFramework = workspaceDir.walkTopDown().any { file ->
+            file.isFile && (
+                file.name == "package.json" && file.readText().contains(Regex("express|koa|fastify|nest|hapi|restify|sails", RegexOption.IGNORE_CASE)) ||
+                file.name.endsWith(".js") && file.readText().contains(Regex("express|app\\.listen|server\\.listen|fastify|koa", RegexOption.IGNORE_CASE))
+            )
+        }
+        
+        // Check for Python web frameworks
+        val hasPythonFramework = workspaceDir.walkTopDown().any { file ->
+            file.isFile && (
+                (file.name.endsWith(".py") && file.readText().contains(Regex("flask|fastapi|django|bottle|tornado|sanic", RegexOption.IGNORE_CASE))) ||
+                file.name == "requirements.txt" && file.readText().contains(Regex("flask|fastapi|django|bottle|tornado|sanic", RegexOption.IGNORE_CASE))
+            )
+        }
+        
+        // Check for other frameworks
+        val hasOtherFramework = workspaceDir.walkTopDown().any { file ->
+            file.isFile && (
+                file.name.endsWith(".php") && file.readText().contains(Regex("laravel|symfony|codeigniter", RegexOption.IGNORE_CASE)) ||
+                file.name.endsWith(".rb") && file.readText().contains(Regex("rails|sinatra", RegexOption.IGNORE_CASE)) ||
+                file.name.endsWith(".go") && file.readText().contains(Regex("gin|echo|fiber|gorilla", RegexOption.IGNORE_CASE))
+            )
+        }
+        
+        return hasNodeFramework || hasPythonFramework || hasOtherFramework
+    }
+    
+    /**
+     * Detect if project is Kotlin or Java (skip API testing)
+     */
+    private fun detectKotlinJava(workspaceRoot: String): Boolean {
+        val workspaceDir = File(workspaceRoot)
+        if (!workspaceDir.exists()) return false
+        
+        return workspaceDir.walkTopDown().any { file ->
+            file.isFile && (file.name.endsWith(".kt") || file.name.endsWith(".java") || 
+                file.name == "build.gradle" || file.name == "build.gradle.kts" || 
+                file.name == "pom.xml" || file.name == "build.sbt")
+        }
+    }
+    
+    /**
+     * Test APIs: Start server, detect endpoints, and test them
+     */
+    private suspend fun testAPIs(
+        workspaceRoot: String,
+        systemInfo: SystemInfoService.SystemInfo,
+        userMessage: String,
+        emit: suspend (GeminiStreamEvent) -> Unit,
+        onChunk: (String) -> Unit,
+        onToolCall: (FunctionCall) -> Unit,
+        onToolResult: (String, Map<String, Any>) -> Unit
+    ): Boolean {
+        val workspaceDir = File(workspaceRoot)
+        if (!workspaceDir.exists()) return false
+        
+        // Step 1: Detect framework and server start command
+        val serverInfo = detectServerInfo(workspaceRoot, systemInfo, userMessage, emit, onChunk)
+        if (serverInfo == null) {
+            emit(GeminiStreamEvent.Chunk("⚠️ Could not detect server information\n"))
+            onChunk("⚠️ Could not detect server information\n")
+            return false
+        }
+        
+        emit(GeminiStreamEvent.Chunk("🚀 Starting server: ${serverInfo.startCommand}\n"))
+        onChunk("🚀 Starting server: ${serverInfo.startCommand}\n")
+        
+        // Step 2: Start server in background with debugging
+        var serverProcess = startServer(serverInfo, workspaceRoot, emit, onChunk, onToolCall, onToolResult)
+        if (serverProcess == null) {
+            // Try to debug why server didn't start
+            emit(GeminiStreamEvent.Chunk("🔍 Debugging server startup failure...\n"))
+            onChunk("🔍 Debugging server startup failure...\n")
+            
+            val debugResult = debugServerStartup(serverInfo, workspaceRoot, emit, onChunk, onToolCall, onToolResult)
+            if (!debugResult) {
+                emit(GeminiStreamEvent.Chunk("❌ Failed to start server after debugging\n"))
+                onChunk("❌ Failed to start server after debugging\n")
+                return false
+            }
+            
+            // Try starting again after debugging
+            serverProcess = startServer(serverInfo, workspaceRoot, emit, onChunk, onToolCall, onToolResult)
+            if (serverProcess == null) {
+                emit(GeminiStreamEvent.Chunk("❌ Still failed to start server after debugging\n"))
+                onChunk("❌ Still failed to start server after debugging\n")
+                return false
+            }
+        }
+        
+        // Step 3: Wait for server to be ready
+        var serverReady = waitForServerReady(serverInfo.baseUrl, serverInfo.port, emit, onChunk)
+        if (!serverReady) {
+            // Try to debug why server isn't responding
+            emit(GeminiStreamEvent.Chunk("🔍 Server not responding, checking logs...\n"))
+            onChunk("🔍 Server not responding, checking logs...\n")
+            
+            // Check if server process is still running
+            val processAlive = serverProcess?.isAlive ?: false
+            if (!processAlive) {
+                emit(GeminiStreamEvent.Chunk("❌ Server process died. Trying to restart with fixes...\n"))
+                onChunk("❌ Server process died. Trying to restart with fixes...\n")
+                
+                val restartResult = debugServerStartup(serverInfo, workspaceRoot, emit, onChunk, onToolCall, onToolResult)
+                if (!restartResult) {
+                    return false
+                }
+                
+                // Try starting again
+                serverProcess = startServer(serverInfo, workspaceRoot, emit, onChunk, onToolCall, onToolResult)
+                if (serverProcess == null) {
+                    return false
+                }
+                
+                // Wait again after restart
+                serverReady = waitForServerReady(serverInfo.baseUrl, serverInfo.port, emit, onChunk)
+                if (!serverReady) {
+                    emit(GeminiStreamEvent.Chunk("❌ Server did not become ready after restart\n"))
+                    onChunk("❌ Server did not become ready after restart\n")
+                    return false
+                }
+            } else {
+                emit(GeminiStreamEvent.Chunk("❌ Server process is running but not responding\n"))
+                onChunk("❌ Server process is running but not responding\n")
+                return false
+            }
+        }
+        
+        emit(GeminiStreamEvent.Chunk("✅ Server is ready at ${serverInfo.baseUrl}\n"))
+        onChunk("✅ Server is ready at ${serverInfo.baseUrl}\n")
+        
+        // Step 4: Detect API endpoints using AI
+        val endpoints = detectAPIEndpoints(workspaceRoot, serverInfo, userMessage, emit, onChunk)
+        if (endpoints.isEmpty()) {
+            emit(GeminiStreamEvent.Chunk("ℹ️ No testable endpoints detected\n"))
+            onChunk("ℹ️ No testable endpoints detected\n")
+            return true
+        }
+        
+        emit(GeminiStreamEvent.Chunk("📋 Found ${endpoints.size} endpoint(s) to test\n"))
+        onChunk("📋 Found ${endpoints.size} endpoint(s) to test\n")
+        
+        // Step 5: Test each endpoint
+        var successCount = 0
+        for (endpoint in endpoints) {
+            val success = testEndpoint(endpoint, serverInfo.baseUrl, emit, onChunk)
+            if (success) successCount++
+        }
+        
+        emit(GeminiStreamEvent.Chunk("\n📊 Test Results: $successCount/${endpoints.size} endpoints passed\n"))
+        onChunk("\n📊 Test Results: $successCount/${endpoints.size} endpoints passed\n")
+        
+        return successCount > 0
+    }
+    
+    /**
+     * Server information
+     */
+    private data class ServerInfo(
+        val framework: String,
+        val startCommand: String,
+        val baseUrl: String,
+        val port: Int,
+        val healthCheckPath: String? = null
+    )
+    
+    /**
+     * API endpoint to test
+     */
+    private data class APIEndpoint(
+        val path: String,
+        val method: String, // GET, POST, PUT, DELETE, etc.
+        val description: String,
+        val requestBody: String? = null,
+        val headers: Map<String, String> = emptyMap(),
+        val expectedStatus: Int = 200
+    )
+    
+    /**
+     * Detect server information (framework, start command, port, base URL)
+     */
+    private suspend fun detectServerInfo(
+        workspaceRoot: String,
+        systemInfo: SystemInfoService.SystemInfo,
+        userMessage: String,
+        emit: suspend (GeminiStreamEvent) -> Unit,
+        onChunk: (String) -> Unit
+    ): ServerInfo? {
+        val workspaceDir = File(workspaceRoot)
+        
+        // Try AI-based detection first
+        val aiServerInfo = detectServerInfoWithAI(workspaceRoot, systemInfo, userMessage, emit, onChunk)
+        if (aiServerInfo != null) return aiServerInfo
+        
+        // Fallback to pattern-based detection
+        // Node.js
+        val packageJson = File(workspaceDir, "package.json")
+        if (packageJson.exists()) {
+            try {
+                val content = packageJson.readText()
+                if (content.contains("express") || content.contains("koa") || content.contains("fastify")) {
+                    // Check for start script
+                    val startScript = if (content.contains("\"start\"")) "npm start" else "node server.js"
+                    return ServerInfo(
+                        framework = "Node.js",
+                        startCommand = startScript,
+                        baseUrl = "http://localhost:3000",
+                        port = 3000,
+                        healthCheckPath = "/"
+                    )
+                }
+            } catch (e: Exception) {
+                // Ignore
+            }
+        }
+        
+        // Python Flask/FastAPI
+        val hasFlask = workspaceDir.walkTopDown().any { 
+            it.isFile && it.name.endsWith(".py") && it.readText().contains("flask", ignoreCase = true)
+        }
+        val hasFastAPI = workspaceDir.walkTopDown().any { 
+            it.isFile && it.name.endsWith(".py") && it.readText().contains("fastapi", ignoreCase = true)
+        }
+        
+        if (hasFlask) {
+            return ServerInfo(
+                framework = "Flask",
+                startCommand = "python3 app.py",
+                baseUrl = "http://localhost:5000",
+                port = 5000,
+                healthCheckPath = "/"
+            )
+        }
+        
+        if (hasFastAPI) {
+            return ServerInfo(
+                framework = "FastAPI",
+                startCommand = "uvicorn main:app --reload",
+                baseUrl = "http://localhost:8000",
+                port = 8000,
+                healthCheckPath = "/docs"
+            )
+        }
+        
+        return null
+    }
+    
+    /**
+     * Use AI to detect server information
+     */
+    private suspend fun detectServerInfoWithAI(
+        workspaceRoot: String,
+        systemInfo: SystemInfoService.SystemInfo,
+        userMessage: String,
+        emit: suspend (GeminiStreamEvent) -> Unit,
+        onChunk: (String) -> Unit
+    ): ServerInfo? {
+        val workspaceDir = File(workspaceRoot)
+        val files = workspaceDir.walkTopDown()
+            .filter { it.isFile && !it.name.startsWith(".") }
+            .take(15)
+            .map { "${it.name} (${it.length()} bytes)" }
+            .toList()
+        
+        val prompt = """
+            Analyze the project structure and determine server information.
+            
+            Files in workspace:
+            ${files.joinToString("\n") { "- $it" }}
+            
+            User request: $userMessage
+            
+            Determine:
+            1. Framework type (Node.js/Express, Python/Flask, Python/FastAPI, etc.)
+            2. Command to start the server (e.g., "npm start", "python3 app.py", "uvicorn main:app")
+            3. Default port (e.g., 3000 for Node.js, 5000 for Flask, 8000 for FastAPI)
+            4. Base URL (e.g., "http://localhost:3000")
+            5. Health check path (e.g., "/" or "/health" or "/api/health")
+            
+            Return JSON:
+            {
+              "framework": "Node.js/Express",
+              "start_command": "npm start",
+              "port": 3000,
+              "base_url": "http://localhost:3000",
+              "health_check_path": "/"
+            }
+        """.trimIndent()
+        
+        val model = ApiProviderManager.getCurrentModel()
+        val request = JSONObject().apply {
+            put("contents", JSONArray().apply {
+                put(JSONObject().apply {
+                    put("role", "user")
+                    put("parts", JSONArray().apply {
+                        put(JSONObject().apply {
+                            put("text", prompt)
+                        })
+                    })
+                })
+            })
+            put("systemInstruction", JSONObject().apply {
+                put("parts", JSONArray().apply {
+                    put(JSONObject().apply {
+                        put("text", SystemInfoService.generateSystemContext())
+                    })
+                })
+            })
+        }
+        
+        return try {
+            val response = makeApiCallSimple(
+                ApiProviderManager.getNextApiKey() ?: return null,
+                model,
+                request,
+                useLongTimeout = false
+            )
+            
+            val jsonStart = response.indexOf('{')
+            val jsonEnd = response.lastIndexOf('}') + 1
+            if (jsonStart >= 0 && jsonEnd > jsonStart) {
+                val json = JSONObject(response.substring(jsonStart, jsonEnd))
+                ServerInfo(
+                    framework = json.optString("framework", "Unknown"),
+                    startCommand = json.getString("start_command"),
+                    baseUrl = json.optString("base_url", "http://localhost:${json.optInt("port", 3000)}"),
+                    port = json.optInt("port", 3000),
+                    healthCheckPath = json.optString("health_check_path", null)
+                )
+            } else {
+                null
+            }
+        } catch (e: Exception) {
+            android.util.Log.w("GeminiClient", "AI server detection failed: ${e.message}")
+            null
+        }
+    }
+    
+    /**
+     * Debug server startup issues and try to fix them
+     */
+    private suspend fun debugServerStartup(
+        serverInfo: ServerInfo,
+        workspaceRoot: String,
+        emit: suspend (GeminiStreamEvent) -> Unit,
+        onChunk: (String) -> Unit,
+        onToolCall: (FunctionCall) -> Unit,
+        onToolResult: (String, Map<String, Any>) -> Unit
+    ): Boolean {
+        val workspaceDir = File(workspaceRoot)
+        
+        // Check for common issues
+        emit(GeminiStreamEvent.Chunk("🔍 Checking for common issues...\n"))
+        onChunk("🔍 Checking for common issues...\n")
+        
+        // Check if dependencies are installed
+        if (serverInfo.framework.contains("Node.js")) {
+            val packageJson = File(workspaceDir, "package.json")
+            if (packageJson.exists()) {
+                val nodeModules = File(workspaceDir, "node_modules")
+                if (!nodeModules.exists() || nodeModules.listFiles()?.isEmpty() == true) {
+                    emit(GeminiStreamEvent.Chunk("📦 Installing Node.js dependencies...\n"))
+                    onChunk("📦 Installing Node.js dependencies...\n")
+                    
+                    val installCall = FunctionCall(
+                        name = "shell",
+                        args = mapOf(
+                            "command" to "npm install",
+                            "description" to "Install Node.js dependencies",
+                            "dir_path" to workspaceRoot
+                        )
+                    )
+                    emit(GeminiStreamEvent.ToolCall(installCall))
+                    onToolCall(installCall)
+                    
+                    try {
+                        val installResult = executeToolSync("shell", installCall.args)
+                        emit(GeminiStreamEvent.ToolResult("shell", installResult))
+                        onToolResult("shell", installCall.args)
+                        
+                        if (installResult.error != null) {
+                            emit(GeminiStreamEvent.Chunk("⚠️ Dependency installation had issues\n"))
+                            onChunk("⚠️ Dependency installation had issues\n")
+                        }
+                    } catch (e: Exception) {
+                        android.util.Log.w("GeminiClient", "Dependency install failed: ${e.message}")
+                    }
+                }
+            }
+        }
+        
+        if (serverInfo.framework.contains("Flask") || serverInfo.framework.contains("FastAPI")) {
+            val requirementsFile = File(workspaceDir, "requirements.txt")
+            if (requirementsFile.exists()) {
+                emit(GeminiStreamEvent.Chunk("📦 Installing Python dependencies...\n"))
+                onChunk("📦 Installing Python dependencies...\n")
+                
+                val installCall = FunctionCall(
+                    name = "shell",
+                    args = mapOf(
+                        "command" to "pip3 install -r requirements.txt",
+                        "description" to "Install Python dependencies",
+                        "dir_path" to workspaceRoot
+                    )
+                )
+                emit(GeminiStreamEvent.ToolCall(installCall))
+                onToolCall(installCall)
+                
+                try {
+                    val installResult = executeToolSync("shell", installCall.args)
+                    emit(GeminiStreamEvent.ToolResult("shell", installResult))
+                    onToolResult("shell", installCall.args)
+                } catch (e: Exception) {
+                    android.util.Log.w("GeminiClient", "Dependency install failed: ${e.message}")
+                }
+            }
+        }
+        
+        // Try to start server again
+        emit(GeminiStreamEvent.Chunk("🔄 Retrying server startup...\n"))
+        onChunk("🔄 Retrying server startup...\n")
+        
+        val serverProcess = startServer(serverInfo, workspaceRoot, emit, onChunk, onToolCall, onToolResult)
+        return serverProcess != null
+    }
+    
+    /**
+     * Start server in background
+     */
+    private suspend fun startServer(
+        serverInfo: ServerInfo,
+        workspaceRoot: String,
+        emit: suspend (GeminiStreamEvent) -> Unit,
+        onChunk: (String) -> Unit,
+        onToolCall: (FunctionCall) -> Unit,
+        onToolResult: (String, Map<String, Any>) -> Unit
+    ): Process? {
+        // Use shell tool to start server
+        val startCall = FunctionCall(
+            name = "shell",
+            args = mapOf(
+                "command" to serverInfo.startCommand,
+                "description" to "Start ${serverInfo.framework} server",
+                "dir_path" to workspaceRoot
+            )
+        )
+        
+        emit(GeminiStreamEvent.ToolCall(startCall))
+        onToolCall(startCall)
+        
+        // Start server in background (non-blocking)
+        return try {
+            val workingDir = File(workspaceRoot)
+            val processBuilder = ProcessBuilder()
+                .command("sh", "-c", serverInfo.startCommand)
+                .directory(workingDir)
+                .redirectErrorStream(true)
+            
+            val env = processBuilder.environment()
+            env["PATH"] = "/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin:/system/bin:/system/xbin:${env["PATH"] ?: ""}"
+            env["HOME"] = env["HOME"] ?: "/root"
+            env["TERM"] = "xterm-256color"
+            
+            val process = processBuilder.start()
+            
+            // Give it a moment to start
+            kotlinx.coroutines.delay(2000)
+            
+            if (process.isAlive) {
+                emit(GeminiStreamEvent.Chunk("✅ Server process started\n"))
+                onChunk("✅ Server process started\n")
+                process
+            } else {
+                null
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("GeminiClient", "Failed to start server", e)
+            emit(GeminiStreamEvent.Chunk("❌ Failed to start server: ${e.message}\n"))
+            onChunk("❌ Failed to start server: ${e.message}\n")
+            null
+        }
+    }
+    
+    /**
+     * Wait for server to be ready
+     */
+    private suspend fun waitForServerReady(
+        baseUrl: String,
+        port: Int,
+        emit: suspend (GeminiStreamEvent) -> Unit,
+        onChunk: (String) -> Unit,
+        maxWaitSeconds: Int = 30
+    ): Boolean {
+        val client = OkHttpClient.Builder()
+            .connectTimeout(2, TimeUnit.SECONDS)
+            .readTimeout(2, TimeUnit.SECONDS)
+            .build()
+        
+        val healthPaths = listOf("/", "/health", "/api/health", "/status")
+        val startTime = System.currentTimeMillis()
+        
+        while (System.currentTimeMillis() - startTime < maxWaitSeconds * 1000L) {
+            for (path in healthPaths) {
+                try {
+                    val url = "$baseUrl$path"
+                    val request = Request.Builder()
+                        .url(url)
+                        .get()
+                        .build()
+                    
+                    val response = client.newCall(request).execute()
+                    if (response.isSuccessful || response.code in 200..499) {
+                        emit(GeminiStreamEvent.Chunk("✅ Server responded at $url\n"))
+                        onChunk("✅ Server responded at $url\n")
+                        return true
+                    }
+                    response.close()
+                } catch (e: Exception) {
+                    // Continue trying
+                }
+            }
+            
+            kotlinx.coroutines.delay(1000)
+            emit(GeminiStreamEvent.Chunk("⏳ Waiting for server...\n"))
+            onChunk("⏳ Waiting for server...\n")
+        }
+        
+        return false
+    }
+    
+    /**
+     * Detect API endpoints using AI
+     */
+    private suspend fun detectAPIEndpoints(
+        workspaceRoot: String,
+        serverInfo: ServerInfo,
+        userMessage: String,
+        emit: suspend (GeminiStreamEvent) -> Unit,
+        onChunk: (String) -> Unit
+    ): List<APIEndpoint> {
+        val workspaceDir = File(workspaceRoot)
+        val routeFiles = workspaceDir.walkTopDown()
+            .filter { it.isFile && (
+                it.name.endsWith(".js") || it.name.endsWith(".ts") || 
+                it.name.endsWith(".py") || it.name.contains("route") || 
+                it.name.contains("api") || it.name.contains("controller")
+            )}
+            .take(10)
+            .map { "${it.name}: ${it.readText().take(500)}" }
+            .toList()
+        
+        val prompt = """
+            Analyze the project to detect API endpoints that can be tested.
+            
+            Framework: ${serverInfo.framework}
+            Base URL: ${serverInfo.baseUrl}
+            
+            Route files:
+            ${routeFiles.joinToString("\n\n") { "---\n$it" }}
+            
+            User request: $userMessage
+            
+            Detect testable API endpoints. For each endpoint, provide:
+            - path: The endpoint path (e.g., "/api/login", "/posts", "/users/:id")
+            - method: HTTP method (GET, POST, PUT, DELETE, PATCH)
+            - description: What this endpoint does
+            - request_body: JSON body for POST/PUT requests (if needed)
+            - headers: Required headers (e.g., {"Content-Type": "application/json"})
+            - expected_status: Expected HTTP status code (200, 201, etc.)
+            
+            Focus on common CRUD operations:
+            - Login/Authentication endpoints
+            - Create operations (POST)
+            - Read operations (GET)
+            - Update operations (PUT/PATCH)
+            - Delete operations (DELETE)
+            
+            Return JSON array:
+            [
+              {
+                "path": "/api/login",
+                "method": "POST",
+                "description": "User login",
+                "request_body": "{\"username\":\"test\",\"password\":\"test\"}",
+                "headers": {"Content-Type": "application/json"},
+                "expected_status": 200
+              },
+              {
+                "path": "/api/posts",
+                "method": "GET",
+                "description": "Get all posts",
+                "request_body": null,
+                "headers": {},
+                "expected_status": 200
+              }
+            ]
+            
+            Only include endpoints that are actually testable (not requiring complex setup).
+            Limit to 5-10 most important endpoints.
+        """.trimIndent()
+        
+        val model = ApiProviderManager.getCurrentModel()
+        val request = JSONObject().apply {
+            put("contents", JSONArray().apply {
+                put(JSONObject().apply {
+                    put("role", "user")
+                    put("parts", JSONArray().apply {
+                        put(JSONObject().apply {
+                            put("text", prompt)
+                        })
+                    })
+                })
+            })
+            put("systemInstruction", JSONObject().apply {
+                put("parts", JSONArray().apply {
+                    put(JSONObject().apply {
+                        put("text", SystemInfoService.generateSystemContext())
+                    })
+                })
+            })
+        }
+        
+        return try {
+            val response = makeApiCallSimple(
+                ApiProviderManager.getNextApiKey() ?: return emptyList(),
+                model,
+                request,
+                useLongTimeout = false
+            )
+            
+            val jsonStart = response.indexOf('[')
+            val jsonEnd = response.lastIndexOf(']') + 1
+            if (jsonStart >= 0 && jsonEnd > jsonStart) {
+                val jsonArray = JSONArray(response.substring(jsonStart, jsonEnd))
+                val endpoints = mutableListOf<APIEndpoint>()
+                
+                for (i in 0 until jsonArray.length()) {
+                    try {
+                        val epObj = jsonArray.getJSONObject(i)
+                        val headersObj = epObj.optJSONObject("headers")
+                        val headers = if (headersObj != null) {
+                            (0 until headersObj.length()).associate {
+                                headersObj.names().getString(it) to headersObj.getString(headersObj.names().getString(it))
+                            }
+                        } else {
+                            emptyMap()
+                        }
+                        
+                        endpoints.add(APIEndpoint(
+                            path = epObj.getString("path"),
+                            method = epObj.getString("method"),
+                            description = epObj.optString("description", "API endpoint"),
+                            requestBody = epObj.optString("request_body", null),
+                            headers = headers,
+                            expectedStatus = epObj.optInt("expected_status", 200)
+                        ))
+                    } catch (e: Exception) {
+                        android.util.Log.w("GeminiClient", "Failed to parse endpoint: ${e.message}")
+                    }
+                }
+                
+                endpoints
+            } else {
+                emptyList()
+            }
+        } catch (e: Exception) {
+            android.util.Log.w("GeminiClient", "AI endpoint detection failed: ${e.message}")
+            emptyList()
+        }
+    }
+    
+    /**
+     * Test a single API endpoint
+     */
+    private suspend fun testEndpoint(
+        endpoint: APIEndpoint,
+        baseUrl: String,
+        emit: suspend (GeminiStreamEvent) -> Unit,
+        onChunk: (String) -> Unit
+    ): Boolean {
+        val url = "$baseUrl${endpoint.path}"
+        emit(GeminiStreamEvent.Chunk("🧪 Testing ${endpoint.method} $url - ${endpoint.description}\n"))
+        onChunk("🧪 Testing ${endpoint.method} $url - ${endpoint.description}\n")
+        
+        val client = OkHttpClient.Builder()
+            .connectTimeout(5, TimeUnit.SECONDS)
+            .readTimeout(5, TimeUnit.SECONDS)
+            .build()
+        
+        return try {
+            val requestBuilder = Request.Builder().url(url)
+            
+            // Add headers
+            val headersBuilder = Headers.Builder()
+            headersBuilder.add("Content-Type", "application/json")
+            endpoint.headers.forEach { (key, value) ->
+                headersBuilder.add(key, value)
+            }
+            requestBuilder.headers(headersBuilder.build())
+            
+            // Add request body for POST/PUT/PATCH
+            if (endpoint.requestBody != null && endpoint.method in listOf("POST", "PUT", "PATCH")) {
+                val body = RequestBody.create("application/json".toMediaType(), endpoint.requestBody)
+                when (endpoint.method) {
+                    "POST" -> requestBuilder.post(body)
+                    "PUT" -> requestBuilder.put(body)
+                    "PATCH" -> requestBuilder.patch(body)
+                    else -> requestBuilder.get()
+                }
+            } else {
+                requestBuilder.method(endpoint.method, null)
+            }
+            
+            val request = requestBuilder.build()
+            val response = client.newCall(request).execute()
+            
+            val success = response.code == endpoint.expectedStatus || 
+                         (response.code in 200..299 && endpoint.expectedStatus in 200..299)
+            
+            if (success) {
+                emit(GeminiStreamEvent.Chunk("✅ ${endpoint.method} $url - Status: ${response.code}\n"))
+                onChunk("✅ ${endpoint.method} $url - Status: ${response.code}\n")
+            } else {
+                emit(GeminiStreamEvent.Chunk("❌ ${endpoint.method} $url - Expected ${endpoint.expectedStatus}, got ${response.code}\n"))
+                onChunk("❌ ${endpoint.method} $url - Expected ${endpoint.expectedStatus}, got ${response.code}\n")
+            }
+            
+            response.close()
+            success
+        } catch (e: Exception) {
+            emit(GeminiStreamEvent.Chunk("❌ ${endpoint.method} $url - Error: ${e.message}\n"))
+            onChunk("❌ ${endpoint.method} $url - Error: ${e.message}\n")
+            false
+        }
+    }
+    
+    /**
      * Data class for commands with fallbacks
      */
     private data class CommandWithFallbacks(
@@ -2218,6 +2962,33 @@ class GeminiClient(
         } else {
             emit(GeminiStreamEvent.Chunk("ℹ️ No commands detected to run\n"))
             onChunk("ℹ️ No commands detected to run\n")
+        }
+        
+        // Phase 5: API Testing (for web frameworks only, skip Kotlin/Java)
+        val isWebFramework = detectWebFramework(workspaceRoot)
+        val isKotlinJava = detectKotlinJava(workspaceRoot)
+        
+        if (isWebFramework && !isKotlinJava) {
+            emit(GeminiStreamEvent.Chunk("\n🧪 Phase 5: Testing API endpoints...\n"))
+            onChunk("\n🧪 Phase 5: Testing API endpoints...\n")
+            
+            val testResult = testAPIs(workspaceRoot, systemInfo, userMessage, ::emit, onChunk, onToolCall, onToolResult)
+            
+            if (testResult) {
+                emit(GeminiStreamEvent.Chunk("✅ API testing completed successfully\n"))
+                onChunk("✅ API testing completed successfully\n")
+            } else {
+                emit(GeminiStreamEvent.Chunk("⚠️ API testing completed with some issues\n"))
+                onChunk("⚠️ API testing completed with some issues\n")
+            }
+        } else {
+            if (isKotlinJava) {
+                emit(GeminiStreamEvent.Chunk("\nℹ️ Skipping API testing for Kotlin/Java projects\n"))
+                onChunk("\nℹ️ Skipping API testing for Kotlin/Java projects\n")
+            } else {
+                emit(GeminiStreamEvent.Chunk("\nℹ️ No web framework detected, skipping API testing\n"))
+                onChunk("\nℹ️ No web framework detected, skipping API testing\n")
+            }
         }
         
         emit(GeminiStreamEvent.Chunk("\n✨ Project generation complete!\n"))
