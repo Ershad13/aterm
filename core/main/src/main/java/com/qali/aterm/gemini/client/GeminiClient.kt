@@ -3692,9 +3692,53 @@ exports.$functionName = (req, res, next) => {
                     emit(GeminiStreamEvent.Chunk("▶️ Testing: ${command.primaryCommand}\n"))
                     onChunk("▶️ Testing: ${command.primaryCommand}\n")
                     
-                    val result = executeCommandWithFallbacks(
+                    // First ensure command can run (with fallbacks)
+                    val canRun = executeCommandWithFallbacks(
                         command, workspaceRoot, systemInfo, ::emitEvent, onChunk, onToolCall, onToolResult
                     )
+                    
+                    if (!canRun) {
+                        hasTestFailures = true
+                        testFailures.add(Pair(command.primaryCommand, ToolResult(
+                            llmContent = "Command execution failed",
+                            returnDisplay = "Failed",
+                            error = ToolError(
+                                message = "Command could not be executed",
+                                type = ToolErrorType.EXECUTION_ERROR
+                            )
+                        )))
+                        emit(GeminiStreamEvent.Chunk("❌ Test failed: ${command.primaryCommand}\n"))
+                        onChunk("❌ Test failed: ${command.primaryCommand}\n")
+                        continue
+                    }
+                    
+                    // Execute the command to get actual result
+                    val shellCall = FunctionCall(
+                        name = "shell",
+                        args = mapOf(
+                            "command" to command.primaryCommand,
+                            "description" to "Run test: ${command.description}",
+                            "dir_path" to workspaceRoot
+                        )
+                    )
+                    emit(GeminiStreamEvent.ToolCall(shellCall))
+                    onToolCall(shellCall)
+                    
+                    val result = try {
+                        executeToolSync("shell", shellCall.args)
+                    } catch (e: Exception) {
+                        ToolResult(
+                            llmContent = "Error: ${e.message}",
+                            returnDisplay = "Error",
+                            error = ToolError(
+                                message = e.message ?: "Unknown error",
+                                type = ToolErrorType.EXECUTION_ERROR
+                            )
+                        )
+                    }
+                    
+                    emit(GeminiStreamEvent.ToolResult("shell", result))
+                    onToolResult("shell", shellCall.args)
                     
                     val isFailure = result.error != null || 
                         result.llmContent.contains("FAILED", ignoreCase = true) ||
@@ -3745,9 +3789,45 @@ exports.$functionName = (req, res, next) => {
                 onChunk("🔨 Checking build/compilation...\n")
                 
                 for (command in buildCommands) {
-                    val result = executeCommandWithFallbacks(
+                    val canRun = executeCommandWithFallbacks(
                         command, workspaceRoot, systemInfo, ::emitEvent, onChunk, onToolCall, onToolResult
                     )
+                    
+                    if (!canRun) {
+                        buildErrors = true
+                        hasTestFailures = true
+                        emit(GeminiStreamEvent.Chunk("❌ Build error detected: ${command.primaryCommand}\n"))
+                        onChunk("❌ Build error detected: ${command.primaryCommand}\n")
+                        continue
+                    }
+                    
+                    // Execute the command to get actual result
+                    val shellCall = FunctionCall(
+                        name = "shell",
+                        args = mapOf(
+                            "command" to command.primaryCommand,
+                            "description" to "Build: ${command.description}",
+                            "dir_path" to workspaceRoot
+                        )
+                    )
+                    emit(GeminiStreamEvent.ToolCall(shellCall))
+                    onToolCall(shellCall)
+                    
+                    val result = try {
+                        executeToolSync("shell", shellCall.args)
+                    } catch (e: Exception) {
+                        ToolResult(
+                            llmContent = "Error: ${e.message}",
+                            returnDisplay = "Error",
+                            error = ToolError(
+                                message = e.message ?: "Unknown error",
+                                type = ToolErrorType.EXECUTION_ERROR
+                            )
+                        )
+                    }
+                    
+                    emit(GeminiStreamEvent.ToolResult("shell", result))
+                    onToolResult("shell", shellCall.args)
                     
                     if (result.error != null || 
                         result.llmContent.contains("error", ignoreCase = true) ||
@@ -5026,9 +5106,52 @@ exports.$functionName = (req, res, next) => {
                 onChunk("🧪 Running tests to validate fixes...\n")
                 
                 for (command in testCommands) {
-                    val result = executeCommandWithFallbacks(
+                    val canRun = executeCommandWithFallbacks(
                         command, workspaceRoot, systemInfo, ::emitEvent, onChunk, onToolCall, onToolResult
                     )
+                    
+                    if (!canRun) {
+                        hasTestFailures = true
+                        testFailures.add(Pair(command.primaryCommand, ToolResult(
+                            llmContent = "Command execution failed",
+                            returnDisplay = "Failed",
+                            error = ToolError(
+                                message = "Command could not be executed",
+                                type = ToolErrorType.EXECUTION_ERROR
+                            )
+                        )))
+                        emit(GeminiStreamEvent.Chunk("❌ Test failed: ${command.primaryCommand}\n"))
+                        onChunk("❌ Test failed: ${command.primaryCommand}\n")
+                        continue
+                    }
+                    
+                    // Execute the command to get actual result
+                    val shellCall = FunctionCall(
+                        name = "shell",
+                        args = mapOf(
+                            "command" to command.primaryCommand,
+                            "description" to "Run test: ${command.description}",
+                            "dir_path" to workspaceRoot
+                        )
+                    )
+                    emit(GeminiStreamEvent.ToolCall(shellCall))
+                    onToolCall(shellCall)
+                    
+                    val result = try {
+                        executeToolSync("shell", shellCall.args)
+                    } catch (e: Exception) {
+                        ToolResult(
+                            llmContent = "Error: ${e.message}",
+                            returnDisplay = "Error",
+                            error = ToolError(
+                                message = e.message ?: "Unknown error",
+                                type = ToolErrorType.EXECUTION_ERROR
+                            )
+                        )
+                    }
+                    
+                    emit(GeminiStreamEvent.ToolResult("shell", result))
+                    onToolResult("shell", shellCall.args)
                     
                     val isFailure = result.error != null || 
                         result.llmContent.contains("FAILED", ignoreCase = true) ||
@@ -5325,9 +5448,53 @@ exports.$functionName = (req, res, next) => {
                 emit(GeminiStreamEvent.Chunk("▶️ Running: ${command.primaryCommand}\n"))
                 onChunk("▶️ Running: ${command.primaryCommand}\n")
                 
-                val result = executeCommandWithFallbacks(
+                // First ensure command can run (with fallbacks)
+                val canRun = executeCommandWithFallbacks(
                     command, workspaceRoot, systemInfo, ::emitEvent, onChunk, onToolCall, onToolResult
                 )
+                
+                if (!canRun) {
+                    hasTestFailures = true
+                    testResults.add(Pair(command.primaryCommand, ToolResult(
+                        llmContent = "Command execution failed",
+                        returnDisplay = "Failed",
+                        error = ToolError(
+                            message = "Command could not be executed",
+                            type = ToolErrorType.EXECUTION_ERROR
+                        )
+                    )))
+                    emit(GeminiStreamEvent.Chunk("❌ Test failed: ${command.primaryCommand}\n"))
+                    onChunk("❌ Test failed: ${command.primaryCommand}\n")
+                    continue
+                }
+                
+                // Execute the command to get actual result
+                val shellCall = FunctionCall(
+                    name = "shell",
+                    args = mapOf(
+                        "command" to command.primaryCommand,
+                        "description" to "Run test: ${command.description}",
+                        "dir_path" to workspaceRoot
+                    )
+                )
+                emit(GeminiStreamEvent.ToolCall(shellCall))
+                onToolCall(shellCall)
+                
+                val result = try {
+                    executeToolSync("shell", shellCall.args)
+                } catch (e: Exception) {
+                    ToolResult(
+                        llmContent = "Error: ${e.message}",
+                        returnDisplay = "Error",
+                        error = ToolError(
+                            message = e.message ?: "Unknown error",
+                            type = ToolErrorType.EXECUTION_ERROR
+                        )
+                    )
+                }
+                
+                emit(GeminiStreamEvent.ToolResult("shell", result))
+                onToolResult("shell", shellCall.args)
                 
                 testResults.add(Pair(command.primaryCommand, result))
                 
@@ -5599,9 +5766,44 @@ exports.$functionName = (req, res, next) => {
                     emit(GeminiStreamEvent.Chunk("▶️ Re-running: ${command.primaryCommand}\n"))
                     onChunk("▶️ Re-running: ${command.primaryCommand}\n")
                     
-                    val result = executeCommandWithFallbacks(
+                    val canRun = executeCommandWithFallbacks(
                         command, workspaceRoot, systemInfo, ::emitEvent, onChunk, onToolCall, onToolResult
                     )
+                    
+                    if (!canRun) {
+                        allPassed = false
+                        emit(GeminiStreamEvent.Chunk("❌ Test still failing: ${command.primaryCommand}\n"))
+                        onChunk("❌ Test still failing: ${command.primaryCommand}\n")
+                        continue
+                    }
+                    
+                    // Execute the command to get actual result
+                    val shellCall = FunctionCall(
+                        name = "shell",
+                        args = mapOf(
+                            "command" to command.primaryCommand,
+                            "description" to "Re-run test: ${command.description}",
+                            "dir_path" to workspaceRoot
+                        )
+                    )
+                    emit(GeminiStreamEvent.ToolCall(shellCall))
+                    onToolCall(shellCall)
+                    
+                    val result = try {
+                        executeToolSync("shell", shellCall.args)
+                    } catch (e: Exception) {
+                        ToolResult(
+                            llmContent = "Error: ${e.message}",
+                            returnDisplay = "Error",
+                            error = ToolError(
+                                message = e.message ?: "Unknown error",
+                                type = ToolErrorType.EXECUTION_ERROR
+                            )
+                        )
+                    }
+                    
+                    emit(GeminiStreamEvent.ToolResult("shell", result))
+                    onToolResult("shell", shellCall.args)
                     
                     if (result.error != null || 
                         (result.llmContent.contains("FAILED", ignoreCase = true)) ||
