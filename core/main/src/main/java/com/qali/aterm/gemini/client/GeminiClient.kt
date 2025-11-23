@@ -2303,7 +2303,6 @@ class GeminiClient(
                                 !controllerContent.contains("$functionName =")) {
                                 
                                 // Generate a basic function
-                                // Generate a basic function
                                 val functionNameFormatted = functionName.replace(Regex("([A-Z])"), " $1").trim()
                                 val functionCode = """
 // GET /admin/$functionName - Display form for $functionName
