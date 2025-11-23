@@ -4,6 +4,7 @@ import com.rk.libcommons.alpineDir
 import com.rk.settings.Settings
 import com.qali.aterm.api.ApiProviderManager
 import com.qali.aterm.api.ApiProviderManager.KeysExhaustedException
+import com.qali.aterm.api.ApiProviderType
 import com.qali.aterm.gemini.tools.DeclarativeTool
 import com.qali.aterm.gemini.core.*
 import com.qali.aterm.gemini.tools.*
@@ -25,7 +26,9 @@ import java.io.IOException
 import java.util.concurrent.TimeUnit
 
 /**
- * Main Gemini Client for making API calls and handling tool execution
+ * Multi-Provider Agent Client for making API calls and handling tool execution
+ * Supports: Google Gemini, OpenAI, Anthropic Claude, Ollama, and custom providers
+ * Handles both streaming and non-streaming modes with multi-phase workflows
  */
 class GeminiClient(
     private val toolRegistry: ToolRegistry,
@@ -753,7 +756,8 @@ class GeminiClient(
                             toolCall.put("type", "function")
                             val function = JSONObject()
                             function.put("name", functionCall.getString("name"))
-                            function.put("arguments", JSONObject(functionCall.getJSONObject("args")).toString())
+                            val argsJson = functionCall.getJSONObject("args")
+                            function.put("arguments", argsJson.toString())
                             toolCall.put("function", function)
                             toolCalls.put(toolCall)
                         } else if (part.has("functionResponse")) {
@@ -778,7 +782,8 @@ class GeminiClient(
                             val toolMsg = JSONObject()
                             toolMsg.put("role", "tool")
                             toolMsg.put("tool_call_id", functionResponse.optString("id", ""))
-                            toolMsg.put("content", JSONObject(functionResponse.getJSONObject("response")).toString())
+                            val responseJson = functionResponse.getJSONObject("response")
+                            toolMsg.put("content", responseJson.toString())
                             messages.put(toolMsg)
                             continue
                         }
