@@ -2202,6 +2202,113 @@ class GeminiClient(
     }
     
     /**
+     * Analyze linter errors to identify problematic files and code sections
+     */
+    private fun analyzeLinterError(
+        error: Exception,
+        filePath: String,
+        workspaceRoot: String
+    ): String {
+        val analysis = StringBuilder()
+        
+        analysis.appendLine("=== Error Analysis ===")
+        analysis.appendLine("File: $filePath")
+        analysis.appendLine("Error Type: ${error.javaClass.simpleName}")
+        analysis.appendLine("Error Message: ${error.message}")
+        
+        // Check for permission issues
+        if (error.message?.contains("Permission denied") == true) {
+            analysis.appendLine("\n⚠️ Permission Denied Detected")
+            analysis.appendLine("Root Cause: Command execution failed due to permissions")
+            analysis.appendLine("Solution: Commands should run through ShellTool (rootfs environment)")
+            analysis.appendLine("Status: Fixed - linter now uses ShellTool")
+        }
+        
+        // Check for command not found
+        if (error.message?.contains("Cannot run program") == true) {
+            analysis.appendLine("\n⚠️ Command Not Found")
+            val commandMatch = Regex("""Cannot run program "([^"]+)"""").find(error.message ?: "")
+            if (commandMatch != null) {
+                val command = commandMatch.groupValues[1]
+                analysis.appendLine("Missing Command: $command")
+                analysis.appendLine("Possible Solutions:")
+                analysis.appendLine("  1. Install the tool in the rootfs environment")
+                analysis.appendLine("  2. Use alternative linter (fallback to basic detection)")
+                analysis.appendLine("  3. Check if command is in PATH")
+            }
+        }
+        
+        // Analyze the file for potential issues
+        val file = File(workspaceRoot, filePath)
+        if (file.exists() && file.isFile) {
+            try {
+                val content = file.readText()
+                val lines = content.lines()
+                
+                analysis.appendLine("\n📄 File Analysis:")
+                analysis.appendLine("  Lines: ${lines.size}")
+                analysis.appendLine("  Size: ${file.length()} bytes")
+                
+                // Check for common issues in the file
+                val issues = mutableListOf<String>()
+                
+                // Check for syntax issues
+                lines.forEachIndexed { index, line ->
+                    val lineNum = index + 1
+                    
+                    // Check for unclosed brackets (basic)
+                    val openBraces = line.count { it == '{' }
+                    val closeBraces = line.count { it == '}' }
+                    if (openBraces != closeBraces && lineNum <= 50) { // Only check first 50 lines
+                        issues.add("Line $lineNum: Possible unclosed braces (${openBraces} open, ${closeBraces} close)")
+                    }
+                    
+                    // Check for common JavaScript issues
+                    if (filePath.endsWith(".js")) {
+                        if (line.contains("require(") && !line.contains("const") && !line.contains("let") && !line.contains("var")) {
+                            issues.add("Line $lineNum: require() not assigned to variable")
+                        }
+                    }
+                }
+                
+                if (issues.isNotEmpty()) {
+                    analysis.appendLine("\n⚠️ Potential Issues Found:")
+                    issues.take(5).forEach { issue ->
+                        analysis.appendLine("  - $issue")
+                    }
+                    if (issues.size > 5) {
+                        analysis.appendLine("  ... and ${issues.size - 5} more")
+                    }
+                } else {
+                    analysis.appendLine("  ✓ No obvious syntax issues detected")
+                }
+            } catch (e: Exception) {
+                analysis.appendLine("  ⚠️ Could not read file: ${e.message}")
+            }
+        } else {
+            analysis.appendLine("\n⚠️ File not found or not accessible")
+        }
+        
+        // Suggest fixes
+        analysis.appendLine("\n💡 Suggested Actions:")
+        if (error.message?.contains("Permission denied") == true) {
+            analysis.appendLine("  1. ✓ Fixed: Linter now uses ShellTool")
+            analysis.appendLine("  2. Check if file has correct permissions")
+            analysis.appendLine("  3. Verify rootfs environment is properly initialized")
+        } else if (error.message?.contains("Cannot run program") == true) {
+            analysis.appendLine("  1. Install missing tools in rootfs (e.g., node, python3)")
+            analysis.appendLine("  2. Use basic error detection (fallback)")
+            analysis.appendLine("  3. Check PATH environment variable")
+        } else {
+            analysis.appendLine("  1. Review error message above")
+            analysis.appendLine("  2. Check file syntax manually")
+            analysis.appendLine("  3. Use syntax_fix tool to attempt automatic fixes")
+        }
+        
+        return analysis.toString()
+    }
+    
+    /**
      * Test a single API endpoint
      */
     private suspend fun testEndpoint(
@@ -2892,6 +2999,13 @@ class GeminiClient(
                         }
                     } catch (e: Exception) {
                         android.util.Log.w("GeminiClient", "Linter check failed: ${e.message}")
+                        
+                        // Enhanced error detection and debugging
+                        val errorAnalysis = analyzeLinterError(e, filePath, workspaceRoot)
+                        if (errorAnalysis.isNotEmpty()) {
+                            emit(GeminiStreamEvent.Chunk("🔍 Error Analysis:\n$errorAnalysis\n"))
+                            onChunk("🔍 Error Analysis:\n$errorAnalysis\n")
+                        }
                         // Continue even if linter check fails
                     }
                 }

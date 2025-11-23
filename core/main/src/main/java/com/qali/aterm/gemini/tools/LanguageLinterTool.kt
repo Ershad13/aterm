@@ -4,6 +4,8 @@ import com.rk.libcommons.alpineDir
 import com.qali.aterm.gemini.core.FunctionDeclaration
 import com.qali.aterm.gemini.core.FunctionParameters
 import com.qali.aterm.gemini.core.PropertySchema
+import com.qali.aterm.gemini.tools.ShellToolParams
+import com.qali.aterm.gemini.tools.ShellToolInvocation
 import java.io.File
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -82,8 +84,35 @@ class LanguageLinterToolInvocation(
                 returnDisplay = if (errors.isEmpty()) "No linting issues found" else "Found ${errors.size} issue(s)"
             )
         } catch (e: Exception) {
+            // Enhanced error reporting with debugging information
+            val errorDetails = buildString {
+                appendLine("Error linting file: ${params.file_path}")
+                appendLine("Error type: ${e.javaClass.simpleName}")
+                appendLine("Error message: ${e.message}")
+                appendLine("File exists: ${file.exists()}")
+                appendLine("File readable: ${file.canRead()}")
+                appendLine("File path: ${file.absolutePath}")
+                appendLine("Workspace root: $workspaceRoot")
+                
+                // Try to get more context about the error
+                if (e is java.io.IOException) {
+                    appendLine("IO Error - possible causes:")
+                    appendLine("  - File permissions issue")
+                    appendLine("  - Command not found in PATH")
+                    appendLine("  - Rootfs environment not properly initialized")
+                }
+                
+                if (e.message?.contains("Permission denied") == true) {
+                    appendLine("\n⚠️ Permission denied - commands should run through ShellTool")
+                    appendLine("This usually means the linter tried to run commands directly")
+                    appendLine("instead of through the rootfs environment.")
+                }
+            }
+            
+            android.util.Log.e("LanguageLinterTool", errorDetails, e)
+            
             ToolResult(
-                llmContent = "Error linting file: ${e.message}",
+                llmContent = errorDetails,
                 returnDisplay = "Error: ${e.message}",
                 error = ToolError(
                     message = e.message ?: "Unknown error",
@@ -168,22 +197,33 @@ class LanguageLinterToolInvocation(
         val errors = mutableListOf<LinterError>()
         
         try {
-            // Try eslint if available
-            val eslintResult = runLinterCommand(
-                command = listOf("npx", "--yes", "eslint", "--format", "compact", file.absolutePath),
+            // Try node syntax check first (more reliable, doesn't need dependencies)
+            val nodeResult = runLinterCommand(
+                command = listOf("node", "--check", file.absolutePath),
                 file = file
             )
-            if (eslintResult.isNotEmpty() && !eslintResult.contains("No ESLint configuration")) {
-                errors.addAll(parseESLintOutput(eslintResult, file))
-            } else {
-                // Fallback to node syntax check
-                val nodeResult = runLinterCommand(
-                    command = listOf("node", "--check", file.absolutePath),
+            if (nodeResult.isNotEmpty() && !nodeResult.contains("Error:") && !nodeResult.contains("Permission denied")) {
+                errors.addAll(parseNodeCheckOutput(nodeResult, file))
+            }
+            
+            // Try eslint if available (only if node check passed or wasn't available)
+            if (errors.isEmpty() || nodeResult.contains("Permission denied") || nodeResult.contains("Error:")) {
+                val eslintResult = runLinterCommand(
+                    command = listOf("npx", "--yes", "eslint", "--format", "compact", file.absolutePath),
                     file = file
                 )
-                if (nodeResult.isNotEmpty()) {
-                    errors.addAll(parseNodeCheckOutput(nodeResult, file))
+                if (eslintResult.isNotEmpty() && 
+                    !eslintResult.contains("No ESLint configuration") && 
+                    !eslintResult.contains("Permission denied") &&
+                    !eslintResult.contains("Error:")) {
+                    errors.addAll(parseESLintOutput(eslintResult, file))
                 }
+            }
+            
+            // If all linters failed due to permission/availability, use basic detection
+            if (errors.isEmpty() && (nodeResult.contains("Permission denied") || nodeResult.contains("Error:"))) {
+                android.util.Log.w("LanguageLinterTool", "JavaScript linter not available, using basic detection")
+                errors.addAll(detectBasicErrors(file))
             }
         } catch (e: Exception) {
             // If linter not available, fall back to basic detection
@@ -226,22 +266,29 @@ class LanguageLinterToolInvocation(
     
     private suspend fun runLinterCommand(command: List<String>, file: File): String {
         return try {
-            val process = ProcessBuilder(command)
-                .directory(file.parentFile)
-                .redirectErrorStream(true)
-                .start()
+            // Use ShellTool to run commands through proper rootfs environment
+            val commandStr = command.joinToString(" ")
+            val shellTool = ShellToolInvocation(
+                ShellToolParams(
+                    command = commandStr,
+                    description = "Lint ${file.name}",
+                    dir_path = file.parentFile?.absolutePath
+                ),
+                workspaceRoot
+            )
             
-            val output = process.inputStream.bufferedReader().readText()
-            val exitCode = process.waitFor()
+            val result = shellTool.execute(null, null)
             
-            if (exitCode != 0) {
-                output
+            // Return output if there was an error or if output contains useful information
+            if (result.error != null || result.llmContent.isNotEmpty()) {
+                result.llmContent + if (result.error != null) "\nError: ${result.error?.message}" else ""
             } else {
                 ""
             }
         } catch (e: Exception) {
             android.util.Log.d("LanguageLinterTool", "Command failed: ${command.joinToString(" ")} - ${e.message}")
-            ""
+            // Return error message for better debugging
+            "Error: ${e.message}\nCommand: ${command.joinToString(" ")}\nFile: ${file.absolutePath}"
         }
     }
     
@@ -408,27 +455,147 @@ class LanguageLinterToolInvocation(
     }
     
     private fun detectBasicErrors(file: File): List<LinterError> {
-        // Fallback to basic syntax detection using existing tool
-        val detectionTool = SyntaxErrorDetectionToolInvocation(
-            SyntaxErrorDetectionParams(
-                file_path = file.relativeTo(File(workspaceRoot)).path,
-                check_types = true,
-                check_syntax = true,
-                suggest_fixes = false
-            ),
-            workspaceRoot
-        )
+        val errors = mutableListOf<LinterError>()
         
-        return try {
+        // First, try to read and analyze the file content directly
+        try {
+            val content = file.readText()
+            errors.addAll(analyzeFileContent(content, file))
+        } catch (e: Exception) {
+            android.util.Log.w("LanguageLinterTool", "Failed to read file: ${e.message}")
+        }
+        
+        // Also use syntax error detection tool for additional analysis
+        try {
+            val detectionTool = SyntaxErrorDetectionToolInvocation(
+                SyntaxErrorDetectionParams(
+                    file_path = file.relativeTo(File(workspaceRoot)).path,
+                    check_types = true,
+                    check_syntax = true,
+                    suggest_fixes = false
+                ),
+                workspaceRoot
+            )
+            
             val result = kotlinx.coroutines.runBlocking {
                 detectionTool.execute(null, null)
             }
             
             // Parse the result to extract errors
-            parseBasicErrorOutput(result.llmContent, file)
+            errors.addAll(parseBasicErrorOutput(result.llmContent, file))
         } catch (e: Exception) {
-            emptyList()
+            android.util.Log.w("LanguageLinterTool", "Syntax detection tool failed: ${e.message}")
         }
+        
+        return errors.distinctBy { "${it.lineNumber}:${it.message}" }
+    }
+    
+    /**
+     * Analyze file content for common errors
+     */
+    private fun analyzeFileContent(content: String, file: File): List<LinterError> {
+        val errors = mutableListOf<LinterError>()
+        val lines = content.lines()
+        val extension = file.extension.lowercase()
+        
+        // Check for common syntax issues
+        lines.forEachIndexed { index, line ->
+            val lineNum = index + 1
+            
+            // JavaScript/TypeScript specific checks
+            if (extension in listOf("js", "jsx", "ts", "tsx")) {
+                // Check for unclosed brackets
+                val openBraces = line.count { it == '{' }
+                val closeBraces = line.count { it == '}' }
+                val openParens = line.count { it == '(' }
+                val closeParens = line.count { it == ')' }
+                val openBrackets = line.count { it == '[' }
+                val closeBrackets = line.count { it == ']' }
+                
+                // Check for common issues
+                if (line.contains("require(") && !line.contains("const") && !line.contains("let") && !line.contains("var")) {
+                    errors.add(LinterError(
+                        filePath = file.absolutePath,
+                        lineNumber = lineNum,
+                        column = line.indexOf("require"),
+                        message = "require() should be assigned to a variable",
+                        errorType = "warning",
+                        code = "REQUIRE_ASSIGNMENT"
+                    ))
+                }
+                
+                // Check for undefined variables (basic check)
+                if (line.matches(Regex("""^\s*[a-zA-Z_$][a-zA-Z0-9_$]*\s*=""")) && 
+                    !line.contains("const") && !line.contains("let") && !line.contains("var")) {
+                    errors.add(LinterError(
+                        filePath = file.absolutePath,
+                        lineNumber = lineNum,
+                        column = 0,
+                        message = "Variable declaration missing const/let/var",
+                        errorType = "error",
+                        code = "MISSING_DECLARATION"
+                    ))
+                }
+            }
+            
+            // Python specific checks
+            if (extension == "py") {
+                // Check for indentation issues (basic)
+                if (line.isNotEmpty() && line[0] == ' ' && line.trim().isNotEmpty()) {
+                    val indent = line.takeWhile { it == ' ' }.length
+                    if (indent % 4 != 0 && indent > 0) {
+                        errors.add(LinterError(
+                            filePath = file.absolutePath,
+                            lineNumber = lineNum,
+                            column = 0,
+                            message = "Inconsistent indentation (should be multiple of 4 spaces)",
+                            errorType = "warning",
+                            code = "INDENTATION"
+                        ))
+                    }
+                }
+                
+                // Check for common syntax errors
+                if (line.contains("print ") && !line.contains("print(")) {
+                    errors.add(LinterError(
+                        filePath = file.absolutePath,
+                        lineNumber = lineNum,
+                        column = line.indexOf("print"),
+                        message = "print statement should use print() function (Python 3)",
+                        errorType = "error",
+                        code = "PRINT_STATEMENT"
+                    ))
+                }
+            }
+            
+            // Check for trailing whitespace
+            if (line.isNotEmpty() && line.last() == ' ') {
+                errors.add(LinterError(
+                    filePath = file.absolutePath,
+                    lineNumber = lineNum,
+                    column = line.length - 1,
+                    message = "Trailing whitespace",
+                    errorType = "warning",
+                    code = "TRAILING_WHITESPACE"
+                ))
+            }
+        }
+        
+        // Check for common file-level issues
+        if (extension in listOf("js", "jsx", "ts", "tsx")) {
+            // Check for missing semicolons in critical places
+            val lastLine = lines.lastOrNull()
+            if (lastLine != null && lastLine.trim().isNotEmpty() && 
+                !lastLine.trim().endsWith(";") && 
+                !lastLine.trim().endsWith("{") && 
+                !lastLine.trim().endsWith("}") &&
+                !lastLine.contains("function") &&
+                !lastLine.contains("=>")) {
+                // This is just a warning, not always an error
+            }
+        }
+        
+        return errors
     }
     
     private fun parseBasicErrorOutput(output: String, file: File): List<LinterError> {
