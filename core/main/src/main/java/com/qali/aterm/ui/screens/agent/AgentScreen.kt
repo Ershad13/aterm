@@ -1448,7 +1448,7 @@ fun AgentScreen(
                 ) {
                     Icon(
                         Icons.Default.BugReport, 
-                        contentDescription = "Debug", 
+                        contentDescription = "View Debug Info: Shows agent configuration, message history, and recent logcat entries for troubleshooting", 
                         tint = MaterialTheme.colorScheme.onPrimaryContainer,
                         modifier = Modifier.size(18.dp)
                     )

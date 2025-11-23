@@ -4401,6 +4401,20 @@ exports.$functionName = (req, res, next) => {
             onChunk("🔍 Task may need documentation search - adding to plan...\n")
             initialTodos.add(Todo("Search for relevant documentation and examples", TodoStatus.PENDING))
         }
+        
+        // Phase 0: Detect and run commands if requested (e.g., init-db, test APIs)
+        val messageLower = userMessage.lowercase()
+        val wantsCommands = messageLower.contains("run") || 
+                           messageLower.contains("init") || 
+                           messageLower.contains("test") ||
+                           messageLower.contains("execute") ||
+                           messageLower.contains("api test") ||
+                           messageLower.contains("check api")
+        
+        if (wantsCommands) {
+            initialTodos.add(Todo("Phase 0: Run requested commands", TodoStatus.PENDING))
+        }
+        
         initialTodos.addAll(listOf(
             Todo("Phase 1: Extract project structure", TodoStatus.PENDING),
             Todo("Phase 2: Analyze what needs fixing", TodoStatus.PENDING),
@@ -4409,24 +4423,134 @@ exports.$functionName = (req, res, next) => {
             Todo("Phase 5: Apply fixes", TodoStatus.PENDING)
         ))
         
-        // Mark Phase 1 as in progress (no withContext - emit must be in same context)
+        // Mark Phase 0 or Phase 1 as in progress
         val todosWithProgress = initialTodos.map { todo ->
-            if (todo.description == "Phase 1: Extract project structure") {
-                todo.copy(status = TodoStatus.IN_PROGRESS)
-            } else {
-                todo
+            when {
+                todo.description == "Phase 0: Run requested commands" && wantsCommands -> todo.copy(status = TodoStatus.IN_PROGRESS)
+                todo.description == "Phase 1: Extract project structure" && !wantsCommands -> todo.copy(status = TodoStatus.IN_PROGRESS)
+                else -> todo
             }
         }
         updateTodos(todosWithProgress)
         
-        // Phase 1: Extract project structure
-        emit(GeminiStreamEvent.Chunk("📊 Phase 1: Extracting project structure...\n"))
-        onChunk("📊 Phase 1: Extracting project structure...\n")
-        
-        // Helper function to wrap emit as suspend function
+        // Helper function to wrap emit as suspend function (used in multiple phases)
         suspend fun emitEvent(event: GeminiStreamEvent) {
             emit(event)
         }
+        
+        // Phase 0: Run requested commands
+        if (wantsCommands) {
+            emit(GeminiStreamEvent.Chunk("▶️ Phase 0: Detecting and running requested commands...\n"))
+            onChunk("▶️ Phase 0: Detecting and running requested commands...\n")
+            
+            // Detect commands to run
+            val commandsToRun = detectCommandsToRun(workspaceRoot, systemInfo, userMessage, ::emitEvent, onChunk)
+            
+            var hasCommandFailures = false
+            if (commandsToRun.isNotEmpty()) {
+                emit(GeminiStreamEvent.Chunk("📋 Found ${commandsToRun.size} command(s) to run\n"))
+                onChunk("📋 Found ${commandsToRun.size} command(s) to run\n")
+                
+                for (command in commandsToRun) {
+                    emit(GeminiStreamEvent.Chunk("▶️ Running: ${command.primaryCommand}\n"))
+                    onChunk("▶️ Running: ${command.primaryCommand}\n")
+                    
+                    // First ensure command can run (with fallbacks)
+                    val canRun = executeCommandWithFallbacks(
+                        command, workspaceRoot, systemInfo, ::emitEvent, onChunk, onToolCall, onToolResult
+                    )
+                    
+                    if (!canRun) {
+                        hasCommandFailures = true
+                        emit(GeminiStreamEvent.Chunk("❌ Command failed: ${command.primaryCommand}\n"))
+                        onChunk("❌ Command failed: ${command.primaryCommand}\n")
+                        continue
+                    }
+                    
+                    // Execute the command to get actual result
+                    val shellCall = FunctionCall(
+                        name = "shell",
+                        args = mapOf(
+                            "command" to command.primaryCommand,
+                            "description" to command.description,
+                            "dir_path" to workspaceRoot
+                        )
+                    )
+                    emit(GeminiStreamEvent.ToolCall(shellCall))
+                    onToolCall(shellCall)
+                    
+                    val result = try {
+                        executeToolSync("shell", shellCall.args)
+                    } catch (e: Exception) {
+                        ToolResult(
+                            llmContent = "Error: ${e.message}",
+                            returnDisplay = "Error",
+                            error = ToolError(
+                                message = e.message ?: "Unknown error",
+                                type = ToolErrorType.EXECUTION_ERROR
+                            )
+                        )
+                    }
+                    
+                    emit(GeminiStreamEvent.ToolResult("shell", result))
+                    onToolResult("shell", shellCall.args)
+                    
+                    // Check if command failed
+                    if (result.error != null || 
+                        result.llmContent.contains("error", ignoreCase = true) ||
+                        result.llmContent.contains("failed", ignoreCase = true)) {
+                        hasCommandFailures = true
+                        emit(GeminiStreamEvent.Chunk("❌ Command failed: ${command.primaryCommand}\n"))
+                        onChunk("❌ Command failed: ${command.primaryCommand}\n")
+                    } else {
+                        emit(GeminiStreamEvent.Chunk("✅ Command completed: ${command.primaryCommand}\n"))
+                        onChunk("✅ Command completed: ${command.primaryCommand}\n")
+                    }
+                }
+            } else {
+                emit(GeminiStreamEvent.Chunk("ℹ️ No specific commands detected to run\n"))
+                onChunk("ℹ️ No specific commands detected to run\n")
+            }
+            
+            // Run API tests if requested
+            val wantsApiTest = messageLower.contains("api") || 
+                             messageLower.contains("endpoint") || 
+                             messageLower.contains("test api") ||
+                             messageLower.contains("check api")
+            
+            val isWebFramework = detectWebFramework(workspaceRoot)
+            val isKotlinJava = detectKotlinJava(workspaceRoot)
+            
+            if (wantsApiTest && isWebFramework && !isKotlinJava) {
+                emit(GeminiStreamEvent.Chunk("🌐 Running API tests...\n"))
+                onChunk("🌐 Running API tests...\n")
+                
+                val apiTestResult = testAPIs(workspaceRoot, systemInfo, userMessage, ::emitEvent, onChunk, onToolCall, onToolResult)
+                if (!apiTestResult) {
+                    hasCommandFailures = true
+                }
+            }
+            
+            // Update Phase 0 todo
+            val phase0CompletedTodos = currentTodos.map { todo ->
+                when {
+                    todo.description == "Phase 0: Run requested commands" -> todo.copy(status = TodoStatus.COMPLETED)
+                    todo.description == "Phase 1: Extract project structure" -> todo.copy(status = TodoStatus.IN_PROGRESS)
+                    else -> todo
+                }
+            }
+            updateTodos(phase0CompletedTodos)
+            
+            // If commands failed, we'll continue to code analysis to fix issues
+            if (hasCommandFailures) {
+                emit(GeminiStreamEvent.Chunk("⚠️ Some commands failed. Proceeding to analyze and fix issues...\n"))
+                onChunk("⚠️ Some commands failed. Proceeding to analyze and fix issues...\n")
+            }
+        }
+        
+        // Phase 1: Extract project structure
+        emit(GeminiStreamEvent.Chunk("📊 Phase 1: Extracting project structure...\n"))
+        onChunk("📊 Phase 1: Extracting project structure...\n")
         
         val projectStructure = extractProjectStructure(workspaceRoot, signal, ::emitEvent, onChunk)
         
@@ -6098,6 +6222,175 @@ exports.$functionName = (req, res, next) => {
             }
         } catch (e: Exception) {
             android.util.Log.w("GeminiClient", "AI test command detection failed: ${e.message}")
+            emptyList()
+        }
+    }
+    
+    /**
+     * Detect commands to run based on user request (e.g., init-db, npm scripts, etc.)
+     */
+    private suspend fun detectCommandsToRun(
+        workspaceRoot: String,
+        systemInfo: SystemInfoService.SystemInfo,
+        userMessage: String,
+        emit: suspend (GeminiStreamEvent) -> Unit,
+        onChunk: (String) -> Unit
+    ): List<CommandWithFallbacks> {
+        val workspaceDir = File(workspaceRoot)
+        if (!workspaceDir.exists()) return emptyList()
+        
+        // Get list of files
+        val files = workspaceDir.walkTopDown()
+            .filter { it.isFile && !it.name.startsWith(".") }
+            .map { it.relativeTo(workspaceDir).path }
+            .take(50)
+            .toList()
+        
+        val systemContext = SystemInfoService.generateSystemContext()
+        
+        val installCmd = when (systemInfo.packageManager.lowercase()) {
+            "apk" -> "apk add"
+            "apt", "apt-get" -> "apt-get install -y"
+            "yum" -> "yum install -y"
+            "dnf" -> "dnf install -y"
+            "pacman" -> "pacman -S --noconfirm"
+            else -> systemInfo.packageManagerCommands["install"] ?: "apk add"
+        }
+        
+        val updateCmd = when (systemInfo.packageManager.lowercase()) {
+            "apk" -> "apk update"
+            "apt", "apt-get" -> "apt-get update"
+            "yum" -> "yum update -y"
+            "dnf" -> "dnf update -y"
+            "pacman" -> "pacman -Sy"
+            else -> systemInfo.packageManagerCommands["update"] ?: "apk update"
+        }
+        
+        // Check package.json for scripts
+        val packageJson = File(workspaceDir, "package.json")
+        var packageScripts = ""
+        if (packageJson.exists()) {
+            try {
+                val packageContent = packageJson.readText()
+                packageScripts = packageContent
+            } catch (e: Exception) {
+                // Ignore
+            }
+        }
+        
+        val commandDetectionPrompt = """
+            $systemContext
+            
+            Analyze the project structure and user request to determine what commands need to be executed.
+            
+            Files in workspace:
+            ${files.joinToString("\n") { "- $it" }}
+            
+            ${if (packageScripts.isNotEmpty()) "package.json scripts:\n$packageScripts\n" else ""}
+            
+            User request: $userMessage
+            
+            Based on the files, package.json scripts (if any), and user request, determine:
+            1. What commands should be run? (e.g., "npm run init-db", "npm run init-db", "python manage.py migrate", etc.)
+            2. What dependencies need to be installed first?
+            3. What fallback commands are needed if tools are missing?
+            
+            Focus on commands mentioned in the user request (e.g., "init-db", "init db", "run init-db", etc.).
+            Look for npm scripts, python commands, or other project-specific commands.
+            
+            For each command needed, provide:
+            - primary_command: The main command to execute (e.g., "npm run init-db")
+            - description: What this command does
+            - check_command: Command to check if tool is available (e.g., "npm --version")
+            - fallback_commands: List of commands to run if tool is missing
+              - First: Install dependencies (e.g., "npm install")
+              - Second: Install tool via package manager (e.g., "$installCmd nodejs npm")
+              - Third: Update package manager and install (e.g., "$updateCmd && $installCmd nodejs npm")
+            
+            Format as JSON array:
+            [
+              {
+                "primary_command": "npm run init-db",
+                "description": "Initialize database",
+                "check_command": "npm --version",
+                "fallback_commands": [
+                  "npm install",
+                  "$installCmd nodejs npm",
+                  "$updateCmd && $installCmd nodejs npm"
+                ]
+              }
+            ]
+            
+            Only include commands that are actually needed based on the user request. If no commands are needed, return an empty array [].
+        """.trimIndent()
+        
+        val model = ApiProviderManager.getCurrentModel()
+        val request = JSONObject().apply {
+            put("contents", JSONArray().apply {
+                put(JSONObject().apply {
+                    put("role", "user")
+                    put("parts", JSONArray().apply {
+                        put(JSONObject().apply {
+                            put("text", commandDetectionPrompt)
+                        })
+                    })
+                })
+            })
+            put("systemInstruction", JSONObject().apply {
+                put("parts", JSONArray().apply {
+                    put(JSONObject().apply {
+                        put("text", systemContext)
+                    })
+                })
+            })
+        }
+        
+        return try {
+            val response = makeApiCallSimple(
+                ApiProviderManager.getCurrentApiKey(),
+                model,
+                request,
+                useLongTimeout = false
+            )
+            
+            if (response != null) {
+                val jsonStart = response.indexOf('[')
+                val jsonEnd = response.lastIndexOf(']') + 1
+                if (jsonStart >= 0 && jsonEnd > jsonStart) {
+                    val jsonArray = JSONArray(response.substring(jsonStart, jsonEnd))
+                    val detectedCommands = mutableListOf<CommandWithFallbacks>()
+                    
+                    for (i in 0 until jsonArray.length()) {
+                        try {
+                            val cmdObj = jsonArray.getJSONObject(i)
+                            val primaryCmd = cmdObj.getString("primary_command")
+                            val description = cmdObj.optString("description", "Run command")
+                            val checkCmd = cmdObj.optString("check_command", null)
+                            val fallbacks = cmdObj.optJSONArray("fallback_commands")?.let { array ->
+                                (0 until array.length()).mapNotNull { array.optString(it, null) }
+                            } ?: emptyList()
+                            
+                            detectedCommands.add(CommandWithFallbacks(
+                                primaryCommand = primaryCmd,
+                                description = description,
+                                fallbacks = fallbacks,
+                                checkCommand = checkCmd.takeIf { it.isNotBlank() },
+                                installCheck = null
+                            ))
+                        } catch (e: Exception) {
+                            android.util.Log.w("GeminiClient", "Failed to parse command: ${e.message}")
+                        }
+                    }
+                    
+                    detectedCommands
+                } else {
+                    emptyList()
+                }
+            } else {
+                emptyList()
+            }
+        } catch (e: Exception) {
+            android.util.Log.w("GeminiClient", "AI command detection failed: ${e.message}")
             emptyList()
         }
     }

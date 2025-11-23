@@ -106,10 +106,13 @@ class ShellToolInvocation(
                         
                         // Set up environment variables matching rootfs/terminal session environment
                         val env = processBuilder.environment()
-                        // Use comprehensive PATH that includes rootfs paths
+                        // Use comprehensive PATH that includes rootfs paths and common Node.js/npm locations
                         val rootfsPath = "/bin:/sbin:/usr/bin:/usr/sbin:/usr/share/bin:/usr/share/sbin:/usr/local/bin:/usr/local/sbin"
+                        // Add common Node.js/npm installation paths
+                        val nodePaths = "/usr/local/lib/node_modules/npm/bin:/usr/local/bin/node:/usr/bin/node:/opt/node/bin"
                         val systemPath = "/system/bin:/system/xbin"
-                        env["PATH"] = "$rootfsPath:$systemPath:${env["PATH"] ?: ""}"
+                        // Prioritize rootfs paths, then node paths, then system paths
+                        env["PATH"] = "$rootfsPath:$nodePaths:$systemPath:${env["PATH"] ?: ""}"
                         env["HOME"] = env["HOME"] ?: "/root"
                         env["SHELL"] = "/bin/sh"
                         env["TERM"] = "xterm-256color"
