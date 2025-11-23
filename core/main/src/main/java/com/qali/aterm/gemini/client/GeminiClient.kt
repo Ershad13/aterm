@@ -1426,15 +1426,26 @@ class GeminiClient(
             1. What is the primary command to run? (e.g., "python3 app.py", "npm start", "node server.js")
             2. What dependencies need to be installed first?
             3. What fallback commands are needed if tools are missing?
+            4. Does the project need a virtual environment (venv)? Check for requirements.txt, pyproject.toml, or virtualenv indicators
+            5. What if the language/runtime is not installed? (e.g., Python, Node.js, etc.)
             
             For each command needed, provide:
             - primary_command: The main command to execute
             - description: What this command does
             - check_command: Command to check if tool is available (e.g., "python3 --version")
             - fallback_commands: List of commands to run if tool is missing (in order of preference)
-              - First: Install dependencies (e.g., "pip3 install -r requirements.txt")
-              - Second: Install tool via package manager (e.g., "$installCmd python3 python3-pip")
-              - Third: Update package manager and install (e.g., "$updateCmd && $installCmd python3 python3-pip")
+              - First: Check and create virtual environment if needed (e.g., "python3 -m venv venv" or check if venv exists)
+              - Second: Install dependencies (e.g., "pip3 install -r requirements.txt" or "source venv/bin/activate && pip install -r requirements.txt")
+              - Third: Install tool via package manager (e.g., "$installCmd python3 python3-pip")
+              - Fourth: Update package manager and install (e.g., "$updateCmd && $installCmd python3 python3-pip")
+              - Fifth: For Python projects, check if venv needs activation: "source venv/bin/activate" or ". venv/bin/activate"
+            
+            IMPORTANT: Handle all these cases in one comprehensive response:
+            - Language not installed (Python, Node.js, etc.)
+            - Virtual environment needed but not created
+            - Virtual environment exists but not activated
+            - Dependencies not installed
+            - Package manager needs update
             
             Format as JSON array:
             [
@@ -1443,7 +1454,8 @@ class GeminiClient(
                 "description": "Run Python application",
                 "check_command": "python3 --version",
                 "fallback_commands": [
-                  "pip3 install -r requirements.txt",
+                  "python3 -m venv venv || true",
+                  "source venv/bin/activate && pip install -r requirements.txt || pip3 install -r requirements.txt",
                   "$installCmd python3 python3-pip",
                   "$updateCmd && $installCmd python3 python3-pip"
                 ]
@@ -2566,6 +2578,7 @@ exports.$functionName = (req, res, next) => {
     
     /**
      * Execute command with fallbacks if it fails
+     * Handles all cases: missing language, venv, dependencies, etc.
      */
     private suspend fun executeCommandWithFallbacks(
         command: CommandWithFallbacks,
@@ -2597,19 +2610,20 @@ exports.$functionName = (req, res, next) => {
                 onToolResult("shell", checkCall.args)
                 
                 if (checkResult.error != null) {
-                    // Tool not available, try fallbacks
-                    emit(GeminiStreamEvent.Chunk("⚠️ Tool not found, trying to install...\n"))
-                    onChunk("⚠️ Tool not found, trying to install...\n")
+                    // Tool not available, try fallbacks in order
+                    emit(GeminiStreamEvent.Chunk("⚠️ Tool not found, trying fallbacks...\n"))
+                    onChunk("⚠️ Tool not found, trying fallbacks...\n")
                     
-                    for (fallback in command.fallbacks) {
-                        emit(GeminiStreamEvent.Chunk("📦 Installing: $fallback\n"))
-                        onChunk("📦 Installing: $fallback\n")
+                    var fallbackSuccess = false
+                    for ((index, fallback) in command.fallbacks.withIndex()) {
+                        emit(GeminiStreamEvent.Chunk("📦 Fallback ${index + 1}/${command.fallbacks.size}: $fallback\n"))
+                        onChunk("📦 Fallback ${index + 1}/${command.fallbacks.size}: $fallback\n")
                         
                         val fallbackCall = FunctionCall(
                             name = "shell",
                             args = mapOf(
                                 "command" to fallback,
-                                "description" to "Install dependencies for ${command.description}",
+                                "description" to "Setup/install for ${command.description}",
                                 "dir_path" to workspaceRoot
                             )
                         )
@@ -2622,24 +2636,66 @@ exports.$functionName = (req, res, next) => {
                             onToolResult("shell", fallbackCall.args)
                             
                             if (fallbackResult.error == null) {
-                                // Installation successful, retry primary command
-                                break
+                                // Fallback successful, continue to next or retry check
+                                fallbackSuccess = true
+                                
+                                // If this was venv creation or activation, re-check the tool
+                                if (fallback.contains("venv") || fallback.contains("activate")) {
+                                    emit(GeminiStreamEvent.Chunk("✅ Environment setup complete, rechecking tool...\n"))
+                                    onChunk("✅ Environment setup complete, rechecking tool...\n")
+                                    
+                                    val recheckCall = FunctionCall(
+                                        name = "shell",
+                                        args = mapOf(
+                                            "command" to command.checkCommand!!,
+                                            "description" to "Recheck if ${command.description} tool is available"
+                                        )
+                                    )
+                                    emit(GeminiStreamEvent.ToolCall(recheckCall))
+                                    onToolCall(recheckCall)
+                                    
+                                    val recheckResult = executeToolSync("shell", recheckCall.args)
+                                    emit(GeminiStreamEvent.ToolResult("shell", recheckResult))
+                                    onToolResult("shell", recheckCall.args)
+                                    
+                                    if (recheckResult.error == null) {
+                                        break // Tool is now available
+                                    }
+                                } else {
+                                    // For install commands, break and try primary command
+                                    break
+                                }
                             }
                         } catch (e: Exception) {
                             android.util.Log.w("GeminiClient", "Fallback command failed: ${e.message}")
+                            // Continue to next fallback
                         }
+                    }
+                    
+                    if (!fallbackSuccess && command.fallbacks.isNotEmpty()) {
+                        emit(GeminiStreamEvent.Chunk("⚠️ All fallbacks failed, but continuing with primary command...\n"))
+                        onChunk("⚠️ All fallbacks failed, but continuing with primary command...\n")
                     }
                 }
             } catch (e: Exception) {
                 android.util.Log.w("GeminiClient", "Check command failed: ${e.message}")
+                // Continue to try primary command anyway
             }
         }
         
-        // Execute primary command
+        // Execute primary command (may need venv activation)
+        val primaryCommand = if (command.primaryCommand.contains("python") && 
+            File(workspaceRoot, "venv").exists()) {
+            // Check if venv needs activation
+            "source venv/bin/activate && ${command.primaryCommand}"
+        } else {
+            command.primaryCommand
+        }
+        
         val primaryCall = FunctionCall(
             name = "shell",
             args = mapOf(
-                "command" to command.primaryCommand,
+                "command" to primaryCommand,
                 "description" to command.description,
                 "dir_path" to workspaceRoot
             )
@@ -2657,6 +2713,40 @@ exports.$functionName = (req, res, next) => {
                 onChunk("✅ Command executed successfully\n")
                 return true
             } else {
+                // If command failed, try with venv activation if it's Python
+                if (command.primaryCommand.contains("python") && 
+                    !primaryCommand.contains("venv") &&
+                    File(workspaceRoot, "venv").exists()) {
+                    emit(GeminiStreamEvent.Chunk("⚠️ Command failed, trying with venv activation...\n"))
+                    onChunk("⚠️ Command failed, trying with venv activation...\n")
+                    
+                    val venvCommand = "source venv/bin/activate && ${command.primaryCommand}"
+                    val venvCall = FunctionCall(
+                        name = "shell",
+                        args = mapOf(
+                            "command" to venvCommand,
+                            "description" to "${command.description} (with venv)",
+                            "dir_path" to workspaceRoot
+                        )
+                    )
+                    emit(GeminiStreamEvent.ToolCall(venvCall))
+                    onToolCall(venvCall)
+                    
+                    try {
+                        val venvResult = executeToolSync("shell", venvCall.args)
+                        emit(GeminiStreamEvent.ToolResult("shell", venvResult))
+                        onToolResult("shell", venvCall.args)
+                        
+                        if (venvResult.error == null) {
+                            emit(GeminiStreamEvent.Chunk("✅ Command executed successfully with venv\n"))
+                            onChunk("✅ Command executed successfully with venv\n")
+                            return true
+                        }
+                    } catch (e: Exception) {
+                        android.util.Log.w("GeminiClient", "Venv command failed: ${e.message}")
+                    }
+                }
+                
                 emit(GeminiStreamEvent.Chunk("❌ Command failed: ${result.error?.message}\n"))
                 onChunk("❌ Command failed: ${result.error?.message}\n")
                 return false
@@ -3784,11 +3874,19 @@ exports.$functionName = (req, res, next) => {
                 val jsonSubstring = cleanedText.substring(jsonStart, jsonEnd)
                 
                 // Check for actual invalid JSON patterns (not just the presence of these strings)
-                // Only flag if it's clearly invalid JSON, not if these are valid string values
-                val hasInvalidPattern = jsonSubstring.contains("[object Undefined]") || 
-                                       jsonSubstring.contains("[object undefined]") ||
-                                       (jsonSubstring.contains("[object") && !jsonSubstring.contains("\"[object")) ||
-                                       (jsonSubstring.contains("undefined") && !jsonSubstring.contains("\"undefined\"") && !jsonSubstring.contains("'undefined'"))
+                // Only flag if it's clearly invalid JSON, not if these are valid string values in description fields
+                // Check if [object Undefined] appears outside of quoted strings (actual JSON error)
+                val hasInvalidPattern = try {
+                    // Try to parse first - if it fails, then check for patterns
+                    JSONArray(jsonSubstring)
+                    false // Valid JSON, no invalid pattern
+                } catch (e: Exception) {
+                    // JSON parsing failed, check if it's due to [object Undefined] pattern
+                    // Only flag if [object appears at the start of array/object (not in description strings)
+                    jsonSubstring.trimStart().startsWith("[object") || 
+                    jsonSubstring.contains("[object Undefined]") && !jsonSubstring.contains("\"[object Undefined]\"") ||
+                    (jsonSubstring.contains("[object") && !jsonSubstring.contains("\"[object") && jsonSubstring.indexOf("[object") < 50)
+                }
                 
                 if (hasInvalidPattern) {
                     android.util.Log.w("GeminiClient", "Response contains invalid JSON pattern: ${jsonSubstring.take(200)}")

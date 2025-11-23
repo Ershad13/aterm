@@ -170,8 +170,22 @@ class EditToolInvocation(
         )
         
         if (currentContent == newContent && !isNewFile) {
+            // Check if the fix was already applied (maybe by a previous attempt)
+            // Or if old_string doesn't match but new_string is already in the file
+            val newStringInFile = currentContent?.contains(newString) == true
+            val oldStringInFile = currentContent?.contains(oldString) == true
+            
+            if (newStringInFile && !oldStringInFile) {
+                // The new content is already in the file, fix was likely already applied
+                return ToolResult(
+                    llmContent = "Fix already applied. The new content is already present in the file.",
+                    returnDisplay = "Already applied",
+                    error = null // Not an error, just informational
+                )
+            }
+            
             return ToolResult(
-                llmContent = "No changes to apply. The new content is identical to the current content.",
+                llmContent = "No changes to apply. The new content is identical to the current content. If you expected changes, verify that old_string matches the file content exactly.",
                 returnDisplay = "No changes",
                 error = ToolError(
                     message = "No changes to apply",
