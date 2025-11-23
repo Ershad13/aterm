@@ -5,6 +5,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -61,30 +62,44 @@ fun RootfsSetupScreen(
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(24.dp)
+            .padding(20.dp)
             .verticalScroll(rememberScrollState()),
         horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(16.dp)
+        verticalArrangement = Arrangement.spacedBy(20.dp)
     ) {
-        // Header
-        Icon(
-            imageVector = Icons.Default.CloudDownload,
-            contentDescription = null,
-            modifier = Modifier.size(64.dp),
-            tint = MaterialTheme.colorScheme.primary
-        )
-        Text(
-            text = "Welcome to aTerm",
-            style = MaterialTheme.typography.headlineMedium,
-            fontWeight = FontWeight.Bold
-        )
-        Text(
-            text = "Choose a Linux distribution to install",
-            style = MaterialTheme.typography.bodyLarge,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
-
-        Spacer(modifier = Modifier.height(8.dp))
+        // Header with improved styling
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.primaryContainer
+            )
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(24.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.CloudDownload,
+                    contentDescription = null,
+                    modifier = Modifier.size(64.dp),
+                    tint = MaterialTheme.colorScheme.onPrimaryContainer
+                )
+                Text(
+                    text = "Welcome to aTerm",
+                    style = MaterialTheme.typography.headlineMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onPrimaryContainer
+                )
+                Text(
+                    text = "Choose a Linux distribution to install",
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.8f)
+                )
+            }
+        }
 
         // Rootfs selection cards
         RootfsOptionCard(
@@ -112,7 +127,7 @@ fun RootfsSetupScreen(
         )
 
         RootfsOptionCard(
-            title = "Pick File",
+            title = "📁 Pick File",
             description = "Select a rootfs file from your device",
             icon = Icons.Default.FolderOpen,
             isSelected = selectedType == RootfsType.FILE_PICKER,
@@ -173,29 +188,60 @@ fun RootfsSetupScreen(
 
         // Distro type selector (shown for all types)
         if (selectedType != null) {
-            Spacer(modifier = Modifier.height(8.dp))
-            Text(
-                text = "Select Distribution Type:",
-                style = MaterialTheme.typography.labelMedium,
-                modifier = Modifier.fillMaxWidth()
-            )
-            Row(
+            Spacer(modifier = Modifier.height(16.dp))
+            Card(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceVariant
+                )
             ) {
-                DistroType.values().forEach { distro ->
-                    FilterChip(
-                        selected = selectedDistro == distro,
-                        onClick = { 
-                            selectedDistro = distro
-                            // Clear custom init script if selecting a predefined distro
-                            if (distro.hasPredefinedInit) {
-                                customInitScript = ""
-                            }
-                        },
-                        label = { Text(distro.displayName) },
-                        modifier = Modifier.weight(1f)
-                    )
+                Column(
+                    modifier = Modifier.padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Category,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary
+                        )
+                        Text(
+                            text = "Distribution Type",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        DistroType.values().forEach { distro ->
+                            FilterChip(
+                                selected = selectedDistro == distro,
+                                onClick = { 
+                                    selectedDistro = distro
+                                    // Clear custom init script if selecting a predefined distro
+                                    if (distro.hasPredefinedInit) {
+                                        customInitScript = ""
+                                    }
+                                },
+                                label = { 
+                                    Text(
+                                        text = distro.displayName,
+                                        maxLines = 1,
+                                        softWrap = false
+                                    ) 
+                                }
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -635,9 +681,24 @@ fun RootfsSetupScreen(
 }
 
 fun getInitialStoragePath(context: Context): String {
+    // Prioritize /sdcard and /storage/emulated/0 (actual SD card mounting points)
+    val sdcardPaths = listOf(
+        "/sdcard",
+        "/storage/emulated/0",
+        "/storage/sdcard0",
+        "/mnt/sdcard"
+    )
+    
+    for (path in sdcardPaths) {
+        val dir = File(path)
+        if (dir.exists() && dir.isDirectory && dir.canRead()) {
+            return path
+        }
+    }
+    
     // Try to get external storage directory
     val externalStorage = Environment.getExternalStorageDirectory()
-    if (externalStorage != null && externalStorage.exists()) {
+    if (externalStorage != null && externalStorage.exists() && externalStorage.canRead()) {
         return externalStorage.absolutePath
     }
     
@@ -645,28 +706,19 @@ fun getInitialStoragePath(context: Context): String {
     val externalFilesDir = context.getExternalFilesDir(null)
     if (externalFilesDir != null && externalFilesDir.exists()) {
         val parent = externalFilesDir.parentFile
-        if (parent != null && parent.exists()) {
+        if (parent != null && parent.exists() && parent.canRead()) {
             return parent.absolutePath
         }
     }
     
-    // Try common storage paths
-    val commonPaths = listOf(
-        "/storage/emulated/0",
-        "/storage/sdcard0",
-        "/sdcard",
-        "/mnt/sdcard"
-    )
-    
-    for (path in commonPaths) {
-        val dir = File(path)
-        if (dir.exists() && dir.isDirectory) {
-            return path
-        }
+    // Fallback to /storage if it exists
+    val storageDir = File("/storage")
+    if (storageDir.exists() && storageDir.isDirectory && storageDir.canRead()) {
+        return "/storage"
     }
     
-    // Fallback to external storage directory
-    return Environment.getExternalStorageDirectory().absolutePath
+    // Last resort fallback
+    return "/sdcard"
 }
 
 @Composable
@@ -678,108 +730,221 @@ fun FilePickerDialog(
 ) {
     var currentPath by remember { mutableStateOf(initialPath) }
     var files by remember { mutableStateOf<List<File>>(emptyList()) }
+    var isLoading by remember { mutableStateOf(false) }
+    var errorMessage by remember { mutableStateOf<String?>(null) }
     
     LaunchedEffect(currentPath) {
+        isLoading = true
+        errorMessage = null
         withContext(Dispatchers.IO) {
-            val dir = File(currentPath)
-            files = if (dir.exists() && dir.isDirectory) {
-                dir.listFiles()?.toList() ?: emptyList()
-            } else {
-                emptyList()
+            try {
+                val dir = File(currentPath)
+                if (dir.exists() && dir.isDirectory && dir.canRead()) {
+                    files = dir.listFiles()?.filter { file ->
+                        // Show directories and .tar/.tar.gz files
+                        file.isDirectory || file.name.endsWith(".tar.gz", ignoreCase = true) || 
+                        file.name.endsWith(".tar", ignoreCase = true)
+                    }?.toList() ?: emptyList()
+                } else {
+                    files = emptyList()
+                    errorMessage = "Cannot access directory: $currentPath"
+                }
+            } catch (e: Exception) {
+                files = emptyList()
+                errorMessage = "Error reading directory: ${e.message}"
             }
         }
+        isLoading = false
     }
     
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Select Rootfs File") },
+        title = { 
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("Select Rootfs File")
+                IconButton(onClick = onDismiss) {
+                    Icon(Icons.Default.Close, contentDescription = "Close")
+                }
+            }
+        },
         text = {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .heightIn(max = 400.dp)
+                    .heightIn(max = 500.dp)
             ) {
                 // Storage shortcuts
                 Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     val storagePaths = listOf(
-                        "Internal" to getInitialStoragePath(context),
-                        "Download" to File(getInitialStoragePath(context), "Download").absolutePath,
-                        "/storage" to "/storage"
+                        "📁 SD Card" to "/sdcard",
+                        "📁 Storage" to "/storage/emulated/0",
+                        "📁 Downloads" to File("/sdcard", "Download").absolutePath,
+                        "📁 Root" to "/storage"
                     )
                     
                     storagePaths.forEach { (label, path) ->
                         val dir = File(path)
-                        if (dir.exists() && dir.isDirectory) {
+                        if (dir.exists() && dir.isDirectory && dir.canRead()) {
                             FilterChip(
                                 selected = currentPath == path,
                                 onClick = { currentPath = path },
-                                label = { Text(label) }
+                                label = { Text(label, maxLines = 1) }
                             )
                         }
                     }
                 }
                 
+                Spacer(modifier = Modifier.height(8.dp))
                 Divider()
+                Spacer(modifier = Modifier.height(8.dp))
                 
-                // Path bar
+                // Path bar with navigation
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    if (File(currentPath).parentFile != null) {
-                        TextButton(onClick = {
+                    IconButton(
+                        onClick = {
                             File(currentPath).parentFile?.let {
-                                currentPath = it.absolutePath
+                                if (it.exists() && it.canRead()) {
+                                    currentPath = it.absolutePath
+                                }
                             }
-                        }) {
-                            Text("←")
-                        }
+                        },
+                        enabled = File(currentPath).parentFile != null
+                    ) {
+                        Icon(Icons.Default.ArrowBack, contentDescription = "Go up")
                     }
                     Text(
                         text = currentPath,
                         modifier = Modifier.weight(1f),
-                        maxLines = 1,
-                        style = MaterialTheme.typography.bodySmall
+                        maxLines = 2,
+                        style = MaterialTheme.typography.bodySmall,
+                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
                     )
                 }
                 
+                Spacer(modifier = Modifier.height(8.dp))
                 Divider()
+                Spacer(modifier = Modifier.height(8.dp))
                 
                 // File list
-                LazyColumn(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .weight(1f)
-                ) {
-                    items(files.sortedWith(compareBy({ !it.isDirectory }, { it.name.lowercase() }))) { file ->
-                        Card(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(vertical = 2.dp),
-                            onClick = {
-                                if (file.isDirectory) {
-                                    currentPath = file.absolutePath
-                                } else if (file.name.endsWith(".tar.gz") || file.name.endsWith(".tar")) {
-                                    onFileSelected(file)
-                                }
-                            }
+                if (isLoading) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(200.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        CircularProgressIndicator()
+                    }
+                } else if (errorMessage != null) {
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.errorContainer
+                        )
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(12.dp),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Row(
+                            Icon(
+                                imageVector = Icons.Default.Error,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onErrorContainer
+                            )
+                            Text(
+                                text = errorMessage!!,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onErrorContainer
+                            )
+                        }
+                    }
+                } else if (files.isEmpty()) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(200.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = "No files found",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                } else {
+                    LazyColumn(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(300.dp)
+                    ) {
+                        items(files.sortedWith(compareBy({ !it.isDirectory }, { it.name.lowercase() }))) { file ->
+                            Card(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .padding(12.dp),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Icon(
-                                    imageVector = if (file.isDirectory) Icons.Default.Folder else Icons.Default.InsertDriveFile,
-                                    contentDescription = null
+                                    .padding(vertical = 4.dp),
+                                onClick = {
+                                    if (file.isDirectory) {
+                                        currentPath = file.absolutePath
+                                    } else if (file.name.endsWith(".tar.gz", ignoreCase = true) || 
+                                              file.name.endsWith(".tar", ignoreCase = true)) {
+                                        onFileSelected(file)
+                                    }
+                                },
+                                colors = CardDefaults.cardColors(
+                                    containerColor = if (file.isDirectory) {
+                                        MaterialTheme.colorScheme.surfaceVariant
+                                    } else {
+                                        MaterialTheme.colorScheme.primaryContainer
+                                    }
                                 )
-                                Text(file.name)
+                            ) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(12.dp),
+                                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Icon(
+                                        imageVector = if (file.isDirectory) Icons.Default.Folder else Icons.Default.Archive,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(24.dp),
+                                        tint = if (file.isDirectory) {
+                                            MaterialTheme.colorScheme.primary
+                                        } else {
+                                            MaterialTheme.colorScheme.onPrimaryContainer
+                                        }
+                                    )
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            text = file.name,
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            maxLines = 1,
+                                            overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+                                        )
+                                        if (!file.isDirectory) {
+                                            Text(
+                                                text = "${(file.length() / 1024 / 1024)} MB",
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                        }
+                                    }
+                                }
                             }
                         }
                     }

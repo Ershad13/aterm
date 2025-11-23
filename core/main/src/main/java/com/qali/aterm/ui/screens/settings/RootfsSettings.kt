@@ -3,6 +3,7 @@ package com.qali.aterm.ui.screens.settings
 import android.os.Build
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -163,9 +164,10 @@ fun RootfsSettings(
                             selected = selectedType == RootfsType.FILE_PICKER,
                             onClick = { 
                                 selectedType = RootfsType.FILE_PICKER
+                                // Show file picker immediately
                                 showFilePicker = true
                             },
-                            label = { Text("Pick File") }
+                            label = { Text("📁 Pick File") }
                         )
                     }
 
@@ -220,27 +222,60 @@ fun RootfsSettings(
 
                     // Distro type selector
                     if (selectedType != null) {
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Text(
-                            text = "Select Distribution Type:",
-                            style = MaterialTheme.typography.labelMedium
-                        )
-                        Row(
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Card(
                             modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            colors = CardDefaults.cardColors(
+                                containerColor = MaterialTheme.colorScheme.surfaceVariant
+                            )
                         ) {
-                            com.qali.aterm.ui.screens.setup.DistroType.values().forEach { distro ->
-                                FilterChip(
-                                    selected = selectedDistro == distro,
-                                    onClick = { 
-                                        selectedDistro = distro
-                                        if (distro.hasPredefinedInit) {
-                                            customInitScript = ""
-                                        }
-                                    },
-                                    label = { Text(distro.displayName) },
-                                    modifier = Modifier.weight(1f)
-                                )
+                            Column(
+                                modifier = Modifier.padding(12.dp),
+                                verticalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Category,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                    Text(
+                                        text = "Distribution Type",
+                                        style = MaterialTheme.typography.labelLarge,
+                                        fontWeight = FontWeight.Bold,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .horizontalScroll(rememberScrollState()),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    com.qali.aterm.ui.screens.setup.DistroType.values().forEach { distro ->
+                                        FilterChip(
+                                            selected = selectedDistro == distro,
+                                            onClick = { 
+                                                selectedDistro = distro
+                                                if (distro.hasPredefinedInit) {
+                                                    customInitScript = ""
+                                                }
+                                            },
+                                            label = { 
+                                                Text(
+                                                    text = distro.displayName,
+                                                    maxLines = 1,
+                                                    softWrap = false
+                                                ) 
+                                            }
+                                        )
+                                    }
+                                }
                             }
                         }
                     }
@@ -602,22 +637,26 @@ fun RootfsSettings(
         )
     }
     
-    // File picker dialog
+    // File picker dialog - shows on top of install dialog
     val context = LocalContext.current
     if (showFilePicker) {
         FilePickerDialog(
             context = context,
             initialPath = getInitialStoragePath(context),
-            onDismiss = { showFilePicker = false },
+            onDismiss = { 
+                showFilePicker = false
+            },
             onFileSelected = { file ->
-                if (file.name.endsWith(".tar.gz") || file.name.endsWith(".tar")) {
+                if (file.name.endsWith(".tar.gz", ignoreCase = true) || file.name.endsWith(".tar", ignoreCase = true)) {
                     selectedFile = file
                     if (rootfsName.isBlank()) {
                         rootfsName = file.name.substringBeforeLast(".")
                     }
                     showFilePicker = false
+                    errorMessage = null // Clear any previous errors
                 } else {
                     errorMessage = "Please select a .tar.gz or .tar file"
+                    showFilePicker = false
                 }
             }
         )
