@@ -4294,9 +4294,70 @@ exports.$functionName = (req, res, next) => {
             }
         }
         
+        // Check for ES Module configuration errors first
+        val isESModuleError = output.contains("Unexpected identifier") && 
+                             (output.contains("import ") || output.contains("export ")) &&
+                             (output.contains(".js") || output.contains("SyntaxError"))
+        
+        if (isESModuleError) {
+            // Check if package.json exists and has type: "module"
+            val packageJson = File(workspaceDir, "package.json")
+            if (!packageJson.exists() || !packageJson.readText().contains("\"type\": \"module\"")) {
+                emit(GeminiStreamEvent.Chunk("📦 ES Module error detected - checking package.json...\n"))
+                onChunk("📦 ES Module error detected - checking package.json...\n")
+                
+                try {
+                    val jsonObj = if (packageJson.exists()) {
+                        JSONObject(packageJson.readText())
+                    } else {
+                        // Create new package.json with ES Module support
+                        JSONObject().apply {
+                            put("name", workspaceDir.name)
+                            put("version", "1.0.0")
+                            put("type", "module")
+                            put("main", "server.js")
+                            put("scripts", JSONObject().apply {
+                                put("start", "node server.js")
+                            })
+                            put("dependencies", JSONObject())
+                        }
+                    }
+                    
+                    // Add or update type: "module"
+                    if (!jsonObj.has("type") || jsonObj.optString("type") != "module") {
+                        jsonObj.put("type", "module")
+                        
+                        val updatedContent = jsonObj.toString(2)
+                        val writeCall = FunctionCall(
+                            name = "write",
+                            args = mapOf(
+                                "file_path" to "package.json",
+                                "contents" to updatedContent
+                            )
+                        )
+                        emit(GeminiStreamEvent.ToolCall(writeCall))
+                        onToolCall(writeCall)
+                        
+                        val writeResult = executeToolSync("write", writeCall.args)
+                        emit(GeminiStreamEvent.ToolResult("write", writeResult))
+                        onToolResult("write", writeCall.args)
+                        
+                        if (writeResult.error == null) {
+                            emit(GeminiStreamEvent.Chunk("✅ Added 'type: \"module\"' to package.json\n"))
+                            onChunk("✅ Added 'type: \"module\"' to package.json\n")
+                            return true // Successfully fixed ES Module config
+                        }
+                    }
+                } catch (e: Exception) {
+                    android.util.Log.w("GeminiClient", "Failed to fix package.json: ${e.message}")
+                }
+            }
+        }
+        
         if (errorFile == null) {
             android.util.Log.d("GeminiClient", "Could not extract file path from error")
-            return false
+            // Even if we can't find the file, if we fixed package.json, return true
+            return isESModuleError
         }
         
         // Resolve file path (could be relative or absolute)
@@ -4307,7 +4368,7 @@ exports.$functionName = (req, res, next) => {
         
         if (!targetFile.exists()) {
             android.util.Log.d("GeminiClient", "Error file not found: ${targetFile.absolutePath}")
-            return false
+            return isESModuleError // Return true if we fixed package.json
         }
         
         emit(GeminiStreamEvent.Chunk("📝 Found error in: ${targetFile.name}${if (errorLine != null) " at line $errorLine" else ""}\n"))
@@ -4324,9 +4385,90 @@ exports.$functionName = (req, res, next) => {
                 fileContent.take(1000)
             }
             
+            // Check for __dirname usage in ES Modules (common issue)
+            val hasDirname = fileContent.contains("__dirname") && !fileContent.contains("import.meta.url")
+            if (hasDirname && isESModuleError) {
+                emit(GeminiStreamEvent.Chunk("🔧 Fixing __dirname for ES Modules...\n"))
+                onChunk("🔧 Fixing __dirname for ES Modules...\n")
+                
+                // Add imports if missing
+                val needsPathImport = !fileContent.contains("import path from")
+                val needsUrlImport = !fileContent.contains("import url from") && !fileContent.contains("import { fileURLToPath }")
+                
+                var fixedContent = fileContent
+                if (needsPathImport || needsUrlImport) {
+                    val importLines = mutableListOf<String>()
+                    if (needsPathImport) importLines.add("import path from 'path';")
+                    if (needsUrlImport) importLines.add("import { fileURLToPath } from 'url';")
+                    
+                    // Find first import line or add at top
+                    val firstImportIndex = fixedContent.indexOf("import ")
+                    if (firstImportIndex >= 0) {
+                        val lineEnd = fixedContent.indexOf('\n', firstImportIndex)
+                        fixedContent = fixedContent.substring(0, lineEnd + 1) + 
+                                      importLines.joinToString("\n") + "\n" + 
+                                      fixedContent.substring(lineEnd + 1)
+                    } else {
+                        fixedContent = importLines.joinToString("\n") + "\n\n" + fixedContent
+                    }
+                }
+                
+                // Replace __dirname definitions
+                val dirnamePattern = Regex("""const\s+__dirname\s*=\s*path\.dirname\([^)]+\)""")
+                if (dirnamePattern.find(fixedContent) == null && fixedContent.contains("__dirname")) {
+                    // Add __dirname definition if not present but __dirname is used
+                    val dirnameDef = "const __dirname = path.dirname(fileURLToPath(import.meta.url));"
+                    // Find the last import statement
+                    val lastImportIndex = fixedContent.lastIndexOf("import ")
+                    if (lastImportIndex >= 0) {
+                        // Find the end of that import line
+                        val lineEnd = fixedContent.indexOf('\n', lastImportIndex)
+                        if (lineEnd >= 0) {
+                            fixedContent = fixedContent.substring(0, lineEnd + 1) + 
+                                          "\n$dirnameDef" + 
+                                          fixedContent.substring(lineEnd + 1)
+                        } else {
+                            // No newline found, add at end
+                            fixedContent = fixedContent + "\n\n$dirnameDef"
+                        }
+                    } else {
+                        // No imports, add at top
+                        fixedContent = "$dirnameDef\n\n$fixedContent"
+                    }
+                } else if (dirnamePattern.find(fixedContent) != null) {
+                    // Replace existing __dirname definitions
+                    fixedContent = dirnamePattern.replace(fixedContent) {
+                        "const __dirname = path.dirname(fileURLToPath(import.meta.url));"
+                    }
+                }
+                
+                if (fixedContent != fileContent) {
+                    val editCall = FunctionCall(
+                        name = "edit",
+                        args = mapOf(
+                            "file_path" to targetFile.relativeTo(workspaceDir).path,
+                            "old_string" to fileContent,
+                            "new_string" to fixedContent
+                        )
+                    )
+                    emit(GeminiStreamEvent.ToolCall(editCall))
+                    onToolCall(editCall)
+                    
+                    val editResult = executeToolSync("edit", editCall.args)
+                    emit(GeminiStreamEvent.ToolResult("edit", editResult))
+                    onToolResult("edit", editCall.args)
+                    
+                    if (editResult.error == null) {
+                        emit(GeminiStreamEvent.Chunk("✅ Fixed __dirname for ES Modules\n"))
+                        onChunk("✅ Fixed __dirname for ES Modules\n")
+                        return true
+                    }
+                }
+            }
+            
             // Use AI to analyze and fix the code error
             val debugPrompt = """
-                Analyze and fix the code error in the file.
+                Analyze and fix the code error. Be concise and direct - provide ONLY the JSON fix, no explanations.
                 
                 **File:** ${targetFile.name}
                 **Error Output:** ${output.take(1500)}
@@ -4338,23 +4480,18 @@ exports.$functionName = (req, res, next) => {
                 $errorContext
                 ```
                 
-                Provide a fix using the edit tool with:
-                - file_path: ${targetFile.relativeTo(workspaceDir).path}
-                - old_string: The problematic code section
-                - new_string: The fixed code
-                
-                Focus on fixing:
-                - Syntax errors (missing brackets, quotes, etc.)
-                - Import errors (wrong imports, missing modules)
-                - Type errors (wrong types, undefined variables)
-                - Runtime errors (null pointers, undefined properties)
-                
-                Return JSON with the fix:
+                Return ONLY valid JSON (no markdown, no code blocks):
                 {
                   "file_path": "${targetFile.relativeTo(workspaceDir).path}",
-                  "old_string": "problematic code",
-                  "new_string": "fixed code"
+                  "old_string": "exact problematic code to replace",
+                  "new_string": "exact fixed code"
                 }
+                
+                Focus on:
+                - Syntax errors (missing brackets, quotes, semicolons)
+                - Import/export errors (wrong syntax, missing modules)
+                - Type errors (undefined variables, wrong types)
+                - Common patterns (__dirname in ES modules, etc.)
             """.trimIndent()
             
             val model = ApiProviderManager.getCurrentModel()
