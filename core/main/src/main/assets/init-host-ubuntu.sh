@@ -1,24 +1,42 @@
-UBUNTU_DIR=$PREFIX/local/ubuntu
+# Determine rootfs file and directory from environment or defaults
+ROOTFS_FILE="${ROOTFS_FILE:-ubuntu.tar.gz}"
+ROOTFS_DIR="${ROOTFS_DIR:-ubuntu}"
 
-mkdir -p $UBUNTU_DIR
+# If ROOTFS_DIR is not set, infer from ROOTFS_FILE
+if [ -z "$ROOTFS_DIR" ] || [ "$ROOTFS_DIR" = "ubuntu" ]; then
+    if [ "$ROOTFS_FILE" = "alpine.tar.gz" ]; then
+        ROOTFS_DIR="alpine"
+    elif [ "$ROOTFS_FILE" != "ubuntu.tar.gz" ]; then
+        # For custom rootfs, use filename without extension
+        ROOTFS_DIR=$(echo "$ROOTFS_FILE" | sed 's/\.tar\.gz$//' | sed 's/\.tar$//' | tr '[:upper:]' '[:lower:]' | tr ' ' '_')
+    fi
+fi
 
-if [ -z "$(ls -A "$UBUNTU_DIR" | grep -vE '^(root|tmp)$')" ]; then
-    if [ ! -f "$PREFIX/files/ubuntu.tar.gz" ]; then
-        echo "Error: ubuntu.tar.gz not found at $PREFIX/files/ubuntu.tar.gz"
+ROOTFS_DIR_PATH="$PREFIX/local/$ROOTFS_DIR"
+
+mkdir -p "$ROOTFS_DIR_PATH"
+
+# Extract rootfs if directory is empty (excluding root and tmp)
+if [ -z "$(ls -A "$ROOTFS_DIR_PATH" 2>/dev/null | grep -vE '^(root|tmp)$')" ]; then
+    ROOTFS_FILE_PATH="$PREFIX/files/$ROOTFS_FILE"
+    if [ ! -f "$ROOTFS_FILE_PATH" ]; then
+        echo "Error: $ROOTFS_FILE not found at $ROOTFS_FILE_PATH"
         exit 1
     fi
-    echo "Extracting Ubuntu rootfs..."
-    # Use --no-same-owner and --no-same-permissions to avoid permission errors
-    # Ignore symlink errors as they're warnings, not fatal - the extraction will still succeed
-    tar -xzf "$PREFIX/files/ubuntu.tar.gz" -C "$UBUNTU_DIR" --no-same-owner --no-same-permissions 2>&1 | grep -v "tar: Removing leading" | grep -v "can't link" || true
-    
-    # Verify extraction was successful by checking for key directories
-    if [ ! -d "$UBUNTU_DIR/usr" ] && [ ! -d "$UBUNTU_DIR/bin" ]; then
-        echo "Error: Failed to extract ubuntu.tar.gz - no system directories found"
-        exit 1
+    echo "Extracting $ROOTFS_FILE to $ROOTFS_DIR..."
+    # Use appropriate tar flags based on file extension
+    if echo "$ROOTFS_FILE" | grep -q "\.tar\.gz$"; then
+        tar -xzf "$ROOTFS_FILE_PATH" -C "$ROOTFS_DIR_PATH" --no-same-owner --no-same-permissions 2>&1 | grep -v "tar: Removing leading" | grep -v "can't link" || true
+    else
+        tar -xf "$ROOTFS_FILE_PATH" -C "$ROOTFS_DIR_PATH" --no-same-owner --no-same-permissions 2>&1 | grep -v "tar: Removing leading" | grep -v "can't link" || true
     fi
     
-    echo "Ubuntu rootfs extracted successfully (some symlink warnings are normal)"
+    # Verify extraction was successful
+    if [ ! -d "$ROOTFS_DIR_PATH/usr" ] && [ ! -d "$ROOTFS_DIR_PATH/bin" ] && [ ! -d "$ROOTFS_DIR_PATH/etc" ]; then
+        echo "Error: Failed to extract $ROOTFS_FILE - no system directories found"
+        exit 1
+    fi
+    echo "$ROOTFS_FILE extracted successfully (some symlink warnings are normal)"
 fi
 
 [ ! -e "$PREFIX/local/bin/proot" ] && cp "$PREFIX/files/proot" "$PREFIX/local/bin"
@@ -74,13 +92,13 @@ fi
 ARGS="$ARGS -b $PREFIX"
 ARGS="$ARGS -b /sys"
 
-if [ ! -d "$PREFIX/local/ubuntu/tmp" ]; then
- mkdir -p "$PREFIX/local/ubuntu/tmp"
- chmod 1777 "$PREFIX/local/ubuntu/tmp"
+if [ ! -d "$ROOTFS_DIR_PATH/tmp" ]; then
+ mkdir -p "$ROOTFS_DIR_PATH/tmp"
+ chmod 1777 "$ROOTFS_DIR_PATH/tmp"
 fi
-ARGS="$ARGS -b $PREFIX/local/ubuntu/tmp:/dev/shm"
+ARGS="$ARGS -b $ROOTFS_DIR_PATH/tmp:/dev/shm"
 
-ARGS="$ARGS -r $PREFIX/local/ubuntu"
+ARGS="$ARGS -r $ROOTFS_DIR_PATH"
 ARGS="$ARGS -0"
 ARGS="$ARGS --link2symlink"
 ARGS="$ARGS --sysvipc"

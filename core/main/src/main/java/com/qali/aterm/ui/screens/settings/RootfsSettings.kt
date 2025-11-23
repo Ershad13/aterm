@@ -656,6 +656,36 @@ fun RootfsSettings(
                                     Rootfs.clearRootfsInitScript(finalRootfsName)
                                 }
                                 
+                                // Determine working mode based on rootfs type and distro
+                                val targetWorkingMode = when (selectedType) {
+                                    RootfsType.ALPINE -> com.qali.aterm.ui.screens.settings.WorkingMode.ALPINE
+                                    RootfsType.UBUNTU -> com.qali.aterm.ui.screens.settings.WorkingMode.UBUNTU
+                                    RootfsType.FILE_PICKER, RootfsType.CUSTOM -> {
+                                        // For custom rootfs, determine working mode based on distro type
+                                        when (selectedDistro) {
+                                            com.qali.aterm.ui.screens.setup.DistroType.UBUNTU -> com.qali.aterm.ui.screens.settings.WorkingMode.UBUNTU
+                                            com.qali.aterm.ui.screens.setup.DistroType.DEBIAN, 
+                                            com.qali.aterm.ui.screens.setup.DistroType.KALI, 
+                                            com.qali.aterm.ui.screens.setup.DistroType.ARCH, 
+                                            com.qali.aterm.ui.screens.setup.DistroType.ALPINE, 
+                                            com.qali.aterm.ui.screens.setup.DistroType.CUSTOM -> {
+                                                // Use ALPINE working mode for these (they use similar init scripts)
+                                                com.qali.aterm.ui.screens.settings.WorkingMode.ALPINE
+                                            }
+                                            null -> com.qali.aterm.ui.screens.settings.WorkingMode.ALPINE
+                                        }
+                                    }
+                                    null -> com.qali.aterm.ui.screens.settings.WorkingMode.ALPINE
+                                }
+                                
+                                // Store mapping between working mode and rootfs file
+                                Rootfs.setRootfsFileForWorkingMode(targetWorkingMode, finalRootfsName)
+                                
+                                // Set as default working mode if this is a custom rootfs
+                                if (selectedType == RootfsType.FILE_PICKER || selectedType == RootfsType.CUSTOM) {
+                                    com.rk.settings.Settings.working_Mode = targetWorkingMode
+                                }
+                                
                                 installedRootfs.value = Rootfs.getInstalledRootfsList()
                                 Rootfs.isDownloaded.value = Rootfs.isFilesDownloaded()
 

@@ -1,9 +1,42 @@
-ALPINE_DIR=$PREFIX/local/alpine
+# Determine rootfs file and directory from environment or defaults
+ROOTFS_FILE="${ROOTFS_FILE:-alpine.tar.gz}"
+ROOTFS_DIR="${ROOTFS_DIR:-alpine}"
 
-mkdir -p $ALPINE_DIR
+# If ROOTFS_DIR is not set, infer from ROOTFS_FILE
+if [ -z "$ROOTFS_DIR" ] || [ "$ROOTFS_DIR" = "alpine" ]; then
+    if [ "$ROOTFS_FILE" = "ubuntu.tar.gz" ]; then
+        ROOTFS_DIR="ubuntu"
+    elif [ "$ROOTFS_FILE" != "alpine.tar.gz" ]; then
+        # For custom rootfs, use filename without extension
+        ROOTFS_DIR=$(echo "$ROOTFS_FILE" | sed 's/\.tar\.gz$//' | sed 's/\.tar$//' | tr '[:upper:]' '[:lower:]' | tr ' ' '_')
+    fi
+fi
 
-if [ -z "$(ls -A "$ALPINE_DIR" | grep -vE '^(root|tmp)$')" ]; then
-    tar -xf "$PREFIX/files/alpine.tar.gz" -C "$ALPINE_DIR"
+ROOTFS_DIR_PATH="$PREFIX/local/$ROOTFS_DIR"
+
+mkdir -p "$ROOTFS_DIR_PATH"
+
+# Extract rootfs if directory is empty (excluding root and tmp)
+if [ -z "$(ls -A "$ROOTFS_DIR_PATH" 2>/dev/null | grep -vE '^(root|tmp)$')" ]; then
+    ROOTFS_FILE_PATH="$PREFIX/files/$ROOTFS_FILE"
+    if [ ! -f "$ROOTFS_FILE_PATH" ]; then
+        echo "Error: $ROOTFS_FILE not found at $ROOTFS_FILE_PATH"
+        exit 1
+    fi
+    echo "Extracting $ROOTFS_FILE to $ROOTFS_DIR..."
+    # Use appropriate tar flags based on file extension
+    if echo "$ROOTFS_FILE" | grep -q "\.tar\.gz$"; then
+        tar -xzf "$ROOTFS_FILE_PATH" -C "$ROOTFS_DIR_PATH" --no-same-owner --no-same-permissions 2>&1 | grep -v "tar: Removing leading" | grep -v "can't link" || true
+    else
+        tar -xf "$ROOTFS_FILE_PATH" -C "$ROOTFS_DIR_PATH" --no-same-owner --no-same-permissions 2>&1 | grep -v "tar: Removing leading" | grep -v "can't link" || true
+    fi
+    
+    # Verify extraction was successful
+    if [ ! -d "$ROOTFS_DIR_PATH/usr" ] && [ ! -d "$ROOTFS_DIR_PATH/bin" ] && [ ! -d "$ROOTFS_DIR_PATH/etc" ]; then
+        echo "Error: Failed to extract $ROOTFS_FILE - no system directories found"
+        exit 1
+    fi
+    echo "$ROOTFS_FILE extracted successfully"
 fi
 
 [ ! -e "$PREFIX/local/bin/proot" ] && cp "$PREFIX/files/proot" "$PREFIX/local/bin"
@@ -59,13 +92,13 @@ fi
 ARGS="$ARGS -b $PREFIX"
 ARGS="$ARGS -b /sys"
 
-if [ ! -d "$PREFIX/local/alpine/tmp" ]; then
- mkdir -p "$PREFIX/local/alpine/tmp"
- chmod 1777 "$PREFIX/local/alpine/tmp"
+if [ ! -d "$ROOTFS_DIR_PATH/tmp" ]; then
+ mkdir -p "$ROOTFS_DIR_PATH/tmp"
+ chmod 1777 "$ROOTFS_DIR_PATH/tmp"
 fi
-ARGS="$ARGS -b $PREFIX/local/alpine/tmp:/dev/shm"
+ARGS="$ARGS -b $ROOTFS_DIR_PATH/tmp:/dev/shm"
 
-ARGS="$ARGS -r $PREFIX/local/alpine"
+ARGS="$ARGS -r $ROOTFS_DIR_PATH"
 ARGS="$ARGS -0"
 ARGS="$ARGS --link2symlink"
 ARGS="$ARGS --sysvipc"

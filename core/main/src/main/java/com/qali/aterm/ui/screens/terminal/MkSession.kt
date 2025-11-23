@@ -60,6 +60,16 @@ object MkSession {
             val customInitScript = com.qali.aterm.ui.screens.terminal.Rootfs.getRootfsInitScript(rootfsFileName)
             val distroType = com.qali.aterm.ui.screens.terminal.Rootfs.getRootfsDistroType(rootfsFileName)
             
+            // Determine rootfs directory name based on rootfs file
+            val rootfsDirName = when {
+                rootfsFileName == "ubuntu.tar.gz" -> "ubuntu"
+                rootfsFileName == "alpine.tar.gz" -> "alpine"
+                else -> {
+                    // For custom rootfs, use the filename without extension as directory name
+                    rootfsFileName.substringBeforeLast(".").lowercase().replace(" ", "_")
+                }
+            }
+            
             // Determine which init script to use
             val initScriptContent = if (customInitScript != null && customInitScript.isNotBlank()) {
                 // Use custom init script if provided
@@ -101,6 +111,9 @@ object MkSession {
             }
 
 
+            // Get rootfs filename for current working mode
+            val rootfsFileName = com.qali.aterm.ui.screens.terminal.Rootfs.getRootfsFileName(workingMode)
+            
             val env = mutableListOf(
                 "PATH=${System.getenv("PATH")}:/sbin:${localBinDir().absolutePath}",
                 "HOME=/sdcard",
@@ -118,7 +131,10 @@ object MkSession {
                 "RISH_APPLICATION_ID=${packageName}",
                 "PKG_PATH=${applicationInfo.sourceDir}",
                 "PROOT_TMP_DIR=${getTempDir().child(session_id).also { if (it.exists().not()){it.mkdirs()} }}",
-                "TMPDIR=${getTempDir().absolutePath}"
+                "TMPDIR=${getTempDir().absolutePath}",
+                "ROOTFS_FILE=$rootfsFileName",
+                "ROOTFS_DIR=$rootfsDirName",
+                "WORKING_MODE=$workingMode"
             )
 
             if (File(applicationInfo.nativeLibraryDir).child("libproot-loader32.so").exists()){

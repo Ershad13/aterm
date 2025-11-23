@@ -626,8 +626,31 @@ fun RootfsSetupScreen(
                             Rootfs.clearRootfsInitScript(finalRootfsName)
                         }
                         
-                        // Set as default working mode if none is set
-                        if (com.rk.settings.Settings.working_Mode == com.qali.aterm.ui.screens.settings.WorkingMode.ALPINE && selectedType != RootfsType.ALPINE) {
+                        // Determine working mode based on rootfs type and distro
+                        val targetWorkingMode = when (selectedType) {
+                            RootfsType.ALPINE -> com.qali.aterm.ui.screens.settings.WorkingMode.ALPINE
+                            RootfsType.UBUNTU -> com.qali.aterm.ui.screens.settings.WorkingMode.UBUNTU
+                            RootfsType.FILE_PICKER, RootfsType.CUSTOM -> {
+                                // For custom rootfs, determine working mode based on distro type
+                                when (selectedDistro) {
+                                    DistroType.UBUNTU -> com.qali.aterm.ui.screens.settings.WorkingMode.UBUNTU
+                                    DistroType.DEBIAN, DistroType.KALI, DistroType.ARCH, DistroType.ALPINE, DistroType.CUSTOM -> {
+                                        // Use ALPINE working mode for these (they use similar init scripts)
+                                        com.qali.aterm.ui.screens.settings.WorkingMode.ALPINE
+                                    }
+                                    null -> com.qali.aterm.ui.screens.settings.WorkingMode.ALPINE
+                                }
+                            }
+                            null -> com.qali.aterm.ui.screens.settings.WorkingMode.ALPINE
+                        }
+                        
+                        // Store mapping between working mode and rootfs file
+                        Rootfs.setRootfsFileForWorkingMode(targetWorkingMode, finalRootfsName)
+                        
+                        // Set as default working mode if none is set or if this is a custom rootfs
+                        if (selectedType == RootfsType.FILE_PICKER || selectedType == RootfsType.CUSTOM) {
+                            com.rk.settings.Settings.working_Mode = targetWorkingMode
+                        } else if (com.rk.settings.Settings.working_Mode == com.qali.aterm.ui.screens.settings.WorkingMode.ALPINE && selectedType != RootfsType.ALPINE) {
                             when (selectedType) {
                                 RootfsType.UBUNTU -> com.rk.settings.Settings.working_Mode = com.qali.aterm.ui.screens.settings.WorkingMode.UBUNTU
                                 else -> {}

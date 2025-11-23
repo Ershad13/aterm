@@ -100,7 +100,31 @@ object Rootfs {
         }
     }
     
+    /**
+     * Set which rootfs file to use for a working mode
+     */
+    fun setRootfsFileForWorkingMode(workingMode: Int, rootfsFileName: String) {
+        val modeKey = "rootfs_file_mode_$workingMode"
+        com.rk.settings.Preference.setString(modeKey, rootfsFileName)
+    }
+    
+    /**
+     * Get which rootfs file is set for a working mode
+     */
+    fun getRootfsFileForWorkingMode(workingMode: Int): String? {
+        val modeKey = "rootfs_file_mode_$workingMode"
+        val stored = com.rk.settings.Preference.getString(modeKey, "")
+        return if (stored.isNotBlank()) stored else null
+    }
+    
     fun getRootfsFileName(workingMode: Int): String {
+        // First check if there's a stored mapping for this working mode
+        val storedFile = getRootfsFileForWorkingMode(workingMode)
+        if (storedFile != null && isRootfsInstalled(storedFile)) {
+            return storedFile
+        }
+        
+        // Fall back to default mappings
         return when (workingMode) {
             com.qali.aterm.ui.screens.settings.WorkingMode.UBUNTU -> "ubuntu.tar.gz"
             com.qali.aterm.ui.screens.settings.WorkingMode.ALPINE -> "alpine.tar.gz"
