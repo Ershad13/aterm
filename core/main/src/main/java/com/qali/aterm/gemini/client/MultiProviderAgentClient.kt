@@ -1807,7 +1807,7 @@ class GeminiClient(
     
     /**
      * Detect commands needed to run based on project structure, OS, and user message
-     * Uses AI to intelligently detect commands with OS-specific fallbacks
+     * Uses comprehensive hardcoded patterns first, AI only as last resort to reduce API calls
      */
     private suspend fun detectCommandsNeeded(
         workspaceRoot: String,
@@ -1821,135 +1821,677 @@ class GeminiClient(
         
         if (!workspaceDir.exists()) return commands
         
-        // First, try AI-based command detection
-        val aiCommands = detectCommandsWithAI(workspaceRoot, systemInfo, userMessage, emit, onChunk)
-        if (aiCommands.isNotEmpty()) {
-            commands.addAll(aiCommands)
-        }
+        // Extract user intent from message (test, build, run, install, lint, format, etc.)
+        val messageLower = userMessage.lowercase()
+        val wantsTest = messageLower.contains("test") || messageLower.contains("run test")
+        val wantsBuild = messageLower.contains("build") || messageLower.contains("compile")
+        val wantsInstall = messageLower.contains("install") || messageLower.contains("dependencies")
+        val wantsRun = messageLower.contains("run") || messageLower.contains("start") || messageLower.contains("execute")
+        val wantsLint = messageLower.contains("lint") || messageLower.contains("check")
+        val wantsFormat = messageLower.contains("format") || messageLower.contains("fmt")
         
-        // Also add pattern-based detection as fallback
-        
-        // Check for Python projects
+        // Detect Python projects
         val hasPythonFiles = workspaceDir.walkTopDown()
-            .any { it.isFile && (it.name.endsWith(".py") || it.name == "requirements.txt" || it.name == "setup.py" || it.name == "pyproject.toml") }
+            .any { it.isFile && (it.name.endsWith(".py") || it.name == "requirements.txt" || 
+                it.name == "setup.py" || it.name == "pyproject.toml" || it.name == "Pipfile" || 
+                it.name == "poetry.lock" || it.name == "environment.yml") }
         
         if (hasPythonFiles) {
-            val mainPy = workspaceDir.walkTopDown()
-                .firstOrNull { it.isFile && (it.name == "main.py" || it.name == "app.py" || it.name == "__main__.py" || it.name.endsWith("_main.py")) }
-            
-            // Check if venv exists
             val venvExists = File(workspaceDir, "venv").exists() || 
                            File(workspaceDir, ".venv").exists() ||
                            File(workspaceDir, "env").exists()
+            val hasRequirements = File(workspaceDir, "requirements.txt").exists()
+            val hasPipfile = File(workspaceDir, "Pipfile").exists()
+            val hasPoetry = File(workspaceDir, "pyproject.toml").exists() && 
+                           File(workspaceDir, "poetry.lock").exists()
+            val hasConda = File(workspaceDir, "environment.yml").exists()
             
-            // Check for requirements.txt
-            val requirementsFile = File(workspaceDir, "requirements.txt")
-            val hasRequirements = requirementsFile.exists()
+            val pythonCmd = if (systemInfo.os == "Windows") "python" else "python3"
+            val pipCmd = if (systemInfo.os == "Windows") "pip" else "pip3"
+            val venvActivate = if (systemInfo.os == "Windows") "venv\\Scripts\\activate" else "source venv/bin/activate"
             
-            if (mainPy != null) {
-                val pythonCmd = "python3"
-                val runCommand = if (venvExists) {
-                    "source venv/bin/activate && $pythonCmd ${mainPy.name}"
-                } else {
-                    "$pythonCmd ${mainPy.name}"
+            // Detect main entry point
+            val mainPy = workspaceDir.walkTopDown()
+                .firstOrNull { it.isFile && (it.name == "main.py" || it.name == "app.py" || 
+                    it.name == "__main__.py" || it.name.endsWith("_main.py") || 
+                    it.name == "manage.py" || it.name == "run.py" || it.name == "server.py") }
+            
+            // Install dependencies
+            if (wantsInstall || wantsRun || wantsTest) {
+                val installCmd = when {
+                    hasPoetry -> "poetry install"
+                    hasPipfile -> "pipenv install"
+                    hasConda -> "conda env create -f environment.yml || conda install --file environment.yml"
+                    hasRequirements -> if (venvExists) "$venvActivate && $pipCmd install -r requirements.txt" else "$pipCmd install -r requirements.txt"
+                    else -> if (venvExists) "$venvActivate && $pipCmd install ." else "$pipCmd install ."
                 }
                 
-                val fallbacks = mutableListOf<String>()
-                
-                // Add venv creation if needed
-                if (!venvExists && hasRequirements) {
-                    fallbacks.add("python3 -m venv venv || python3 -m virtualenv venv || true")
+                val installFallbacks = mutableListOf<String>()
+                if (!venvExists && (hasRequirements || hasPipfile)) {
+                    installFallbacks.add("$pythonCmd -m venv venv || $pythonCmd -m virtualenv venv || true")
                 }
-                
-                // Add dependency installation (with venv activation if venv exists)
-                if (hasRequirements) {
-                    if (venvExists) {
-                        fallbacks.add("source venv/bin/activate && pip install -r requirements.txt || pip3 install -r requirements.txt")
-                    } else {
-                        fallbacks.add("pip3 install -r requirements.txt")
-                    }
+                if (hasPoetry) {
+                    installFallbacks.add("curl -sSL https://install.python-poetry.org | python3 - || pip3 install poetry")
                 }
-                
-                // Add Python/pip installation
-                fallbacks.add("${systemInfo.packageManagerCommands["install"]} python3 python3-pip")
-                fallbacks.add("${systemInfo.packageManagerCommands["update"]} && ${systemInfo.packageManagerCommands["install"]} python3 python3-pip")
+                if (hasPipfile) {
+                    installFallbacks.add("pip3 install pipenv")
+                }
+                installFallbacks.add("${systemInfo.packageManagerCommands["install"]} $pythonCmd ${pythonCmd}-pip")
+                installFallbacks.add("${systemInfo.packageManagerCommands["update"]} && ${systemInfo.packageManagerCommands["install"]} $pythonCmd ${pythonCmd}-pip")
                 
                 commands.add(CommandWithFallbacks(
-                    primaryCommand = runCommand,
-                    description = "Run Python application",
-                    fallbacks = fallbacks,
-                    checkCommand = "python3 --version",
-                    installCheck = "pip3 --version"
+                    primaryCommand = installCmd,
+                    description = "Install Python dependencies",
+                    fallbacks = installFallbacks,
+                    checkCommand = "$pipCmd --version",
+                    installCheck = "$pythonCmd --version"
                 ))
             }
             
-            // Check for requirements.txt - install dependencies
-            if (hasRequirements) {
-                val installCommand = if (venvExists) {
-                    "source venv/bin/activate && pip install -r requirements.txt"
-                } else {
-                    "pip3 install -r requirements.txt"
+            // Run application
+            if (wantsRun && mainPy != null) {
+                val runCmd = when {
+                    hasPoetry -> "poetry run $pythonCmd ${mainPy.name}"
+                    hasPipfile -> "pipenv run $pythonCmd ${mainPy.name}"
+                    mainPy.name == "manage.py" -> if (venvExists) "$venvActivate && $pythonCmd manage.py runserver" else "$pythonCmd manage.py runserver"
+                    venvExists -> "$venvActivate && $pythonCmd ${mainPy.name}"
+                    else -> "$pythonCmd ${mainPy.name}"
                 }
                 
                 commands.add(CommandWithFallbacks(
-                    primaryCommand = installCommand,
-                    description = "Install Python dependencies",
+                    primaryCommand = runCmd,
+                    description = "Run Python application",
                     fallbacks = listOf(
-                        if (!venvExists) "python3 -m venv venv || python3 -m virtualenv venv || true" else "",
-                        "${systemInfo.packageManagerCommands["install"]} python3-pip",
-                        "${systemInfo.packageManagerCommands["update"]} && ${systemInfo.packageManagerCommands["install"]} python3 python3-pip"
+                        if (!venvExists && hasRequirements) "$pythonCmd -m venv venv || $pythonCmd -m virtualenv venv || true" else "",
+                        if (hasRequirements) (if (venvExists) "$venvActivate && $pipCmd install -r requirements.txt" else "$pipCmd install -r requirements.txt") else ""
                     ).filter { it.isNotEmpty() },
-                    checkCommand = "pip3 --version",
-                    installCheck = "python3 --version"
+                    checkCommand = "$pythonCmd --version",
+                    installCheck = "$pipCmd --version"
+                ))
+            }
+            
+            // Test commands
+            if (wantsTest) {
+                val testCmd = when {
+                    hasPoetry -> "poetry run pytest || poetry run python -m pytest"
+                    hasPipfile -> "pipenv run pytest || pipenv run python -m pytest"
+                    File(workspaceDir, "pytest.ini").exists() || File(workspaceDir, "setup.cfg").exists() -> 
+                        if (venvExists) "$venvActivate && pytest" else "pytest"
+                    File(workspaceDir, "tests").exists() || File(workspaceDir, "test").exists() ->
+                        if (venvExists) "$venvActivate && $pythonCmd -m pytest tests/ || $pythonCmd -m unittest discover" else "$pythonCmd -m pytest tests/ || $pythonCmd -m unittest discover"
+                    else -> if (venvExists) "$venvActivate && $pythonCmd -m unittest discover" else "$pythonCmd -m unittest discover"
+                }
+                
+                commands.add(CommandWithFallbacks(
+                    primaryCommand = testCmd,
+                    description = "Run Python tests",
+                    fallbacks = listOf(
+                        "pip3 install pytest unittest2 || pip install pytest unittest2",
+                        "${systemInfo.packageManagerCommands["install"]} python3-pytest"
+                    ),
+                    checkCommand = "pytest --version || python3 -m pytest --version",
+                    installCheck = "$pythonCmd --version"
+                ))
+            }
+            
+            // Lint commands
+            if (wantsLint) {
+                val lintCmd = when {
+                    hasPoetry -> "poetry run flake8 . || poetry run pylint . || poetry run ruff check ."
+                    hasPipfile -> "pipenv run flake8 . || pipenv run pylint ."
+                    venvExists -> "$venvActivate && (flake8 . || pylint . || ruff check .)"
+                    else -> "flake8 . || pylint . || ruff check . || python3 -m flake8 ."
+                }
+                
+                commands.add(CommandWithFallbacks(
+                    primaryCommand = lintCmd,
+                    description = "Lint Python code",
+                    fallbacks = listOf(
+                        "pip3 install flake8 pylint ruff || pip install flake8 pylint ruff",
+                        "${systemInfo.packageManagerCommands["install"]} python3-flake8 python3-pylint"
+                    ),
+                    checkCommand = "flake8 --version || pylint --version || ruff --version",
+                    installCheck = "$pythonCmd --version"
                 ))
             }
         }
         
-        // Check for Node.js projects
+        // Detect Node.js/JavaScript/TypeScript projects
         val hasNodeFiles = workspaceDir.walkTopDown()
-            .any { it.isFile && (it.name == "package.json" || it.name == "package-lock.json" || it.name.endsWith(".js") || it.name.endsWith(".ts")) }
+            .any { it.isFile && (it.name == "package.json" || it.name == "package-lock.json" || 
+                it.name == "yarn.lock" || it.name == "pnpm-lock.yaml" || it.name.endsWith(".js") || 
+                it.name.endsWith(".ts") || it.name.endsWith(".jsx") || it.name.endsWith(".tsx")) }
         
         if (hasNodeFiles) {
             val packageJson = File(workspaceDir, "package.json")
+            val hasYarn = File(workspaceDir, "yarn.lock").exists()
+            val hasPnpm = File(workspaceDir, "pnpm-lock.yaml").exists()
+            val packageManager = when {
+                hasPnpm -> "pnpm"
+                hasYarn -> "yarn"
+                else -> "npm"
+            }
+            
             if (packageJson.exists()) {
-                // Check for start script
                 try {
                     val packageContent = packageJson.readText()
-                    if (packageContent.contains("\"start\"")) {
+                    val hasStart = packageContent.contains("\"start\"")
+                    val hasTest = packageContent.contains("\"test\"")
+                    val hasBuild = packageContent.contains("\"build\"")
+                    val hasLint = packageContent.contains("\"lint\"")
+                    
+                    // Install dependencies
+                    if (wantsInstall || wantsRun || wantsTest || wantsBuild) {
+                        val installCmd = when {
+                            hasPnpm -> "pnpm install"
+                            hasYarn -> "yarn install"
+                            else -> "npm install"
+                        }
+                        
                         commands.add(CommandWithFallbacks(
-                            primaryCommand = "npm start",
-                            description = "Start Node.js application",
+                            primaryCommand = installCmd,
+                            description = "Install Node.js dependencies",
                             fallbacks = listOf(
-                                "npm install",
+                                if (hasPnpm) "npm install -g pnpm" else "",
+                                if (hasYarn) "npm install -g yarn" else "",
                                 "${systemInfo.packageManagerCommands["install"]} nodejs npm",
                                 "${systemInfo.packageManagerCommands["update"]} && ${systemInfo.packageManagerCommands["install"]} nodejs npm"
+                            ).filter { it.isNotEmpty() },
+                            checkCommand = "$packageManager --version || npm --version",
+                            installCheck = "node --version"
+                        ))
+                    }
+                    
+                    // Start application
+                    if (wantsRun && hasStart) {
+                        val startCmd = when {
+                            hasPnpm -> "pnpm start"
+                            hasYarn -> "yarn start"
+                            else -> "npm start"
+                        }
+                        
+                        commands.add(CommandWithFallbacks(
+                            primaryCommand = startCmd,
+                            description = "Start Node.js application",
+                            fallbacks = listOf(
+                                when {
+                                    hasPnpm -> "pnpm install"
+                                    hasYarn -> "yarn install"
+                                    else -> "npm install"
+                                },
+                                "${systemInfo.packageManagerCommands["install"]} nodejs npm"
+                            ),
+                            checkCommand = "node --version",
+                            installCheck = "npm --version"
+                        ))
+                    }
+                    
+                    // Build
+                    if (wantsBuild && hasBuild) {
+                        val buildCmd = when {
+                            hasPnpm -> "pnpm build"
+                            hasYarn -> "yarn build"
+                            else -> "npm run build"
+                        }
+                        
+                        commands.add(CommandWithFallbacks(
+                            primaryCommand = buildCmd,
+                            description = "Build Node.js project",
+                            fallbacks = listOf(
+                                when {
+                                    hasPnpm -> "pnpm install"
+                                    hasYarn -> "yarn install"
+                                    else -> "npm install"
+                                }
+                            ),
+                            checkCommand = "node --version",
+                            installCheck = "npm --version"
+                        ))
+                    }
+                    
+                    // Test
+                    if (wantsTest && hasTest) {
+                        val testCmd = when {
+                            hasPnpm -> "pnpm test"
+                            hasYarn -> "yarn test"
+                            else -> "npm test"
+                        }
+                        
+                        commands.add(CommandWithFallbacks(
+                            primaryCommand = testCmd,
+                            description = "Run Node.js tests",
+                            fallbacks = listOf(
+                                when {
+                                    hasPnpm -> "pnpm install"
+                                    hasYarn -> "yarn install"
+                                    else -> "npm install"
+                                }
+                            ),
+                            checkCommand = "node --version",
+                            installCheck = "npm --version"
+                        ))
+                    }
+                    
+                    // Lint
+                    if (wantsLint && hasLint) {
+                        val lintCmd = when {
+                            hasPnpm -> "pnpm lint"
+                            hasYarn -> "yarn lint"
+                            else -> "npm run lint"
+                        }
+                        
+                        commands.add(CommandWithFallbacks(
+                            primaryCommand = lintCmd,
+                            description = "Lint Node.js code",
+                            fallbacks = listOf(
+                                when {
+                                    hasPnpm -> "pnpm install"
+                                    hasYarn -> "yarn install"
+                                    else -> "npm install"
+                                }
                             ),
                             checkCommand = "node --version",
                             installCheck = "npm --version"
                         ))
                     }
                 } catch (e: Exception) {
-                    // Ignore
+                    // Ignore parse errors
                 }
-                
+            }
+        }
+        
+        // Detect Go projects
+        val hasGoFiles = workspaceDir.walkTopDown()
+            .any { it.isFile && (it.name.endsWith(".go") || it.name == "go.mod" || it.name == "go.sum" || it.name == "Gopkg.toml") }
+        
+        if (hasGoFiles) {
+            val hasGoMod = File(workspaceDir, "go.mod").exists()
+            val mainGo = workspaceDir.walkTopDown()
+                .firstOrNull { file ->
+                    file.isFile && file.name.endsWith(".go") && try {
+                        file.readText().contains("func main()")
+                    } catch (e: Exception) {
+                        false
+                    }
+                }
+            
+            if (wantsInstall || wantsRun || wantsTest) {
+                if (hasGoMod) {
+                    commands.add(CommandWithFallbacks(
+                        primaryCommand = "go mod download",
+                        description = "Download Go dependencies",
+                        fallbacks = listOf(
+                            "${systemInfo.packageManagerCommands["install"]} golang-go",
+                            "${systemInfo.packageManagerCommands["update"]} && ${systemInfo.packageManagerCommands["install"]} golang-go"
+                        ),
+                        checkCommand = "go version",
+                        installCheck = null
+                    ))
+                }
+            }
+            
+            if (wantsRun && mainGo != null) {
                 commands.add(CommandWithFallbacks(
-                    primaryCommand = "npm install",
-                    description = "Install Node.js dependencies",
+                    primaryCommand = "go run ${mainGo.name}",
+                    description = "Run Go application",
                     fallbacks = listOf(
-                        "${systemInfo.packageManagerCommands["install"]} nodejs npm",
-                        "${systemInfo.packageManagerCommands["update"]} && ${systemInfo.packageManagerCommands["install"]} nodejs npm"
-                    ),
-                    checkCommand = "npm --version",
-                    installCheck = "node --version"
+                        if (hasGoMod) "go mod download" else "",
+                        "${systemInfo.packageManagerCommands["install"]} golang-go"
+                    ).filter { it.isNotEmpty() },
+                    checkCommand = "go version",
+                    installCheck = null
+                ))
+            }
+            
+            if (wantsBuild) {
+                commands.add(CommandWithFallbacks(
+                    primaryCommand = "go build",
+                    description = "Build Go application",
+                    fallbacks = listOf(
+                        if (hasGoMod) "go mod download" else "",
+                        "${systemInfo.packageManagerCommands["install"]} golang-go"
+                    ).filter { it.isNotEmpty() },
+                    checkCommand = "go version",
+                    installCheck = null
+                ))
+            }
+            
+            if (wantsTest) {
+                commands.add(CommandWithFallbacks(
+                    primaryCommand = "go test ./...",
+                    description = "Run Go tests",
+                    fallbacks = listOf(
+                        if (hasGoMod) "go mod download" else "",
+                        "${systemInfo.packageManagerCommands["install"]} golang-go"
+                    ).filter { it.isNotEmpty() },
+                    checkCommand = "go version",
+                    installCheck = null
                 ))
             }
         }
         
-        // Check for shell scripts
+        // Detect Rust projects
+        val hasRustFiles = workspaceDir.walkTopDown()
+            .any { it.isFile && (it.name.endsWith(".rs") || it.name == "Cargo.toml" || it.name == "Cargo.lock") }
+        
+        if (hasRustFiles) {
+            val hasCargo = File(workspaceDir, "Cargo.toml").exists()
+            
+            if (wantsInstall || wantsRun || wantsTest || wantsBuild) {
+                if (hasCargo) {
+                    commands.add(CommandWithFallbacks(
+                        primaryCommand = "cargo build",
+                        description = "Build Rust project",
+                        fallbacks = listOf(
+                            "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y || true",
+                            "${systemInfo.packageManagerCommands["install"]} rust cargo",
+                            "${systemInfo.packageManagerCommands["update"]} && ${systemInfo.packageManagerCommands["install"]} rust cargo"
+                        ),
+                        checkCommand = "cargo --version",
+                        installCheck = "rustc --version"
+                    ))
+                }
+            }
+            
+            if (wantsRun && hasCargo) {
+                commands.add(CommandWithFallbacks(
+                    primaryCommand = "cargo run",
+                    description = "Run Rust application",
+                    fallbacks = listOf(
+                        "cargo build",
+                        "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y || true"
+                    ),
+                    checkCommand = "cargo --version",
+                    installCheck = "rustc --version"
+                ))
+            }
+            
+            if (wantsTest && hasCargo) {
+                commands.add(CommandWithFallbacks(
+                    primaryCommand = "cargo test",
+                    description = "Run Rust tests",
+                    fallbacks = listOf(
+                        "cargo build",
+                        "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y || true"
+                    ),
+                    checkCommand = "cargo --version",
+                    installCheck = "rustc --version"
+                ))
+            }
+        }
+        
+        // Detect Java/Kotlin projects (Gradle, Maven, SBT)
+        val hasJavaFiles = workspaceDir.walkTopDown()
+            .any { it.isFile && (it.name.endsWith(".java") || it.name.endsWith(".kt") || 
+                it.name == "build.gradle" || it.name == "build.gradle.kts" || 
+                it.name == "pom.xml" || it.name == "build.sbt") }
+        
+        if (hasJavaFiles) {
+            val hasGradle = File(workspaceDir, "build.gradle").exists() || File(workspaceDir, "build.gradle.kts").exists()
+            val hasMaven = File(workspaceDir, "pom.xml").exists()
+            val hasSbt = File(workspaceDir, "build.sbt").exists()
+            val gradleWrapper = File(workspaceDir, "gradlew").exists() || File(workspaceDir, "gradlew.bat").exists()
+            
+            if (wantsInstall || wantsBuild || wantsRun || wantsTest) {
+                when {
+                    hasGradle -> {
+                        val gradleCmd = if (gradleWrapper) {
+                            if (systemInfo.os == "Windows") "./gradlew.bat" else "./gradlew"
+                        } else {
+                            "gradle"
+                        }
+                        
+                        if (wantsInstall || wantsBuild) {
+                            commands.add(CommandWithFallbacks(
+                                primaryCommand = "$gradleCmd build",
+                                description = "Build Gradle project",
+                                fallbacks = listOf(
+                                    if (!gradleWrapper) "${systemInfo.packageManagerCommands["install"]} gradle" else "",
+                                    "${systemInfo.packageManagerCommands["update"]} && ${systemInfo.packageManagerCommands["install"]} gradle"
+                                ).filter { it.isNotEmpty() },
+                                checkCommand = "$gradleCmd --version || gradle --version",
+                                installCheck = "java -version"
+                            ))
+                        }
+                        
+                        if (wantsRun) {
+                            commands.add(CommandWithFallbacks(
+                                primaryCommand = "$gradleCmd run",
+                                description = "Run Gradle application",
+                                fallbacks = listOf(
+                                    "$gradleCmd build",
+                                    if (!gradleWrapper) "${systemInfo.packageManagerCommands["install"]} gradle" else ""
+                                ).filter { it.isNotEmpty() },
+                                checkCommand = "$gradleCmd --version || gradle --version",
+                                installCheck = "java -version"
+                            ))
+                        }
+                        
+                        if (wantsTest) {
+                            commands.add(CommandWithFallbacks(
+                                primaryCommand = "$gradleCmd test",
+                                description = "Run Gradle tests",
+                                fallbacks = listOf(
+                                    "$gradleCmd build",
+                                    if (!gradleWrapper) "${systemInfo.packageManagerCommands["install"]} gradle" else ""
+                                ).filter { it.isNotEmpty() },
+                                checkCommand = "$gradleCmd --version || gradle --version",
+                                installCheck = "java -version"
+                            ))
+                        }
+                    }
+                    hasMaven -> {
+                        if (wantsInstall || wantsBuild) {
+                            commands.add(CommandWithFallbacks(
+                                primaryCommand = "mvn install",
+                                description = "Build Maven project",
+                                fallbacks = listOf(
+                                    "${systemInfo.packageManagerCommands["install"]} maven",
+                                    "${systemInfo.packageManagerCommands["update"]} && ${systemInfo.packageManagerCommands["install"]} maven"
+                                ),
+                                checkCommand = "mvn --version",
+                                installCheck = "java -version"
+                            ))
+                        }
+                        
+                        if (wantsRun) {
+                            commands.add(CommandWithFallbacks(
+                                primaryCommand = "mvn exec:java",
+                                description = "Run Maven application",
+                                fallbacks = listOf(
+                                    "mvn install",
+                                    "${systemInfo.packageManagerCommands["install"]} maven"
+                                ),
+                                checkCommand = "mvn --version",
+                                installCheck = "java -version"
+                            ))
+                        }
+                        
+                        if (wantsTest) {
+                            commands.add(CommandWithFallbacks(
+                                primaryCommand = "mvn test",
+                                description = "Run Maven tests",
+                                fallbacks = listOf(
+                                    "mvn install",
+                                    "${systemInfo.packageManagerCommands["install"]} maven"
+                                ),
+                                checkCommand = "mvn --version",
+                                installCheck = "java -version"
+                            ))
+                        }
+                    }
+                    hasSbt -> {
+                        if (wantsBuild || wantsRun || wantsTest) {
+                            commands.add(CommandWithFallbacks(
+                                primaryCommand = "sbt compile",
+                                description = "Build SBT project",
+                                fallbacks = listOf(
+                                    "${systemInfo.packageManagerCommands["install"]} sbt",
+                                    "${systemInfo.packageManagerCommands["update"]} && ${systemInfo.packageManagerCommands["install"]} sbt"
+                                ),
+                                checkCommand = "sbt --version",
+                                installCheck = "java -version"
+                            ))
+                        }
+                        
+                        if (wantsRun) {
+                            commands.add(CommandWithFallbacks(
+                                primaryCommand = "sbt run",
+                                description = "Run SBT application",
+                                fallbacks = listOf(
+                                    "sbt compile",
+                                    "${systemInfo.packageManagerCommands["install"]} sbt"
+                                ),
+                                checkCommand = "sbt --version",
+                                installCheck = "java -version"
+                            ))
+                        }
+                        
+                        if (wantsTest) {
+                            commands.add(CommandWithFallbacks(
+                                primaryCommand = "sbt test",
+                                description = "Run SBT tests",
+                                fallbacks = listOf(
+                                    "sbt compile",
+                                    "${systemInfo.packageManagerCommands["install"]} sbt"
+                                ),
+                                checkCommand = "sbt --version",
+                                installCheck = "java -version"
+                            ))
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Detect PHP projects
+        val hasPhpFiles = workspaceDir.walkTopDown()
+            .any { it.isFile && (it.name.endsWith(".php") || it.name == "composer.json" || it.name == "composer.lock") }
+        
+        if (hasPhpFiles) {
+            val hasComposer = File(workspaceDir, "composer.json").exists()
+            
+            if (wantsInstall && hasComposer) {
+                commands.add(CommandWithFallbacks(
+                    primaryCommand = "composer install",
+                    description = "Install PHP dependencies",
+                    fallbacks = listOf(
+                        "curl -sS https://getcomposer.org/installer | php || php -r \"copy('https://getcomposer.org/installer', 'composer-setup.php'); php composer-setup.php; php -r \"unlink('composer-setup.php');\"\"",
+                        "${systemInfo.packageManagerCommands["install"]} composer php",
+                        "${systemInfo.packageManagerCommands["update"]} && ${systemInfo.packageManagerCommands["install"]} composer php"
+                    ),
+                    checkCommand = "composer --version",
+                    installCheck = "php --version"
+                ))
+            }
+            
+            if (wantsRun) {
+                val indexPhp = File(workspaceDir, "index.php")
+                val serverPhp = File(workspaceDir, "server.php")
+                val mainPhp = indexPhp.takeIf { it.exists() } ?: serverPhp.takeIf { it.exists() }
+                
+                if (mainPhp != null) {
+                    commands.add(CommandWithFallbacks(
+                        primaryCommand = "php -S localhost:8000",
+                        description = "Run PHP development server",
+                        fallbacks = listOf(
+                            if (hasComposer) "composer install" else "",
+                            "${systemInfo.packageManagerCommands["install"]} php",
+                            "${systemInfo.packageManagerCommands["update"]} && ${systemInfo.packageManagerCommands["install"]} php"
+                        ).filter { it.isNotEmpty() },
+                        checkCommand = "php --version",
+                        installCheck = null
+                    ))
+                }
+            }
+        }
+        
+        // Detect Ruby projects
+        val hasRubyFiles = workspaceDir.walkTopDown()
+            .any { it.isFile && (it.name.endsWith(".rb") || it.name == "Gemfile" || it.name == "Gemfile.lock" || it.name == "Rakefile") }
+        
+        if (hasRubyFiles) {
+            val hasGemfile = File(workspaceDir, "Gemfile").exists()
+            val hasRails = try {
+                hasGemfile && File(workspaceDir, "Gemfile").readText().contains("rails")
+            } catch (e: Exception) {
+                false
+            }
+            
+            if (wantsInstall && hasGemfile) {
+                commands.add(CommandWithFallbacks(
+                    primaryCommand = "bundle install",
+                    description = "Install Ruby dependencies",
+                    fallbacks = listOf(
+                        "gem install bundler",
+                        "${systemInfo.packageManagerCommands["install"]} ruby ruby-dev bundler",
+                        "${systemInfo.packageManagerCommands["update"]} && ${systemInfo.packageManagerCommands["install"]} ruby ruby-dev bundler"
+                    ),
+                    checkCommand = "bundle --version",
+                    installCheck = "ruby --version"
+                ))
+            }
+            
+            if (wantsRun && hasRails) {
+                commands.add(CommandWithFallbacks(
+                    primaryCommand = "rails server || bundle exec rails server",
+                    description = "Run Rails server",
+                    fallbacks = listOf(
+                        "bundle install",
+                        "gem install bundler",
+                        "${systemInfo.packageManagerCommands["install"]} ruby ruby-dev bundler"
+                    ),
+                    checkCommand = "rails --version || bundle exec rails --version",
+                    installCheck = "ruby --version"
+                ))
+            }
+        }
+        
+        // Detect C/C++ projects (Make, CMake)
+        val hasCFiles = workspaceDir.walkTopDown()
+            .any { it.isFile && (it.name.endsWith(".c") || it.name.endsWith(".cpp") || 
+                it.name.endsWith(".cc") || it.name.endsWith(".cxx") || it.name == "Makefile" || 
+                it.name == "CMakeLists.txt") }
+        
+        if (hasCFiles) {
+            val hasMakefile = File(workspaceDir, "Makefile").exists()
+            val hasCMake = File(workspaceDir, "CMakeLists.txt").exists()
+            
+            if (wantsBuild) {
+                when {
+                    hasMakefile -> {
+                        commands.add(CommandWithFallbacks(
+                            primaryCommand = "make",
+                            description = "Build C/C++ project with Make",
+                            fallbacks = listOf(
+                                "${systemInfo.packageManagerCommands["install"]} build-essential make gcc g++",
+                                "${systemInfo.packageManagerCommands["update"]} && ${systemInfo.packageManagerCommands["install"]} build-essential make gcc g++"
+                            ),
+                            checkCommand = "make --version",
+                            installCheck = "gcc --version"
+                        ))
+                    }
+                    hasCMake -> {
+                        commands.add(CommandWithFallbacks(
+                            primaryCommand = "mkdir -p build && cd build && cmake .. && make",
+                            description = "Build C/C++ project with CMake",
+                            fallbacks = listOf(
+                                "${systemInfo.packageManagerCommands["install"]} cmake build-essential make gcc g++",
+                                "${systemInfo.packageManagerCommands["update"]} && ${systemInfo.packageManagerCommands["install"]} cmake build-essential make gcc g++"
+                            ),
+                            checkCommand = "cmake --version",
+                            installCheck = "gcc --version"
+                        ))
+                    }
+                }
+            }
+        }
+        
+        // Detect shell scripts
         val hasShellScripts = workspaceDir.walkTopDown()
             .any { it.isFile && (it.name.endsWith(".sh") || it.name.endsWith(".bash")) }
         
-        if (hasShellScripts) {
+        if (hasShellScripts && wantsRun) {
             val mainScript = workspaceDir.walkTopDown()
                 .firstOrNull { it.isFile && (it.name.endsWith(".sh") || it.name.endsWith(".bash")) && 
                     (it.name.contains("main") || it.name.contains("run") || it.name.contains("start")) }
@@ -1965,6 +2507,15 @@ class GeminiClient(
                     checkCommand = "bash --version",
                     installCheck = null
                 ))
+            }
+        }
+        
+        // Only use AI detection as last resort if no commands were found
+        if (commands.isEmpty()) {
+            android.util.Log.d("GeminiClient", "No hardcoded commands found, falling back to AI detection")
+            val aiCommands = detectCommandsWithAI(workspaceRoot, systemInfo, userMessage, emit, onChunk)
+            if (aiCommands.isNotEmpty()) {
+                commands.addAll(aiCommands)
             }
         }
         
