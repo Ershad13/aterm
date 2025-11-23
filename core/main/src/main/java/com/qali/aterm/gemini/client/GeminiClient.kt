@@ -319,8 +319,31 @@ class GeminiClient(
         onToolResult: (String, Map<String, Any>) -> Unit,
         toolCallsToExecute: MutableList<Triple<FunctionCall, ToolResult, String>>
     ): String? {
-        // Google Gemini API endpoint - using SSE (Server-Sent Events) for streaming
-        val url = "https://generativelanguage.googleapis.com/v1beta/models/$model:streamGenerateContent?key=$apiKey"
+        // Determine API endpoint based on provider type
+        val providerType = ApiProviderManager.selectedProvider
+        val url = when (providerType) {
+            ApiProviderType.GOOGLE -> {
+                // Google Gemini API endpoint - using SSE (Server-Sent Events) for streaming
+                "https://generativelanguage.googleapis.com/v1beta/models/$model:streamGenerateContent?key=$apiKey"
+            }
+            ApiProviderType.CUSTOM -> {
+                // Custom provider - check if it's Ollama (typically runs on localhost:11434)
+                // For Ollama, use /api/generate or /api/chat endpoint
+                if (apiKey.contains("localhost") || apiKey.contains("127.0.0.1") || apiKey.contains("ollama")) {
+                    // Ollama format: http://localhost:11434/api/chat
+                    val baseUrl = if (apiKey.startsWith("http")) apiKey else "http://$apiKey"
+                    "$baseUrl/api/chat"
+                } else {
+                    // Generic custom API - assume it's a full URL
+                    apiKey
+                }
+            }
+            else -> {
+                // For other providers (OpenAI, Anthropic, etc.), use Gemini-compatible endpoint for now
+                // TODO: Add proper support for other providers
+                "https://generativelanguage.googleapis.com/v1beta/models/$model:streamGenerateContent?key=$apiKey"
+            }
+        }
         android.util.Log.d("GeminiClient", "makeApiCall: URL: ${url.replace(apiKey, "***")}")
         android.util.Log.d("GeminiClient", "makeApiCall: Model: $model")
         
@@ -6346,8 +6369,9 @@ exports.$functionName = (req, res, next) => {
         }
         
         return try {
+            val apiKey = ApiProviderManager.getNextApiKey() ?: return emptyList()
             val response = makeApiCallSimple(
-                ApiProviderManager.getCurrentApiKey(),
+                apiKey,
                 model,
                 request,
                 useLongTimeout = false
@@ -6670,43 +6694,26 @@ exports.$functionName = (req, res, next) => {
         requestBody: JSONObject,
         useLongTimeout: Boolean = false
     ): String {
-        val url = "https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent?key=$apiKey"
-        val request = Request.Builder()
-            .url(url)
-            .post(requestBody.toString().toRequestBody("application/json".toMediaType()))
-            .build()
+        // Use makeApiCall in non-streaming mode by collecting all chunks
+        val chunks = mutableListOf<String>()
+        val toolCallsToExecute = mutableListOf<Triple<FunctionCall, ToolResult, String>>()
         
-        val httpClient = if (useLongTimeout) longTimeoutClient else client
-        android.util.Log.d("GeminiClient", "makeApiCallSimple: Using ${if (useLongTimeout) "long" else "normal"} timeout client")
-        
-        httpClient.newCall(request).execute().use { response ->
-            android.util.Log.d("GeminiClient", "makeApiCallSimple: Response code: ${response.code}")
-            if (!response.isSuccessful) {
-                val errorBody = response.body?.string() ?: "Unknown error"
-                throw IOException("API call failed: ${response.code} - $errorBody")
-            }
+        try {
+            val finishReason = makeApiCall(
+                apiKey,
+                model,
+                requestBody,
+                onChunk = { chunk -> chunks.add(chunk) },
+                onToolCall = { /* Ignore tool calls in simple mode */ },
+                onToolResult = { _, _ -> /* Ignore tool results in simple mode */ },
+                toolCallsToExecute = toolCallsToExecute
+            )
             
-            val bodyString = response.body?.string() ?: ""
-            val json = JSONObject(bodyString)
-            val candidates = json.optJSONArray("candidates")
-            
-            if (candidates != null && candidates.length() > 0) {
-                val candidate = candidates.getJSONObject(0)
-                val content = candidate.optJSONObject("content")
-                if (content != null) {
-                    val parts = content.optJSONArray("parts")
-                    if (parts != null && parts.length() > 0) {
-                        val textParts = (0 until parts.length())
-                            .mapNotNull { i ->
-                                val part = parts.getJSONObject(i)
-                                if (part.has("text")) part.getString("text") else null
-                            }
-                        return textParts.joinToString("")
-                    }
-                }
-            }
-            
-            return ""
+            // Return all collected chunks as a single string
+            return chunks.joinToString("")
+        } catch (e: Exception) {
+            android.util.Log.e("GeminiClient", "makeApiCallSimple: Error: ${e.message}", e)
+            throw e
         }
     }
 }
