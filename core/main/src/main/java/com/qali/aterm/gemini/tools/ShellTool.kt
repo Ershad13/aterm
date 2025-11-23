@@ -68,12 +68,13 @@ class ShellToolInvocation(
             }
             
             // Ensure working directory exists (should exist now after mkdirs, but double-check)
-            val finalWorkingDir: File = if (!workingDir.exists()) {
+            val finalWorkingDir: File
+            if (!workingDir.exists()) {
                 // Last resort: use workspace root
                 val fallbackDir = File(workspaceRoot)
                 if (fallbackDir.exists()) {
                     android.util.Log.w("ShellTool", "Working directory ${workingDir.absolutePath} not found, using workspace root")
-                    fallbackDir
+                    finalWorkingDir = fallbackDir
                 } else {
                     return ToolResult(
                         llmContent = "Working directory does not exist: ${workingDir.absolutePath}. Workspace root also not found: ${workspaceRoot}",
@@ -85,7 +86,7 @@ class ShellToolInvocation(
                     )
                 }
             } else {
-                workingDir
+                finalWorkingDir = workingDir
             }
             
             // Use withContext to ensure we're on the right thread for process operations
