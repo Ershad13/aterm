@@ -80,11 +80,20 @@ class ShellToolInvocation(
                             .directory(workingDir)
                             .redirectErrorStream(true)
                         
-                        // Set up environment variables for better compatibility
+                        // Set up environment variables matching rootfs/terminal session environment
                         val env = processBuilder.environment()
-                        env["PATH"] = "/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin:/system/bin:/system/xbin:${env["PATH"] ?: ""}"
+                        // Use comprehensive PATH that includes rootfs paths
+                        val rootfsPath = "/bin:/sbin:/usr/bin:/usr/sbin:/usr/share/bin:/usr/share/sbin:/usr/local/bin:/usr/local/sbin"
+                        val systemPath = "/system/bin:/system/xbin"
+                        env["PATH"] = "$rootfsPath:$systemPath:${env["PATH"] ?: ""}"
                         env["HOME"] = env["HOME"] ?: "/root"
                         env["SHELL"] = "/bin/sh"
+                        env["TERM"] = "xterm-256color"
+                        env["COLORTERM"] = "truecolor"
+                        env["LANG"] = "C.UTF-8"
+                        // Add workspace root to environment for scripts that need it
+                        env["WORKSPACE_ROOT"] = workspaceRoot
+                        env["PWD"] = workingDir.absolutePath
                         
                         val process = processBuilder.start()
                         android.util.Log.d("ShellTool", "Process started successfully")

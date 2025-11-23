@@ -59,24 +59,27 @@ class GeminiClient(
         android.util.Log.d("GeminiClient", "sendMessageStream: Starting request")
         android.util.Log.d("GeminiClient", "sendMessageStream: User message length: ${userMessage.length}")
         
+        // Detect intent: create new project vs debug/upgrade existing
+        val intent = detectIntent(userMessage)
+        android.util.Log.d("GeminiClient", "sendMessageStream: Detected intent: $intent")
+        
+        // Add first prompt to clarify and expand user intention
+        val enhancedUserMessage = enhanceUserIntent(userMessage, intent)
+        
         // Check if streaming is enabled
         if (!Settings.enable_streaming) {
             android.util.Log.d("GeminiClient", "sendMessageStream: Streaming disabled, using non-streaming mode")
             
-            // Detect intent: create new project vs debug/upgrade existing
-            val intent = detectIntent(userMessage)
-            android.util.Log.d("GeminiClient", "sendMessageStream: Detected intent: $intent")
-            
             if (intent == IntentType.DEBUG_UPGRADE) {
-                emitAll(sendMessageNonStreamingReverse(userMessage, onChunk, onToolCall, onToolResult))
+                emitAll(sendMessageNonStreamingReverse(enhancedUserMessage, onChunk, onToolCall, onToolResult))
             } else {
-                emitAll(sendMessageNonStreaming(userMessage, onChunk, onToolCall, onToolResult))
+                emitAll(sendMessageNonStreaming(enhancedUserMessage, onChunk, onToolCall, onToolResult))
             }
             return@flow
         }
         
-        // Use internal streaming function
-        emitAll(sendMessageStreamInternal(userMessage, onChunk, onToolCall, onToolResult))
+        // Use internal streaming function with enhanced message
+        emitAll(sendMessageStreamInternal(enhancedUserMessage, onChunk, onToolCall, onToolResult))
     }
     
     /**
@@ -1151,6 +1154,40 @@ class GeminiClient(
         
         // Default: if workspace has files, assume debug/upgrade
         return if (hasExistingFiles) IntentType.DEBUG_UPGRADE else IntentType.CREATE_NEW
+    }
+    
+    /**
+     * Enhance user intent with clarifying guidance to help AI understand goals, do's, and don'ts
+     * Adds helpful context directly to the prompt without extra API calls
+     */
+    private suspend fun enhanceUserIntent(userMessage: String, intent: IntentType): String {
+        val memoryContext = MemoryService.getSummarizedMemory()
+        
+        val intentDescription = when (intent) {
+            IntentType.CREATE_NEW -> "creating a new project"
+            IntentType.DEBUG_UPGRADE -> "debugging or upgrading an existing project"
+        }
+        
+        // Add helpful guidance directly to the user message
+        val enhancement = """
+            === User Request ===
+            $userMessage
+            
+            === Context & Guidance ===
+            Task Type: $intentDescription
+            
+            Please ensure you understand:
+            - **Primary Goal**: What should the end result accomplish? What is the main objective?
+            - **Key Requirements**: What are the must-have features, constraints, or specifications?
+            - **Best Practices**: What should be included? Follow industry standards and best practices.
+            - **What to Avoid**: What are common pitfalls or anti-patterns to avoid?
+            - **Success Criteria**: How will we verify the project is complete and working correctly?
+            
+            Be thorough, consider edge cases, and ensure the implementation is production-ready and functional.
+            ${if (memoryContext.isNotEmpty()) "\nPrevious context:\n$memoryContext" else ""}
+        """.trimIndent()
+        
+        return enhancement
     }
     
     /**

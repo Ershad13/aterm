@@ -951,11 +951,13 @@ suspend fun readLogcatLogs(maxLines: Int = 200): String = withContext(Dispatcher
         var line: String?
         var lineCount = 0
         
-        // Relevant tags to filter for
+        // Relevant tags to filter for (including streaming and shell execution)
         val relevantTags = listOf(
             "GeminiClient", "OllamaClient", "AgentScreen", "ApiProviderManager",
             "GeminiService", "OkHttp", "Okio", "AndroidRuntime", "ApiProvider",
-            "OkHttpClient", "OkHttp3", "Okio", "System.err"
+            "OkHttpClient", "OkHttp3", "Okio", "System.err", "ShellTool",
+            "sendMessageStream", "sendMessageStreamInternal", "makeApiCall",
+            "ToolInvocation", "executeToolSync", "LanguageLinterTool"
         )
         
         while (reader.readLine().also { line = it } != null && lineCount < maxLines) {
@@ -1072,17 +1074,23 @@ fun DebugDialog(
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .heightIn(max = 400.dp)
+                    .heightIn(max = 600.dp)
             ) {
                 if (isLoadingLogs) {
                     CircularProgressIndicator()
                 } else {
                     SelectionContainer {
-                        Text(
-                            text = debugInfo,
-                            style = MaterialTheme.typography.bodySmall,
-                            fontFamily = FontFamily.Monospace
-                        )
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .verticalScroll(rememberScrollState())
+                        ) {
+                            Text(
+                                text = debugInfo,
+                                style = MaterialTheme.typography.bodySmall,
+                                fontFamily = FontFamily.Monospace
+                            )
+                        }
                     }
                 }
             }
