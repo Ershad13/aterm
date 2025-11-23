@@ -2264,6 +2264,41 @@ class GeminiClient(
     }
     
     /**
+     * Find a better anchor string in file content when old_string doesn't match
+     */
+    private fun findBetterAnchor(
+        fileContent: String,
+        originalOldString: String,
+        newString: String
+    ): String? {
+        // Extract key words from old_string
+        val keywords = originalOldString.split(Regex("\\s+"))
+            .filter { it.length > 3 && !it.matches(Regex("""^[{}();,\[\]]+$""")) }
+            .take(3)
+        
+        if (keywords.isEmpty()) return null
+        
+        // Try to find lines containing these keywords
+        val lines = fileContent.lines()
+        for (line in lines) {
+            if (keywords.all { line.contains(it, ignoreCase = true) }) {
+                // Found a line with all keywords, use it as anchor
+                return line
+            }
+        }
+        
+        // Try to find a line with at least one keyword near the end (for appending)
+        for (i in lines.size - 1 downTo maxOf(0, lines.size - 20)) {
+            val line = lines[i]
+            if (keywords.any { line.contains(it, ignoreCase = true) }) {
+                return line
+            }
+        }
+        
+        return null
+    }
+    
+    /**
      * Analyze error message and suggest a fix
      */
     private fun analyzeErrorAndSuggestFix(
@@ -3748,9 +3783,15 @@ exports.$functionName = (req, res, next) => {
             if (jsonStart >= 0 && jsonEnd > jsonStart) {
                 val jsonSubstring = cleanedText.substring(jsonStart, jsonEnd)
                 
-                // Check for common issues like [object Undefined]
-                if (jsonSubstring.contains("[object") || jsonSubstring.contains("undefined")) {
-                    android.util.Log.w("GeminiClient", "Response contains invalid JSON: $jsonSubstring")
+                // Check for actual invalid JSON patterns (not just the presence of these strings)
+                // Only flag if it's clearly invalid JSON, not if these are valid string values
+                val hasInvalidPattern = jsonSubstring.contains("[object Undefined]") || 
+                                       jsonSubstring.contains("[object undefined]") ||
+                                       (jsonSubstring.contains("[object") && !jsonSubstring.contains("\"[object")) ||
+                                       (jsonSubstring.contains("undefined") && !jsonSubstring.contains("\"undefined\"") && !jsonSubstring.contains("'undefined'"))
+                
+                if (hasInvalidPattern) {
+                    android.util.Log.w("GeminiClient", "Response contains invalid JSON pattern: ${jsonSubstring.take(200)}")
                     emit(GeminiStreamEvent.Chunk("⚠️ AI returned invalid JSON, trying to extract fixes manually...\n"))
                     onChunk("⚠️ AI returned invalid JSON, trying to extract fixes manually...\n")
                     
@@ -3773,7 +3814,31 @@ exports.$functionName = (req, res, next) => {
                         null
                     }
                 } else {
-                    JSONArray(jsonSubstring)
+                    // Try to parse the JSON - if it fails, then it's actually invalid
+                    try {
+                        JSONArray(jsonSubstring)
+                    } catch (e: Exception) {
+                        android.util.Log.w("GeminiClient", "JSON parsing failed, trying text extraction: ${e.message}")
+                        emit(GeminiStreamEvent.Chunk("⚠️ JSON parsing failed, extracting fixes from text...\n"))
+                        onChunk("⚠️ JSON parsing failed, extracting fixes from text...\n")
+                        
+                        val extractedFixes = extractFixesFromText(fixText, workspaceRoot)
+                        if (extractedFixes.isNotEmpty()) {
+                            val fixesArray = JSONArray()
+                            for (fix in extractedFixes) {
+                                fixesArray.put(JSONObject().apply {
+                                    put("file_path", fix.first)
+                                    put("old_string", fix.second)
+                                    put("new_string", fix.third)
+                                    put("confidence", "medium")
+                                    put("description", "Extracted from AI response after JSON parse failure")
+                                })
+                            }
+                            fixesArray
+                        } else {
+                            null
+                        }
+                    }
                 }
             } else {
                 // No JSON array found, try to extract from text
