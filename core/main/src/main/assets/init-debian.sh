@@ -60,51 +60,125 @@ if [ ! -f "$PREFIX/local/bin/aterm-setup-storage" ]; then
 #!/bin/sh
 # Setup /sdcard symlink for Android storage access
 # Works with Android 15+ scoped storage
+# Requests storage permissions if needed
+
+# Get package name from environment
+PKG_NAME="${PKG:-${RISH_APPLICATION_ID}}"
+if [ -z "$PKG_NAME" ]; then
+    # Try to get from /proc/self/cmdline or other methods
+    PKG_NAME=$(cat /proc/self/cmdline 2>/dev/null | cut -d: -f1 | tr -d '\0' || echo "")
+fi
+
+# Function to check if storage is accessible
+check_storage_access() {
+    for path in "/storage/emulated/0" "/sdcard" "/storage/sdcard0" "/mnt/sdcard"; do
+        if [ -d "$path" ] && [ -r "$path" ] && [ -x "$path" ]; then
+            # Test if we can actually list files
+            if ls "$path" >/dev/null 2>&1; then
+                echo "$path"
+                return 0
+            fi
+        fi
+    done
+    return 1
+}
+
+# Function to request storage permissions
+request_permissions() {
+    echo "Requesting storage permissions..."
+    
+    if [ -n "$PKG_NAME" ] && command -v am >/dev/null 2>&1; then
+        # Open app's permission settings page
+        am start -a android.settings.APPLICATION_DETAILS_SETTINGS \
+            -d "package:$PKG_NAME" >/dev/null 2>&1 || true
+        
+        echo "Please grant storage permissions in the settings that just opened."
+        echo "Then run 'aterm-setup-storage' again."
+        return 1
+    else
+        echo "Please grant storage permissions manually in Android Settings:"
+        if [ -n "$PKG_NAME" ]; then
+            echo "  Settings > Apps > $PKG_NAME > Permissions > Files and media"
+        else
+            echo "  Settings > Apps > aTerm > Permissions > Files and media"
+        fi
+        return 1
+    fi
+}
 
 # Find Android external storage
 ANDROID_STORAGE=""
-for path in "/storage/emulated/0" "/sdcard" "/storage/sdcard0" "/mnt/sdcard"; do
-    if [ -d "$path" ] && [ -r "$path" ]; then
-        ANDROID_STORAGE="$path"
-        break
-    fi
-done
+ANDROID_STORAGE=$(check_storage_access)
 
 # Also try to get from environment
 if [ -z "$ANDROID_STORAGE" ] && [ -n "$EXTERNAL_STORAGE" ]; then
-    if [ -d "$EXTERNAL_STORAGE" ] && [ -r "$EXTERNAL_STORAGE" ]; then
-        ANDROID_STORAGE="$EXTERNAL_STORAGE"
+    if [ -d "$EXTERNAL_STORAGE" ] && [ -r "$EXTERNAL_STORAGE" ] && [ -x "$EXTERNAL_STORAGE" ]; then
+        if ls "$EXTERNAL_STORAGE" >/dev/null 2>&1; then
+            ANDROID_STORAGE="$EXTERNAL_STORAGE"
+        fi
     fi
 fi
 
+# If no accessible storage found, request permissions
 if [ -z "$ANDROID_STORAGE" ]; then
-    echo "Error: Could not find Android external storage"
-    echo "Please ensure storage permissions are granted in the app settings"
+    echo "✗ Storage access not available"
+    request_permissions
     exit 1
 fi
 
-# Create /sdcard if it doesn't exist or is not a symlink
-if [ ! -e "/sdcard" ]; then
+# Create /sdcard if it doesn't exist or is not accessible
+if [ ! -e "/sdcard" ] || [ ! -r "/sdcard" ] || [ ! -x "/sdcard" ]; then
+    # Remove existing /sdcard if it's not working
+    if [ -e "/sdcard" ] && ! ls "/sdcard" >/dev/null 2>&1; then
+        rm -rf /sdcard 2>/dev/null || true
+    fi
+    
     # Try to create symlink
-    ln -sf "$ANDROID_STORAGE" /sdcard 2>/dev/null || {
-        # If symlink fails, try bind mount (requires root or proot)
-        mkdir -p /sdcard 2>/dev/null || true
-        mount --bind "$ANDROID_STORAGE" /sdcard 2>/dev/null || {
-            echo "Warning: Could not create /sdcard symlink or mount"
-            echo "Storage is available at: $ANDROID_STORAGE"
-            echo "You can access it directly or set up manually"
-        }
-    }
+    if ln -sf "$ANDROID_STORAGE" /sdcard 2>/dev/null; then
+        # Verify symlink works
+        if [ -L "/sdcard" ] && ls "/sdcard" >/dev/null 2>&1; then
+            echo "✓ Storage setup complete (symlink)"
+            echo "  /sdcard -> $ANDROID_STORAGE"
+            echo "  You can now access your Android storage at /sdcard"
+            exit 0
+        fi
+    fi
+    
+    # If symlink fails, try bind mount (requires root or proot)
+    mkdir -p /sdcard 2>/dev/null || true
+    if mount --bind "$ANDROID_STORAGE" /sdcard 2>/dev/null; then
+        # Verify mount works
+        if [ -d "/sdcard" ] && ls "/sdcard" >/dev/null 2>&1; then
+            echo "✓ Storage setup complete (bind mount)"
+            echo "  /sdcard -> $ANDROID_STORAGE"
+            echo "  You can now access your Android storage at /sdcard"
+            exit 0
+        fi
+    fi
+    
+    echo "✗ Could not create /sdcard symlink or mount"
+    echo "  Storage is available at: $ANDROID_STORAGE"
+    echo "  You can access it directly at that path"
+    exit 1
 fi
 
-if [ -L "/sdcard" ] || [ -d "/sdcard" ]; then
-    echo "✓ Storage setup complete"
-    echo "  /sdcard -> $ANDROID_STORAGE"
-    echo "  You can now access your Android storage at /sdcard"
+# Verify /sdcard is working
+if ls "/sdcard" >/dev/null 2>&1; then
+    echo "✓ Storage already set up"
+    if [ -L "/sdcard" ]; then
+        TARGET=$(readlink -f /sdcard 2>/dev/null || readlink /sdcard 2>/dev/null || echo "unknown")
+        echo "  /sdcard -> $TARGET"
+    else
+        echo "  /sdcard is accessible"
+    fi
+    echo "  You can access your Android storage at /sdcard"
+    exit 0
 else
-    echo "✗ Storage setup failed"
-    echo "  Storage is available at: $ANDROID_STORAGE"
-    exit 1
+    echo "✗ /sdcard exists but is not accessible"
+    echo "  Removing and recreating..."
+    rm -rf /sdcard 2>/dev/null || true
+    # Retry setup
+    exec "$0"
 fi
 STORAGEEOF
     chmod +x "$PREFIX/local/bin/aterm-setup-storage" 2>/dev/null || true
