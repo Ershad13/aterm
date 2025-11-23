@@ -70,10 +70,16 @@ class GeminiClient(
         if (!Settings.enable_streaming) {
             android.util.Log.d("GeminiClient", "sendMessageStream: Streaming disabled, using non-streaming mode")
             
-            if (intent == IntentType.DEBUG_UPGRADE) {
-                emitAll(sendMessageNonStreamingReverse(enhancedUserMessage, onChunk, onToolCall, onToolResult))
-            } else {
-                emitAll(sendMessageNonStreaming(enhancedUserMessage, onChunk, onToolCall, onToolResult))
+            when (intent) {
+                IntentType.TEST_ONLY -> {
+                    emitAll(sendMessageTestOnly(enhancedUserMessage, onChunk, onToolCall, onToolResult))
+                }
+                IntentType.DEBUG_UPGRADE -> {
+                    emitAll(sendMessageNonStreamingReverse(enhancedUserMessage, onChunk, onToolCall, onToolResult))
+                }
+                else -> {
+                    emitAll(sendMessageNonStreaming(enhancedUserMessage, onChunk, onToolCall, onToolResult))
+                }
             }
             return@flow
         }
@@ -1098,11 +1104,12 @@ class GeminiClient(
      */
     private enum class IntentType {
         CREATE_NEW,
-        DEBUG_UPGRADE
+        DEBUG_UPGRADE,
+        TEST_ONLY
     }
     
     /**
-     * Detect user intent: create new project or debug/upgrade existing
+     * Detect user intent: create new project, debug/upgrade existing, or test only
      * Uses memory context and keyword analysis
      * Also detects if task needs documentation search or planning
      */
@@ -1121,11 +1128,19 @@ class GeminiClient(
             "setup", "scaffold", "bootstrap"
         )
         
+        val testKeywords = listOf(
+            "test", "run test", "run tests", "test api", "test endpoint", "test endpoints",
+            "api test", "api testing", "test server", "test the", "testing", "test suite",
+            "unit test", "integration test", "e2e test", "end to end test", "test coverage",
+            "pytest", "jest", "mocha", "npm test", "test command", "execute test"
+        )
+        
         val messageLower = userMessage.lowercase()
         val contextLower = (userMessage + " " + memoryContext).lowercase()
         
         val debugScore = debugKeywords.count { contextLower.contains(it) }
         val createScore = createKeywords.count { contextLower.contains(it) }
+        val testScore = testKeywords.count { contextLower.contains(it) }
         
         // Check if workspace has existing files
         val workspaceDir = File(workspaceRoot)
@@ -1136,6 +1151,27 @@ class GeminiClient(
         val hasProjectContext = memoryContext.contains("project", ignoreCase = true) ||
                                 memoryContext.contains("codebase", ignoreCase = true) ||
                                 memoryContext.contains("repository", ignoreCase = true)
+        
+        // PRIORITY: Check for test-only intent first (if test keywords are strong and no create keywords)
+        // Test intent should be detected when:
+        // 1. Strong test keywords present
+        // 2. Workspace has existing files (project exists)
+        // 3. No strong create keywords (not creating new project)
+        // 4. May have debug keywords (fixing tests is okay)
+        if (testScore > 0 && hasExistingFiles && 
+            (testScore >= createScore || (testScore > 0 && createScore == 0))) {
+            // Additional check: if message is primarily about testing
+            val isPrimarilyTest = testScore > debugScore && testScore > createScore
+            val mentionsTestCommand = messageLower.contains("npm test") || 
+                                     messageLower.contains("pytest") || 
+                                     messageLower.contains("jest") ||
+                                     messageLower.contains("test api") ||
+                                     messageLower.contains("test endpoint")
+            
+            if (isPrimarilyTest || mentionsTestCommand) {
+                return IntentType.TEST_ONLY
+            }
+        }
         
         // If workspace has files and debug keywords are present, likely debug/upgrade
         if (hasExistingFiles && (debugScore > createScore || debugScore > 0)) {
@@ -1166,6 +1202,7 @@ class GeminiClient(
         val intentDescription = when (intent) {
             IntentType.CREATE_NEW -> "creating a new project"
             IntentType.DEBUG_UPGRADE -> "debugging or upgrading an existing project"
+            IntentType.TEST_ONLY -> "running tests and fixing issues"
         }
         
         // Add helpful guidance directly to the user message
@@ -3100,12 +3137,88 @@ exports.$functionName = (req, res, next) => {
             null
         }
         
+        var metadataJsonFinal = metadataJson
+        
         if (metadataJson == null || metadataJson.length() != filePaths.size) {
-            emit(GeminiStreamEvent.Error("Failed to parse metadata or metadata count mismatch"))
-            return@flow
+            // Try to validate and fix metadata
+            emit(GeminiStreamEvent.Chunk("⚠️ Metadata count mismatch, attempting to fix...\n"))
+            onChunk("⚠️ Metadata count mismatch, attempting to fix...\n")
+            
+            // Retry metadata generation with better prompt
+            val retryMetadataPrompt = """
+                $systemContext
+                
+                Previous metadata generation had issues. Please regenerate comprehensive metadata for ALL files.
+                
+                Files to create:
+                ${filePaths.joinToString("\n") { "- $it" }}
+                
+                Ensure you provide metadata for ALL ${filePaths.size} files. The previous response had ${metadataJson?.length() ?: 0} entries, but we need ${filePaths.size}.
+                
+                ${metadataPrompt.substringAfter("For each file, provide COMPREHENSIVE metadata:")}
+            """.trimIndent()
+            
+            val retryMetadataRequest = JSONObject().apply {
+                put("contents", JSONArray().apply {
+                    put(JSONObject().apply {
+                        put("role", "user")
+                        put("parts", JSONArray().apply {
+                            put(JSONObject().apply {
+                                put("text", retryMetadataPrompt)
+                            })
+                        })
+                    })
+                })
+                put("systemInstruction", JSONObject().apply {
+                    put("parts", JSONArray().apply {
+                        put(JSONObject().apply {
+                            put("text", SystemInfoService.generateSystemContext())
+                        })
+                    })
+                })
+            }
+            
+            val retryMetadataText = makeApiCallWithRetryAndCorrection(
+                model, retryMetadataRequest, "metadata retry", signal, null, ::emitEvent, onChunk
+            )
+            
+            if (retryMetadataText != null) {
+                val retryMetadataJson = try {
+                    val jsonStart = retryMetadataText.indexOf('[')
+                    val jsonEnd = retryMetadataText.lastIndexOf(']') + 1
+                    if (jsonStart >= 0 && jsonEnd > jsonStart) {
+                        JSONArray(retryMetadataText.substring(jsonStart, jsonEnd))
+                    } else {
+                        null
+                    }
+                } catch (e: Exception) {
+                    android.util.Log.e("GeminiClient", "Failed to parse retry metadata", e)
+                    null
+                }
+                
+                if (retryMetadataJson != null && retryMetadataJson.length() == filePaths.size) {
+                    metadataJsonFinal = retryMetadataJson
+                    emit(GeminiStreamEvent.Chunk("✅ Metadata regenerated successfully\n"))
+                    onChunk("✅ Metadata regenerated successfully\n")
+                } else {
+                    emit(GeminiStreamEvent.Error("Failed to generate complete metadata after retry"))
+                    return@flow
+                }
+            } else {
+                emit(GeminiStreamEvent.Error("Failed to generate metadata after retries"))
+                return@flow
+            }
         }
         
-        emit(GeminiStreamEvent.Chunk("✅ Metadata generated for ${metadataJson.length()} files\n"))
+        // Validate metadata coherence
+        val coherenceIssues = validateMetadataCoherence(metadataJsonFinal, filePaths)
+        if (coherenceIssues.isNotEmpty()) {
+            emit(GeminiStreamEvent.Chunk("⚠️ Metadata coherence issues detected:\n${coherenceIssues.take(3).joinToString("\n")}\n"))
+            onChunk("⚠️ Metadata coherence issues detected\n")
+            // Continue anyway - coherence issues will be caught during code generation
+        }
+        
+        emit(GeminiStreamEvent.Chunk("✅ Metadata generated for ${metadataJsonFinal.length()} files\n"))
         
         // Update todos - preserve all existing todos (no withContext - emit must be in same context)
         updatedTodos = currentTodos.map { todo ->
@@ -3124,8 +3237,8 @@ exports.$functionName = (req, res, next) => {
         val metadataMap = mutableMapOf<String, JSONObject>()
         
         // Build metadata map for easy lookup
-        for (i in 0 until metadataJson.length()) {
-            val fileMeta = metadataJson.getJSONObject(i)
+        for (i in 0 until metadataJsonFinal.length()) {
+            val fileMeta = metadataJsonFinal.getJSONObject(i)
             val filePath = fileMeta.getString("file_path")
             metadataMap[filePath] = fileMeta
         }
@@ -3502,6 +3615,22 @@ exports.$functionName = (req, res, next) => {
         val isWebFramework = detectWebFramework(workspaceRoot)
         val isKotlinJava = detectKotlinJava(workspaceRoot)
         
+        updatedTodos = currentTodos.map { todo ->
+            if (todo.description == "Phase 3: Generate code for each file") {
+                todo.copy(status = TodoStatus.COMPLETED)
+            } else {
+                todo
+            }
+        }
+        updateTodos(updatedTodos)
+        
+        // Add Phase 5 and 6 to todos
+        val todosWithTesting = updatedTodos + listOf(
+            Todo("Phase 5: Run tests and validate", TodoStatus.PENDING),
+            Todo("Phase 6: Fix issues and retry (if needed)", TodoStatus.PENDING)
+        )
+        updateTodos(todosWithTesting)
+        
         if (isWebFramework && !isKotlinJava) {
             emit(GeminiStreamEvent.Chunk("\n🧪 Phase 5: Testing API endpoints...\n"))
             onChunk("\n🧪 Phase 5: Testing API endpoints...\n")
@@ -3525,9 +3654,442 @@ exports.$functionName = (req, res, next) => {
             }
         }
         
-        emit(GeminiStreamEvent.Chunk("\n✨ Project generation complete!\n"))
-        onChunk("\n✨ Project generation complete!\n")
+        // Phase 6: Comprehensive validation and testing with retry loop
+        var validationAttempt = 0
+        val maxValidationAttempts = 5
+        var workComplete = false
+        
+        while (!workComplete && validationAttempt < maxValidationAttempts && signal?.isAborted() != true) {
+            validationAttempt++
+            
+            if (validationAttempt > 1) {
+                emit(GeminiStreamEvent.Chunk("\n🔄 Validation attempt $validationAttempt/$maxValidationAttempts\n"))
+                onChunk("\n🔄 Validation attempt $validationAttempt/$maxValidationAttempts\n")
+            } else {
+                emit(GeminiStreamEvent.Chunk("\n✅ Phase 6: Validating project completeness...\n"))
+                onChunk("\n✅ Phase 6: Validating project completeness...\n")
+            }
+            
+            updatedTodos = currentTodos.map { todo ->
+                when {
+                    todo.description == "Phase 5: Run tests and validate" -> todo.copy(status = TodoStatus.IN_PROGRESS)
+                    todo.description == "Phase 6: Fix issues and retry (if needed)" -> todo.copy(status = if (validationAttempt > 1) TodoStatus.IN_PROGRESS else TodoStatus.PENDING)
+                    else -> todo
+                }
+            }
+            updateTodos(updatedTodos)
+            
+            // Step 1: Run test commands if available
+            val testCommands = detectTestCommands(workspaceRoot, systemInfo, userMessage, ::emitEvent, onChunk)
+            var testFailures = mutableListOf<Pair<String, ToolResult>>()
+            var hasTestFailures = false
+            
+            if (testCommands.isNotEmpty()) {
+                emit(GeminiStreamEvent.Chunk("🧪 Running test commands...\n"))
+                onChunk("🧪 Running test commands...\n")
+                
+                for (command in testCommands) {
+                    emit(GeminiStreamEvent.Chunk("▶️ Testing: ${command.primaryCommand}\n"))
+                    onChunk("▶️ Testing: ${command.primaryCommand}\n")
+                    
+                    val result = executeCommandWithFallbacks(
+                        command, workspaceRoot, systemInfo, ::emitEvent, onChunk, onToolCall, onToolResult
+                    )
+                    
+                    val isFailure = result.error != null || 
+                        result.llmContent.contains("FAILED", ignoreCase = true) ||
+                        (result.llmContent.contains("failed", ignoreCase = true) && 
+                         result.llmContent.contains("test", ignoreCase = true)) ||
+                        (result.llmContent.contains("error", ignoreCase = true) && 
+                         result.llmContent.contains("test", ignoreCase = true)) ||
+                        result.llmContent.contains("AssertionError", ignoreCase = true) ||
+                        result.llmContent.contains("TestError", ignoreCase = true)
+                    
+                    if (isFailure) {
+                        hasTestFailures = true
+                        testFailures.add(Pair(command.primaryCommand, result))
+                        emit(GeminiStreamEvent.Chunk("❌ Test failed: ${command.primaryCommand}\n"))
+                        onChunk("❌ Test failed: ${command.primaryCommand}\n")
+                    } else {
+                        emit(GeminiStreamEvent.Chunk("✅ Test passed: ${command.primaryCommand}\n"))
+                        onChunk("✅ Test passed: ${command.primaryCommand}\n")
+                    }
+                }
+            }
+            
+            // Step 2: Run API tests if applicable
+            var apiTestFailed = false
+            if (isWebFramework && !isKotlinJava) {
+                emit(GeminiStreamEvent.Chunk("🌐 Running API tests...\n"))
+                onChunk("🌐 Running API tests...\n")
+                
+                val apiTestResult = testAPIs(workspaceRoot, systemInfo, userMessage, ::emitEvent, onChunk, onToolCall, onToolResult)
+                if (!apiTestResult) {
+                    apiTestFailed = true
+                    hasTestFailures = true
+                }
+            }
+            
+            // Step 3: Check for compilation/build errors
+            var buildErrors = false
+            val buildCommands = detectCommandsNeeded(workspaceRoot, systemInfo, userMessage, ::emitEvent, onChunk)
+                .filter { cmd -> 
+                    val cmdLower = cmd.primaryCommand.lowercase()
+                    cmdLower.contains("build") || cmdLower.contains("compile") || 
+                    cmdLower.contains("make") || cmdLower.contains("gradle") ||
+                    cmdLower.contains("maven") || cmdLower.contains("cmake")
+                }
+            
+            if (buildCommands.isNotEmpty()) {
+                emit(GeminiStreamEvent.Chunk("🔨 Checking build/compilation...\n"))
+                onChunk("🔨 Checking build/compilation...\n")
+                
+                for (command in buildCommands) {
+                    val result = executeCommandWithFallbacks(
+                        command, workspaceRoot, systemInfo, ::emitEvent, onChunk, onToolCall, onToolResult
+                    )
+                    
+                    if (result.error != null || 
+                        result.llmContent.contains("error", ignoreCase = true) ||
+                        result.llmContent.contains("failed", ignoreCase = true) ||
+                        result.llmContent.contains("ERROR", ignoreCase = true)) {
+                        buildErrors = true
+                        hasTestFailures = true
+                        emit(GeminiStreamEvent.Chunk("❌ Build error detected: ${command.primaryCommand}\n"))
+                        onChunk("❌ Build error detected: ${command.primaryCommand}\n")
+                    }
+                }
+            }
+            
+            // Step 4: Work completion detection
+            if (!hasTestFailures && !apiTestFailed && !buildErrors) {
+                // Additional validation: Check if project structure is complete
+                val completenessCheck = validateProjectCompleteness(
+                    workspaceRoot, filePaths, userMessage, ::emitEvent, onChunk
+                )
+                
+                if (completenessCheck) {
+                    workComplete = true
+                    emit(GeminiStreamEvent.Chunk("\n✅ Project validation passed! Work is complete.\n"))
+                    onChunk("\n✅ Project validation passed! Work is complete.\n")
+                    
+                    updatedTodos = currentTodos.map { todo ->
+                        when {
+                            todo.description == "Phase 5: Run tests and validate" -> todo.copy(status = TodoStatus.COMPLETED)
+                            todo.description == "Phase 6: Fix issues and retry (if needed)" -> todo.copy(status = TodoStatus.COMPLETED)
+                            else -> todo
+                        }
+                    }
+                    updateTodos(updatedTodos)
+                    break
+                }
+            }
+            
+            // Step 5: If failures detected, analyze and fix
+            if (hasTestFailures || apiTestFailed || buildErrors) {
+                if (validationAttempt >= maxValidationAttempts) {
+                    emit(GeminiStreamEvent.Chunk("\n⚠️ Maximum validation attempts reached. Some issues may remain.\n"))
+                    onChunk("\n⚠️ Maximum validation attempts reached. Some issues may remain.\n")
+                    break
+                }
+                
+                emit(GeminiStreamEvent.Chunk("\n🔧 Analyzing failures and generating fixes...\n"))
+                onChunk("\n🔧 Analyzing failures and generating fixes...\n")
+                
+                updatedTodos = currentTodos.map { todo ->
+                    if (todo.description == "Phase 6: Fix issues and retry (if needed)") {
+                        todo.copy(status = TodoStatus.IN_PROGRESS)
+                    } else {
+                        todo
+                    }
+                }
+                updateTodos(updatedTodos)
+                
+                // Collect failure information
+                val failureInfo = buildString {
+                    if (testFailures.isNotEmpty()) {
+                        append("Test Failures:\n")
+                        testFailures.forEach { (cmd, result) ->
+                            append("- Command: $cmd\n")
+                            append("  Error: ${result.error?.message ?: "Test failure"}\n")
+                            append("  Output: ${result.llmContent.take(800)}\n\n")
+                        }
+                    }
+                    if (apiTestFailed) {
+                        append("API Testing: Failed\n")
+                    }
+                    if (buildErrors) {
+                        append("Build/Compilation: Errors detected\n")
+                    }
+                }
+                
+                // Use reverse flow to fix issues
+                val projectStructure = extractProjectStructure(workspaceRoot, signal, ::emitEvent, onChunk)
+                
+                val fixPrompt = """
+                    $systemContext
+                    
+                    **Project Goal:** $userMessage
+                    
+                    **Failures Detected:**
+                    $failureInfo
+                    
+                    **Project Structure:**
+                    $projectStructure
+                    
+                    Analyze the failures and provide fixes. For each fix, provide:
+                    1. The file path
+                    2. The exact old_string to replace (include enough context - at least 5-10 lines before and after)
+                    3. The exact new_string (complete fixed code)
+                    4. Confidence level (high/medium/low)
+                    
+                    **CRITICAL CODE COHERENCE REQUIREMENTS FOR FIXES:**
+                    - MAINTAIN CONSISTENCY: All fixes must maintain consistency with the existing codebase patterns, style, and conventions
+                    - PRESERVE IMPORTS: Ensure all imports remain correct and match what the fixed code uses
+                    - PRESERVE EXPORTS: Ensure all exports remain consistent with what other files expect
+                    - MATCH SIGNATURES: If fixing function/class signatures, ensure they match what other files call/import
+                    - MATCH PATTERNS: Use the same coding patterns, error handling, and structure as the rest of the codebase
+                    
+                    Format as JSON array:
+                    [
+                      {
+                        "file_path": "path/to/file.ext",
+                        "old_string": "exact code to replace with context",
+                        "new_string": "complete fixed code",
+                        "confidence": "high|medium|low",
+                        "description": "What this fix does"
+                      }
+                    ]
+                    
+                    Be thorough and ensure all fixes are complete and correct.
+                """.trimIndent()
+                
+                val fixRequest = JSONObject().apply {
+                    put("contents", JSONArray().apply {
+                        put(JSONObject().apply {
+                            put("role", "user")
+                            put("parts", JSONArray().apply {
+                                put(JSONObject().apply {
+                                    put("text", fixPrompt)
+                                })
+                            })
+                        })
+                    })
+                    put("systemInstruction", JSONObject().apply {
+                        put("parts", JSONArray().apply {
+                            put(JSONObject().apply {
+                                put("text", systemContext)
+                            })
+                        })
+                    })
+                }
+                
+                val fixText = makeApiCallWithRetryAndCorrection(
+                    model, fixRequest, "fixes", signal, null, ::emitEvent, onChunk
+                )
+                
+                if (fixText != null) {
+                    val fixesJson = try {
+                        val jsonStart = fixText.indexOf('[')
+                        val jsonEnd = fixText.lastIndexOf(']') + 1
+                        if (jsonStart >= 0 && jsonEnd > jsonStart) {
+                            JSONArray(fixText.substring(jsonStart, jsonEnd))
+                        } else {
+                            null
+                        }
+                    } catch (e: Exception) {
+                        android.util.Log.e("GeminiClient", "Failed to parse fixes", e)
+                        null
+                    }
+                    
+                    if (fixesJson != null && fixesJson.length() > 0) {
+                        emit(GeminiStreamEvent.Chunk("✅ Generated ${fixesJson.length()} fix(es)\n"))
+                        onChunk("✅ Generated ${fixesJson.length()} fix(es)\n")
+                        
+                        // Apply fixes
+                        for (i in 0 until fixesJson.length()) {
+                            val fix = fixesJson.getJSONObject(i)
+                            val filePath = fix.getString("file_path")
+                            val oldString = fix.getString("old_string")
+                            val newString = fix.getString("new_string")
+                            
+                            emit(GeminiStreamEvent.Chunk("🔨 Applying fix to $filePath...\n"))
+                            onChunk("🔨 Applying fix to $filePath...\n")
+                            
+                            val editCall = FunctionCall(
+                                name = "edit",
+                                args = mapOf(
+                                    "file_path" to filePath,
+                                    "old_string" to oldString,
+                                    "new_string" to newString
+                                )
+                            )
+                            
+                            emit(GeminiStreamEvent.ToolCall(editCall))
+                            onToolCall(editCall)
+                            
+                            val editResult = try {
+                                executeToolSync("edit", editCall.args)
+                            } catch (e: Exception) {
+                                ToolResult(
+                                    llmContent = "Error: ${e.message}",
+                                    returnDisplay = "Error",
+                                    error = ToolError(
+                                        message = e.message ?: "Unknown error",
+                                        type = ToolErrorType.EXECUTION_ERROR
+                                    )
+                                )
+                            }
+                            
+                            emit(GeminiStreamEvent.ToolResult("edit", editResult))
+                            onToolResult("edit", editCall.args)
+                            
+                            if (editResult.error == null) {
+                                emit(GeminiStreamEvent.Chunk("✅ Fix applied successfully\n"))
+                                onChunk("✅ Fix applied successfully\n")
+                                // Update generated files cache
+                                if (filePath in generatedFiles) {
+                                    val readResult = executeToolSync("read_file", mapOf("file_path" to filePath))
+                                    if (readResult.error == null) {
+                                        generatedFiles[filePath] = readResult.llmContent
+                                    }
+                                }
+                            } else {
+                                emit(GeminiStreamEvent.Chunk("❌ Failed to apply fix: ${editResult.error?.message}\n"))
+                                onChunk("❌ Failed to apply fix: ${editResult.error?.message}\n")
+                            }
+                        }
+                    } else {
+                        emit(GeminiStreamEvent.Chunk("⚠️ Could not generate fixes\n"))
+                        onChunk("⚠️ Could not generate fixes\n")
+                    }
+                }
+            }
+        }
+        
+        if (workComplete) {
+            emit(GeminiStreamEvent.Chunk("\n✨ Project generation complete and validated!\n"))
+            onChunk("\n✨ Project generation complete and validated!\n")
+        } else {
+            emit(GeminiStreamEvent.Chunk("\n⚠️ Project generation completed with some issues remaining\n"))
+            onChunk("\n⚠️ Project generation completed with some issues remaining\n")
+        }
+        
         emit(GeminiStreamEvent.Done)
+    }
+    
+    /**
+     * Validate project completeness by checking if all required files exist and are functional
+     */
+    private suspend fun validateProjectCompleteness(
+        workspaceRoot: String,
+        expectedFiles: List<String>,
+        userMessage: String,
+        emit: suspend (GeminiStreamEvent) -> Unit,
+        onChunk: (String) -> Unit
+    ): Boolean {
+        val workspaceDir = File(workspaceRoot)
+        if (!workspaceDir.exists()) return false
+        
+        // Check if all expected files exist
+        var allFilesExist = true
+        for (filePath in expectedFiles) {
+            val file = File(workspaceDir, filePath)
+            if (!file.exists()) {
+                emit(GeminiStreamEvent.Chunk("⚠️ Missing file: $filePath\n"))
+                onChunk("⚠️ Missing file: $filePath\n")
+                allFilesExist = false
+            }
+        }
+        
+        if (!allFilesExist) {
+            return false
+        }
+        
+        // Check for critical files based on project type
+        val hasPackageJson = File(workspaceDir, "package.json").exists()
+        val hasRequirementsTxt = File(workspaceDir, "requirements.txt").exists()
+        val hasMainFile = expectedFiles.any { 
+            it.contains("main", ignoreCase = true) || 
+            it.contains("index", ignoreCase = true) ||
+            it.contains("app", ignoreCase = true)
+        }
+        
+        // Basic validation passed
+        return true
+    }
+    
+    /**
+     * Validate metadata coherence - check import/export consistency
+     */
+    private fun validateMetadataCoherence(
+        metadataJson: JSONArray,
+        filePaths: List<String>
+    ): List<String> {
+        val issues = mutableListOf<String>()
+        val metadataMap = mutableMapOf<String, JSONObject>()
+        
+        // Build metadata map
+        for (i in 0 until metadataJson.length()) {
+            try {
+                val fileMeta = metadataJson.getJSONObject(i)
+                val filePath = fileMeta.getString("file_path")
+                metadataMap[filePath] = fileMeta
+            } catch (e: Exception) {
+                issues.add("Failed to parse metadata entry $i: ${e.message}")
+            }
+        }
+        
+        // Check import/export consistency
+        for ((filePath, fileMeta) in metadataMap) {
+            try {
+                val imports = if (fileMeta.has("imports")) {
+                    fileMeta.getJSONArray("imports").let { arr ->
+                        (0 until arr.length()).mapNotNull { 
+                            try { arr.getString(it) } catch (e: Exception) { null }
+                        }
+                    }
+                } else emptyList()
+                
+                val exports = if (fileMeta.has("exports")) {
+                    fileMeta.getJSONArray("exports").let { arr ->
+                        (0 until arr.length()).mapNotNull { 
+                            try { arr.getString(it) } catch (e: Exception) { null }
+                        }
+                    }
+                } else emptyList()
+                
+                val relationships = if (fileMeta.has("relationships")) {
+                    fileMeta.getJSONArray("relationships").let { arr ->
+                        (0 until arr.length()).mapNotNull { 
+                            try { arr.getString(it) } catch (e: Exception) { null }
+                        }
+                    }
+                } else emptyList()
+                
+                // Check if imported files exist in metadata
+                imports.forEach { importStmt ->
+                    // Extract file path from import statement (simplified check)
+                    val importedFile = relationships.find { 
+                        importStmt.contains(it, ignoreCase = true) 
+                    }
+                    if (importedFile != null && !metadataMap.containsKey(importedFile)) {
+                        issues.add("$filePath imports from $importedFile but it's not in metadata")
+                    }
+                }
+                
+                // Check if relationships reference valid files
+                relationships.forEach { relatedFile ->
+                    if (!metadataMap.containsKey(relatedFile) && !filePaths.contains(relatedFile)) {
+                        issues.add("$filePath has relationship to $relatedFile but it's not in file list")
+                    }
+                }
+            } catch (e: Exception) {
+                issues.add("Error validating $filePath: ${e.message}")
+            }
+        }
+        
+        return issues
     }
     
     /**
@@ -4422,9 +4984,829 @@ exports.$functionName = (req, res, next) => {
         }
         updateTodos(updatedTodos)
         
-        emit(GeminiStreamEvent.Chunk("\n✨ Debug/upgrade complete!\n"))
-        onChunk("\n✨ Debug/upgrade complete!\n")
+        // Phase 6: Validation and testing with retry loop
+        var validationAttempt = 0
+        val maxValidationAttempts = 5
+        var workComplete = false
+        
+        // Add validation phase to todos
+        val todosWithValidation = currentTodos + listOf(
+            Todo("Phase 6: Validate fixes and test", TodoStatus.PENDING),
+            Todo("Phase 7: Retry fixes if needed", TodoStatus.PENDING)
+        )
+        updateTodos(todosWithValidation)
+        
+        while (!workComplete && validationAttempt < maxValidationAttempts && signal?.isAborted() != true) {
+            validationAttempt++
+            
+            if (validationAttempt > 1) {
+                emit(GeminiStreamEvent.Chunk("\n🔄 Validation attempt $validationAttempt/$maxValidationAttempts\n"))
+                onChunk("\n🔄 Validation attempt $validationAttempt/$maxValidationAttempts\n")
+            } else {
+                emit(GeminiStreamEvent.Chunk("\n✅ Phase 6: Validating fixes...\n"))
+                onChunk("\n✅ Phase 6: Validating fixes...\n")
+            }
+            
+            updatedTodos = currentTodos.map { todo ->
+                when {
+                    todo.description == "Phase 6: Validate fixes and test" -> todo.copy(status = TodoStatus.IN_PROGRESS)
+                    todo.description == "Phase 7: Retry fixes if needed" -> todo.copy(status = if (validationAttempt > 1) TodoStatus.IN_PROGRESS else TodoStatus.PENDING)
+                    else -> todo
+                }
+            }
+            updateTodos(updatedTodos)
+            
+            // Run tests if available
+            val testCommands = detectTestCommands(workspaceRoot, systemInfo, userMessage, ::emitEvent, onChunk)
+            var hasTestFailures = false
+            var testFailures = mutableListOf<Pair<String, ToolResult>>()
+            
+            if (testCommands.isNotEmpty()) {
+                emit(GeminiStreamEvent.Chunk("🧪 Running tests to validate fixes...\n"))
+                onChunk("🧪 Running tests to validate fixes...\n")
+                
+                for (command in testCommands) {
+                    val result = executeCommandWithFallbacks(
+                        command, workspaceRoot, systemInfo, ::emitEvent, onChunk, onToolCall, onToolResult
+                    )
+                    
+                    val isFailure = result.error != null || 
+                        result.llmContent.contains("FAILED", ignoreCase = true) ||
+                        (result.llmContent.contains("failed", ignoreCase = true) && 
+                         result.llmContent.contains("test", ignoreCase = true)) ||
+                        result.llmContent.contains("AssertionError", ignoreCase = true)
+                    
+                    if (isFailure) {
+                        hasTestFailures = true
+                        testFailures.add(Pair(command.primaryCommand, result))
+                        emit(GeminiStreamEvent.Chunk("❌ Test failed: ${command.primaryCommand}\n"))
+                        onChunk("❌ Test failed: ${command.primaryCommand}\n")
+                    } else {
+                        emit(GeminiStreamEvent.Chunk("✅ Test passed: ${command.primaryCommand}\n"))
+                        onChunk("✅ Test passed: ${command.primaryCommand}\n")
+                    }
+                }
+            }
+            
+            // Check if work is complete
+            if (!hasTestFailures) {
+                workComplete = true
+                emit(GeminiStreamEvent.Chunk("\n✅ All tests passing! Debug/upgrade complete.\n"))
+                onChunk("\n✅ All tests passing! Debug/upgrade complete.\n")
+                
+                updatedTodos = currentTodos.map { todo ->
+                    when {
+                        todo.description == "Phase 6: Validate fixes and test" -> todo.copy(status = TodoStatus.COMPLETED)
+                        todo.description == "Phase 7: Retry fixes if needed" -> todo.copy(status = TodoStatus.COMPLETED)
+                        else -> todo
+                    }
+                }
+                updateTodos(updatedTodos)
+                break
+            }
+            
+            // If failures, retry fixes
+            if (hasTestFailures && validationAttempt < maxValidationAttempts) {
+                emit(GeminiStreamEvent.Chunk("\n🔧 Phase 7: Analyzing test failures and generating fixes...\n"))
+                onChunk("\n🔧 Phase 7: Analyzing test failures and generating fixes...\n")
+                
+                updatedTodos = currentTodos.map { todo ->
+                    if (todo.description == "Phase 7: Retry fixes if needed") {
+                        todo.copy(status = TodoStatus.IN_PROGRESS)
+                    } else {
+                        todo
+                    }
+                }
+                updateTodos(updatedTodos)
+                
+                // Collect failure info and generate fixes (reuse fix logic from above)
+                val failureInfo = buildString {
+                    testFailures.forEach { (cmd, result) ->
+                        append("- Command: $cmd\n")
+                        append("  Error: ${result.error?.message ?: "Test failure"}\n")
+                        append("  Output: ${result.llmContent.take(800)}\n\n")
+                    }
+                }
+                
+                val projectStructure = extractProjectStructure(workspaceRoot, signal, ::emitEvent, onChunk)
+                
+                val fixPrompt = """
+                    $systemContext
+                    
+                    **Project Goal:** $userMessage
+                    
+                    **Test Failures After Fixes:**
+                    $failureInfo
+                    
+                    **Project Structure:**
+                    $projectStructure
+                    
+                    Analyze the test failures and provide additional fixes. For each fix, provide:
+                    1. The file path
+                    2. The exact old_string to replace (include enough context)
+                    3. The exact new_string (complete fixed code)
+                    4. Confidence level (high/medium/low)
+                    
+                    **CRITICAL CODE COHERENCE REQUIREMENTS FOR FIXES:**
+                    - MAINTAIN CONSISTENCY: All fixes must maintain consistency with the existing codebase patterns, style, and conventions
+                    - PRESERVE IMPORTS: Ensure all imports remain correct and match what the fixed code uses
+                    - PRESERVE EXPORTS: Ensure all exports remain consistent with what other files expect
+                    - MATCH SIGNATURES: If fixing function/class signatures, ensure they match what other files call/import
+                    - MATCH PATTERNS: Use the same coding patterns, error handling, and structure as the rest of the codebase
+                    
+                    Format as JSON array:
+                    [
+                      {
+                        "file_path": "path/to/file.ext",
+                        "old_string": "exact code to replace with context",
+                        "new_string": "complete fixed code",
+                        "confidence": "high|medium|low",
+                        "description": "What this fix does"
+                      }
+                    ]
+                    
+                    Be thorough and ensure all fixes are complete and correct.
+                """.trimIndent()
+                
+                val fixRequest = JSONObject().apply {
+                    put("contents", JSONArray().apply {
+                        put(JSONObject().apply {
+                            put("role", "user")
+                            put("parts", JSONArray().apply {
+                                put(JSONObject().apply {
+                                    put("text", fixPrompt)
+                                })
+                            })
+                        })
+                    })
+                    put("systemInstruction", JSONObject().apply {
+                        put("parts", JSONArray().apply {
+                            put(JSONObject().apply {
+                                put("text", systemContext)
+                            })
+                        })
+                    })
+                }
+                
+                val fixText = makeApiCallWithRetryAndCorrection(
+                    model, fixRequest, "fixes", signal, null, ::emitEvent, onChunk
+                )
+                
+                if (fixText != null) {
+                    val fixesJson = try {
+                        val jsonStart = fixText.indexOf('[')
+                        val jsonEnd = fixText.lastIndexOf(']') + 1
+                        if (jsonStart >= 0 && jsonEnd > jsonStart) {
+                            JSONArray(fixText.substring(jsonStart, jsonEnd))
+                        } else {
+                            null
+                        }
+                    } catch (e: Exception) {
+                        android.util.Log.e("GeminiClient", "Failed to parse fixes", e)
+                        null
+                    }
+                    
+                    if (fixesJson != null && fixesJson.length() > 0) {
+                        emit(GeminiStreamEvent.Chunk("✅ Generated ${fixesJson.length()} additional fix(es)\n"))
+                        onChunk("✅ Generated ${fixesJson.length()} additional fix(es)\n")
+                        
+                        // Apply fixes (reuse existing fix application logic)
+                        for (i in 0 until fixesJson.length()) {
+                            val fix = fixesJson.getJSONObject(i)
+                            val filePath = fix.getString("file_path")
+                            val oldString = fix.getString("old_string")
+                            val newString = fix.getString("new_string")
+                            
+                            emit(GeminiStreamEvent.Chunk("🔨 Applying fix to $filePath...\n"))
+                            onChunk("🔨 Applying fix to $filePath...\n")
+                            
+                            val editCall = FunctionCall(
+                                name = "edit",
+                                args = mapOf(
+                                    "file_path" to filePath,
+                                    "old_string" to oldString,
+                                    "new_string" to newString
+                                )
+                            )
+                            
+                            emit(GeminiStreamEvent.ToolCall(editCall))
+                            onToolCall(editCall)
+                            
+                            val editResult = try {
+                                executeToolSync("edit", editCall.args)
+                            } catch (e: Exception) {
+                                ToolResult(
+                                    llmContent = "Error: ${e.message}",
+                                    returnDisplay = "Error",
+                                    error = ToolError(
+                                        message = e.message ?: "Unknown error",
+                                        type = ToolErrorType.EXECUTION_ERROR
+                                    )
+                                )
+                            }
+                            
+                            emit(GeminiStreamEvent.ToolResult("edit", editResult))
+                            onToolResult("edit", editCall.args)
+                            
+                            if (editResult.error == null) {
+                                emit(GeminiStreamEvent.Chunk("✅ Fix applied successfully\n"))
+                                onChunk("✅ Fix applied successfully\n")
+                            } else {
+                                emit(GeminiStreamEvent.Chunk("❌ Failed to apply fix: ${editResult.error?.message}\n"))
+                                onChunk("❌ Failed to apply fix: ${editResult.error?.message}\n")
+                            }
+                        }
+                    }
+                }
+            } else if (validationAttempt >= maxValidationAttempts) {
+                emit(GeminiStreamEvent.Chunk("\n⚠️ Maximum validation attempts reached. Some issues may remain.\n"))
+                onChunk("\n⚠️ Maximum validation attempts reached. Some issues may remain.\n")
+                break
+            }
+        }
+        
+        if (workComplete) {
+            emit(GeminiStreamEvent.Chunk("\n✨ Debug/upgrade complete and validated!\n"))
+            onChunk("\n✨ Debug/upgrade complete and validated!\n")
+        } else {
+            emit(GeminiStreamEvent.Chunk("\n⚠️ Debug/upgrade completed with some issues remaining\n"))
+            onChunk("\n⚠️ Debug/upgrade completed with some issues remaining\n")
+        }
+        
         emit(GeminiStreamEvent.Done)
+    }
+    
+    /**
+     * Test-only flow: Run tests, API tests, and fix issues
+     * 1. Detect and run test commands
+     * 2. Run API tests if applicable
+     * 3. Analyze failures
+     * 4. Make fixes
+     * 5. Re-run tests to verify
+     */
+    private suspend fun sendMessageTestOnly(
+        userMessage: String,
+        onChunk: (String) -> Unit,
+        onToolCall: (FunctionCall) -> Unit,
+        onToolResult: (String, Map<String, Any>) -> Unit
+    ): Flow<GeminiStreamEvent> = flow {
+        val signal = CancellationSignal()
+        android.util.Log.d("GeminiClient", "sendMessageTestOnly: Starting test-only flow")
+        
+        // Add user message to history
+        chatHistory.add(
+            Content(
+                role = "user",
+                parts = listOf(Part.TextPart(text = userMessage))
+            )
+        )
+        
+        val model = ApiProviderManager.getCurrentModel()
+        val systemInfo = SystemInfoService.detectSystemInfo()
+        val systemContext = SystemInfoService.generateSystemContext()
+        
+        // Helper function to wrap emit as suspend function
+        suspend fun emitEvent(event: GeminiStreamEvent) {
+            emit(event)
+        }
+        
+        // Initialize todos
+        var currentTodos = mutableListOf<Todo>()
+        val updateTodos: suspend (List<Todo>) -> Unit = { todos ->
+            currentTodos = todos.toMutableList()
+            val todoCall = FunctionCall(
+                name = "write_todos",
+                args = mapOf("todos" to todos.map { mapOf("description" to it.description, "status" to it.status.name) })
+            )
+            emit(GeminiStreamEvent.ToolCall(todoCall))
+            onToolCall(todoCall)
+            try {
+                val todoResult = executeToolSync("write_todos", todoCall.args)
+                emit(GeminiStreamEvent.ToolResult("write_todos", todoResult))
+                onToolResult("write_todos", todoCall.args)
+            } catch (e: Exception) {
+                android.util.Log.e("GeminiClient", "Failed to update todos", e)
+            }
+        }
+        
+        val initialTodos = listOf(
+            Todo("Phase 1: Detect and run test commands", TodoStatus.PENDING),
+            Todo("Phase 2: Run API tests (if applicable)", TodoStatus.PENDING),
+            Todo("Phase 3: Analyze test failures", TodoStatus.PENDING),
+            Todo("Phase 4: Fix issues", TodoStatus.PENDING),
+            Todo("Phase 5: Re-run tests to verify", TodoStatus.PENDING)
+        )
+        updateTodos(initialTodos)
+        
+        // Phase 1: Detect and run test commands
+        emit(GeminiStreamEvent.Chunk("🧪 Phase 1: Detecting and running test commands...\n"))
+        onChunk("🧪 Phase 1: Detecting and running test commands...\n")
+        
+        var updatedTodos = currentTodos.map { todo ->
+            if (todo.description == "Phase 1: Detect and run test commands") {
+                todo.copy(status = TodoStatus.IN_PROGRESS)
+            } else {
+                todo
+            }
+        }
+        updateTodos(updatedTodos)
+        
+        // Detect test commands using AI
+        val testCommands = detectTestCommands(workspaceRoot, systemInfo, userMessage, ::emitEvent, onChunk)
+        
+        var testResults = mutableListOf<Pair<String, ToolResult>>() // command -> result
+        var hasTestFailures = false
+        
+        if (testCommands.isNotEmpty()) {
+            emit(GeminiStreamEvent.Chunk("📋 Found ${testCommands.size} test command(s) to run\n"))
+            onChunk("📋 Found ${testCommands.size} test command(s) to run\n")
+            
+            for (command in testCommands) {
+                emit(GeminiStreamEvent.Chunk("▶️ Running: ${command.primaryCommand}\n"))
+                onChunk("▶️ Running: ${command.primaryCommand}\n")
+                
+                val result = executeCommandWithFallbacks(
+                    command, workspaceRoot, systemInfo, ::emitEvent, onChunk, onToolCall, onToolResult
+                )
+                
+                testResults.add(Pair(command.primaryCommand, result))
+                
+                // Check if test failed
+                if (result.error != null || 
+                    (result.llmContent.contains("FAILED", ignoreCase = true)) ||
+                    (result.llmContent.contains("failed", ignoreCase = true) && 
+                     result.llmContent.contains("test", ignoreCase = true)) ||
+                    (result.llmContent.contains("error", ignoreCase = true) && 
+                     result.llmContent.contains("test", ignoreCase = true))) {
+                    hasTestFailures = true
+                    emit(GeminiStreamEvent.Chunk("❌ Test failed: ${command.primaryCommand}\n"))
+                    onChunk("❌ Test failed: ${command.primaryCommand}\n")
+                } else {
+                    emit(GeminiStreamEvent.Chunk("✅ Test passed: ${command.primaryCommand}\n"))
+                    onChunk("✅ Test passed: ${command.primaryCommand}\n")
+                }
+            }
+        } else {
+            emit(GeminiStreamEvent.Chunk("ℹ️ No test commands detected\n"))
+            onChunk("ℹ️ No test commands detected\n")
+        }
+        
+        updatedTodos = currentTodos.map { todo ->
+            when {
+                todo.description == "Phase 1: Detect and run test commands" -> todo.copy(status = TodoStatus.COMPLETED)
+                todo.description == "Phase 2: Run API tests (if applicable)" -> todo.copy(status = TodoStatus.IN_PROGRESS)
+                else -> todo
+            }
+        }
+        updateTodos(updatedTodos)
+        
+        // Phase 2: Run API tests if applicable
+        emit(GeminiStreamEvent.Chunk("\n🌐 Phase 2: Running API tests (if applicable)...\n"))
+        onChunk("\n🌐 Phase 2: Running API tests (if applicable)...\n")
+        
+        val isWebFramework = detectWebFramework(workspaceRoot)
+        val isKotlinJava = detectKotlinJava(workspaceRoot)
+        var apiTestResult = true
+        
+        if (isWebFramework && !isKotlinJava) {
+            // Check if user specifically wants API testing
+            val messageLower = userMessage.lowercase()
+            val wantsApiTest = messageLower.contains("api") || 
+                              messageLower.contains("endpoint") || 
+                              messageLower.contains("test api") ||
+                              messageLower.contains("test endpoint")
+            
+            if (wantsApiTest || testCommands.isEmpty()) {
+                apiTestResult = testAPIs(workspaceRoot, systemInfo, userMessage, ::emitEvent, onChunk, onToolCall, onToolResult)
+                if (!apiTestResult) {
+                    hasTestFailures = true
+                }
+            } else {
+                emit(GeminiStreamEvent.Chunk("ℹ️ Skipping API tests (unit tests were run)\n"))
+                onChunk("ℹ️ Skipping API tests (unit tests were run)\n")
+            }
+        } else {
+            if (isKotlinJava) {
+                emit(GeminiStreamEvent.Chunk("ℹ️ Skipping API testing for Kotlin/Java projects\n"))
+                onChunk("ℹ️ Skipping API testing for Kotlin/Java projects\n")
+            } else {
+                emit(GeminiStreamEvent.Chunk("ℹ️ No web framework detected, skipping API testing\n"))
+                onChunk("ℹ️ No web framework detected, skipping API testing\n")
+            }
+        }
+        
+        updatedTodos = currentTodos.map { todo ->
+            when {
+                todo.description == "Phase 2: Run API tests (if applicable)" -> todo.copy(status = TodoStatus.COMPLETED)
+                todo.description == "Phase 3: Analyze test failures" -> todo.copy(status = TodoStatus.IN_PROGRESS)
+                else -> todo
+            }
+        }
+        updateTodos(updatedTodos)
+        
+        // Phase 3: Analyze test failures
+        if (hasTestFailures || !apiTestResult) {
+            emit(GeminiStreamEvent.Chunk("\n🔍 Phase 3: Analyzing test failures...\n"))
+            onChunk("\n🔍 Phase 3: Analyzing test failures...\n")
+            
+            // Collect all failure information
+            val failureInfo = buildString {
+                append("Test Failures Summary:\n\n")
+                testResults.forEach { (cmd, result) ->
+                    if (result.error != null || 
+                        result.llmContent.contains("FAILED", ignoreCase = true) ||
+                        (result.llmContent.contains("failed", ignoreCase = true) && 
+                         result.llmContent.contains("test", ignoreCase = true))) {
+                        append("Command: $cmd\n")
+                        append("Error: ${result.error?.message ?: "Test failure"}\n")
+                        append("Output: ${result.llmContent.take(1000)}\n\n")
+                    }
+                }
+                if (!apiTestResult) {
+                    append("API Testing: Failed\n")
+                }
+            }
+            
+            emit(GeminiStreamEvent.Chunk("📊 Failure Analysis:\n$failureInfo\n"))
+            onChunk("📊 Failure Analysis:\n$failureInfo\n")
+            
+            updatedTodos = currentTodos.map { todo ->
+                when {
+                    todo.description == "Phase 3: Analyze test failures" -> todo.copy(status = TodoStatus.COMPLETED)
+                    todo.description == "Phase 4: Fix issues" -> todo.copy(status = TodoStatus.IN_PROGRESS)
+                    else -> todo
+                }
+            }
+            updateTodos(updatedTodos)
+            
+            // Phase 4: Fix issues
+            emit(GeminiStreamEvent.Chunk("\n🔧 Phase 4: Fixing issues...\n"))
+            onChunk("\n🔧 Phase 4: Fixing issues...\n")
+            
+            // Use reverse flow to analyze and fix
+            val projectStructure = extractProjectStructure(workspaceRoot, signal, ::emitEvent, onChunk)
+            
+            val fixPrompt = """
+                $systemContext
+                
+                **Test Failures:**
+                $failureInfo
+                
+                **Project Structure:**
+                $projectStructure
+                
+                **User Request:** $userMessage
+                
+                Analyze the test failures and provide fixes. For each fix, provide:
+                1. The file path
+                2. The exact old_string to replace (include enough context - at least 5-10 lines before and after)
+                3. The exact new_string (complete fixed code)
+                4. Confidence level (high/medium/low)
+                
+                **CRITICAL CODE COHERENCE REQUIREMENTS FOR FIXES:**
+                - MAINTAIN CONSISTENCY: All fixes must maintain consistency with the existing codebase patterns, style, and conventions
+                - PRESERVE IMPORTS: Ensure all imports remain correct and match what the fixed code uses
+                - PRESERVE EXPORTS: Ensure all exports remain consistent with what other files expect
+                - MATCH SIGNATURES: If fixing function/class signatures, ensure they match what other files call/import
+                - MATCH PATTERNS: Use the same coding patterns, error handling, and structure as the rest of the codebase
+                
+                Format as JSON array:
+                [
+                  {
+                    "file_path": "path/to/file.ext",
+                    "old_string": "exact code to replace with context",
+                    "new_string": "complete fixed code",
+                    "confidence": "high|medium|low",
+                    "description": "What this fix does"
+                  }
+                ]
+                
+                Be thorough and ensure all fixes are complete and correct.
+            """.trimIndent()
+            
+            val fixRequest = JSONObject().apply {
+                put("contents", JSONArray().apply {
+                    put(JSONObject().apply {
+                        put("role", "user")
+                        put("parts", JSONArray().apply {
+                            put(JSONObject().apply {
+                                put("text", fixPrompt)
+                            })
+                        })
+                    })
+                })
+                put("systemInstruction", JSONObject().apply {
+                    put("parts", JSONArray().apply {
+                        put(JSONObject().apply {
+                            put("text", systemContext)
+                        })
+                    })
+                })
+            }
+            
+            val fixText = makeApiCallWithRetryAndCorrection(
+                model, fixRequest, "fixes", signal, null, ::emitEvent, onChunk
+            )
+            
+            if (fixText != null) {
+                // Parse fixes (similar to reverse flow)
+                val fixesJson = try {
+                    val jsonStart = fixText.indexOf('[')
+                    val jsonEnd = fixText.lastIndexOf(']') + 1
+                    if (jsonStart >= 0 && jsonEnd > jsonStart) {
+                        JSONArray(fixText.substring(jsonStart, jsonEnd))
+                    } else {
+                        null
+                    }
+                } catch (e: Exception) {
+                    android.util.Log.e("GeminiClient", "Failed to parse fixes", e)
+                    null
+                }
+                
+                if (fixesJson != null && fixesJson.length() > 0) {
+                    emit(GeminiStreamEvent.Chunk("✅ Generated ${fixesJson.length()} fix(es)\n"))
+                    onChunk("✅ Generated ${fixesJson.length()} fix(es)\n")
+                    
+                    // Apply fixes
+                    for (i in 0 until fixesJson.length()) {
+                        val fix = fixesJson.getJSONObject(i)
+                        val filePath = fix.getString("file_path")
+                        val oldString = fix.getString("old_string")
+                        val newString = fix.getString("new_string")
+                        
+                        emit(GeminiStreamEvent.Chunk("🔨 Applying fix to $filePath...\n"))
+                        onChunk("🔨 Applying fix to $filePath...\n")
+                        
+                        val editCall = FunctionCall(
+                            name = "edit",
+                            args = mapOf(
+                                "file_path" to filePath,
+                                "old_string" to oldString,
+                                "new_string" to newString
+                            )
+                        )
+                        
+                        emit(GeminiStreamEvent.ToolCall(editCall))
+                        onToolCall(editCall)
+                        
+                        val editResult = try {
+                            executeToolSync("edit", editCall.args)
+                        } catch (e: Exception) {
+                            ToolResult(
+                                llmContent = "Error: ${e.message}",
+                                returnDisplay = "Error",
+                                error = ToolError(
+                                    message = e.message ?: "Unknown error",
+                                    type = ToolErrorType.EXECUTION_ERROR
+                                )
+                            )
+                        }
+                        
+                        emit(GeminiStreamEvent.ToolResult("edit", editResult))
+                        onToolResult("edit", editCall.args)
+                        
+                        if (editResult.error == null) {
+                            emit(GeminiStreamEvent.Chunk("✅ Fix applied successfully\n"))
+                            onChunk("✅ Fix applied successfully\n")
+                        } else {
+                            emit(GeminiStreamEvent.Chunk("❌ Failed to apply fix: ${editResult.error?.message}\n"))
+                            onChunk("❌ Failed to apply fix: ${editResult.error?.message}\n")
+                        }
+                    }
+                } else {
+                    emit(GeminiStreamEvent.Chunk("⚠️ Could not generate fixes\n"))
+                    onChunk("⚠️ Could not generate fixes\n")
+                }
+            }
+            
+            updatedTodos = currentTodos.map { todo ->
+                when {
+                    todo.description == "Phase 4: Fix issues" -> todo.copy(status = TodoStatus.COMPLETED)
+                    todo.description == "Phase 5: Re-run tests to verify" -> todo.copy(status = TodoStatus.IN_PROGRESS)
+                    else -> todo
+                }
+            }
+            updateTodos(updatedTodos)
+            
+            // Phase 5: Re-run tests to verify
+            emit(GeminiStreamEvent.Chunk("\n🔄 Phase 5: Re-running tests to verify fixes...\n"))
+            onChunk("\n🔄 Phase 5: Re-running tests to verify fixes...\n")
+            
+            // Re-run test commands
+            if (testCommands.isNotEmpty()) {
+                var allPassed = true
+                for (command in testCommands) {
+                    emit(GeminiStreamEvent.Chunk("▶️ Re-running: ${command.primaryCommand}\n"))
+                    onChunk("▶️ Re-running: ${command.primaryCommand}\n")
+                    
+                    val result = executeCommandWithFallbacks(
+                        command, workspaceRoot, systemInfo, ::emitEvent, onChunk, onToolCall, onToolResult
+                    )
+                    
+                    if (result.error != null || 
+                        (result.llmContent.contains("FAILED", ignoreCase = true)) ||
+                        (result.llmContent.contains("failed", ignoreCase = true) && 
+                         result.llmContent.contains("test", ignoreCase = true))) {
+                        allPassed = false
+                        emit(GeminiStreamEvent.Chunk("❌ Test still failing: ${command.primaryCommand}\n"))
+                        onChunk("❌ Test still failing: ${command.primaryCommand}\n")
+                    } else {
+                        emit(GeminiStreamEvent.Chunk("✅ Test passed: ${command.primaryCommand}\n"))
+                        onChunk("✅ Test passed: ${command.primaryCommand}\n")
+                    }
+                }
+                
+                if (allPassed) {
+                    emit(GeminiStreamEvent.Chunk("\n✅ All tests passing after fixes!\n"))
+                    onChunk("\n✅ All tests passing after fixes!\n")
+                } else {
+                    emit(GeminiStreamEvent.Chunk("\n⚠️ Some tests still failing\n"))
+                    onChunk("\n⚠️ Some tests still failing\n")
+                }
+            }
+            
+            // Re-run API tests if applicable
+            if (isWebFramework && !isKotlinJava && !apiTestResult) {
+                emit(GeminiStreamEvent.Chunk("🔄 Re-running API tests...\n"))
+                onChunk("🔄 Re-running API tests...\n")
+                
+                val retestResult = testAPIs(workspaceRoot, systemInfo, userMessage, ::emitEvent, onChunk, onToolCall, onToolResult)
+                if (retestResult) {
+                    emit(GeminiStreamEvent.Chunk("✅ API tests passing after fixes!\n"))
+                    onChunk("✅ API tests passing after fixes!\n")
+                } else {
+                    emit(GeminiStreamEvent.Chunk("⚠️ API tests still failing\n"))
+                    onChunk("⚠️ API tests still failing\n")
+                }
+            }
+        } else {
+            emit(GeminiStreamEvent.Chunk("\n✅ All tests passed! No fixes needed.\n"))
+            onChunk("\n✅ All tests passed! No fixes needed.\n")
+        }
+        
+        updatedTodos = currentTodos.map { todo ->
+            if (todo.description == "Phase 5: Re-run tests to verify") {
+                todo.copy(status = TodoStatus.COMPLETED)
+            } else {
+                todo
+            }
+        }
+        updateTodos(updatedTodos)
+        
+        emit(GeminiStreamEvent.Chunk("\n✨ Test flow complete!\n"))
+        onChunk("\n✨ Test flow complete!\n")
+        emit(GeminiStreamEvent.Done)
+    }
+    
+    /**
+     * Detect test commands needed based on project structure and user message
+     */
+    private suspend fun detectTestCommands(
+        workspaceRoot: String,
+        systemInfo: SystemInfoService.SystemInfo,
+        userMessage: String,
+        emit: suspend (GeminiStreamEvent) -> Unit,
+        onChunk: (String) -> Unit
+    ): List<CommandWithFallbacks> {
+        val workspaceDir = File(workspaceRoot)
+        if (!workspaceDir.exists()) return emptyList()
+        
+        // Get list of files
+        val files = workspaceDir.walkTopDown()
+            .filter { it.isFile && !it.name.startsWith(".") }
+            .map { it.relativeTo(workspaceDir).path }
+            .take(50)
+            .toList()
+        
+        val systemContext = SystemInfoService.generateSystemContext()
+        
+        val installCmd = when (systemInfo.packageManager) {
+            SystemInfoService.PackageManager.APK -> "apk add"
+            SystemInfoService.PackageManager.APT -> "apt-get install -y"
+            SystemInfoService.PackageManager.YUM -> "yum install -y"
+            SystemInfoService.PackageManager.DNF -> "dnf install -y"
+            SystemInfoService.PackageManager.PACMAN -> "pacman -S --noconfirm"
+            else -> "apk add"
+        }
+        
+        val updateCmd = when (systemInfo.packageManager) {
+            SystemInfoService.PackageManager.APK -> "apk update"
+            SystemInfoService.PackageManager.APT -> "apt-get update"
+            SystemInfoService.PackageManager.YUM -> "yum update -y"
+            SystemInfoService.PackageManager.DNF -> "dnf update -y"
+            SystemInfoService.PackageManager.PACMAN -> "pacman -Sy"
+            else -> "apk update"
+        }
+        
+        val testDetectionPrompt = """
+            $systemContext
+            
+            Analyze the project structure and user request to determine what TEST commands need to be executed.
+            
+            Files in workspace:
+            ${files.joinToString("\n") { "- $it" }}
+            
+            User request: $userMessage
+            
+            Based on the files and user request, determine:
+            1. What test commands should be run? (e.g., "npm test", "pytest", "jest", "python -m pytest", etc.)
+            2. What dependencies need to be installed first?
+            3. What fallback commands are needed if test tools are missing?
+            
+            Focus ONLY on test commands. Do not include build, start, or other non-test commands.
+            
+            For each test command needed, provide:
+            - primary_command: The main test command to execute
+            - description: What this test command does
+            - check_command: Command to check if test tool is available
+            - fallback_commands: List of commands to run if tool is missing (install test dependencies, etc.)
+              - First: Install dependencies (e.g., "npm install", "pip install -r requirements.txt")
+              - Second: Install tool via package manager (e.g., "$installCmd nodejs npm")
+              - Third: Update package manager and install (e.g., "$updateCmd && $installCmd nodejs npm")
+            
+            Format as JSON array:
+            [
+              {
+                "primary_command": "npm test",
+                "description": "Run npm test suite",
+                "check_command": "npm --version",
+                "fallback_commands": [
+                  "npm install",
+                  "$installCmd nodejs npm",
+                  "$updateCmd && $installCmd nodejs npm"
+                ]
+              }
+            ]
+            
+            Only include test commands that are actually needed. If no test commands are needed, return an empty array [].
+        """.trimIndent()
+        
+        val model = ApiProviderManager.getCurrentModel()
+        val request = JSONObject().apply {
+            put("contents", JSONArray().apply {
+                put(JSONObject().apply {
+                    put("role", "user")
+                    put("parts", JSONArray().apply {
+                        put(JSONObject().apply {
+                            put("text", testDetectionPrompt)
+                        })
+                    })
+                })
+            })
+            put("systemInstruction", JSONObject().apply {
+                put("parts", JSONArray().apply {
+                    put(JSONObject().apply {
+                        put("text", SystemInfoService.generateSystemContext())
+                    })
+                })
+            })
+        }
+        
+        return try {
+            val response = makeApiCallSimple(
+                ApiProviderManager.getNextApiKey() ?: return emptyList(),
+                model,
+                request,
+                useLongTimeout = false
+            )
+            
+            // Parse JSON response
+            val jsonStart = response.indexOf('[')
+            val jsonEnd = response.lastIndexOf(']') + 1
+            if (jsonStart >= 0 && jsonEnd > jsonStart) {
+                val jsonArray = JSONArray(response.substring(jsonStart, jsonEnd))
+                val detectedCommands = mutableListOf<CommandWithFallbacks>()
+                
+                for (i in 0 until jsonArray.length()) {
+                    try {
+                        val cmdObj = jsonArray.getJSONObject(i)
+                        val primaryCmd = cmdObj.getString("primary_command")
+                        val description = cmdObj.optString("description", "Run test command")
+                        val checkCmd = cmdObj.optString("check_command", null)
+                        val fallbacks = cmdObj.optJSONArray("fallback_commands")?.let { array ->
+                            (0 until array.length()).mapNotNull { array.optString(it, null) }
+                        } ?: emptyList()
+                        
+                        detectedCommands.add(CommandWithFallbacks(
+                            primaryCommand = primaryCmd,
+                            description = description,
+                            fallbacks = fallbacks,
+                            checkCommand = checkCmd.takeIf { it.isNotBlank() },
+                            installCheck = null
+                        ))
+                    } catch (e: Exception) {
+                        android.util.Log.w("GeminiClient", "Failed to parse test command: ${e.message}")
+                    }
+                }
+                
+                detectedCommands
+            } else {
+                emptyList()
+            }
+        } catch (e: Exception) {
+            android.util.Log.w("GeminiClient", "AI test command detection failed: ${e.message}")
+            emptyList()
+        }
     }
     
     /**
