@@ -98,6 +98,9 @@ class GeminiClient(
             android.util.Log.d("GeminiClient", "sendMessageStream: Streaming disabled, using non-streaming mode")
             
             when (intent) {
+                IntentType.QUESTION_ONLY -> {
+                    emitAll(sendMessageQuestionFlow(enhancedUserMessage, learningOnChunk, onToolCall, onToolResult))
+                }
                 IntentType.TEST_ONLY -> {
                     emitAll(sendMessageTestOnly(enhancedUserMessage, learningOnChunk, onToolCall, onToolResult))
                 }
@@ -1667,7 +1670,8 @@ class GeminiClient(
     private enum class IntentType {
         CREATE_NEW,
         DEBUG_UPGRADE,
-        TEST_ONLY
+        TEST_ONLY,
+        QUESTION_ONLY
     }
     
     /**
@@ -1713,6 +1717,34 @@ class GeminiClient(
         val hasProjectContext = memoryContext.contains("project", ignoreCase = true) ||
                                 memoryContext.contains("codebase", ignoreCase = true) ||
                                 memoryContext.contains("repository", ignoreCase = true)
+        
+        // PRIORITY: Check for question-only intent first
+        // A question is detected if:
+        // 1. Message ends with '?' or contains question words (what, how, why, when, where, which, who)
+        // 2. No strong action keywords (create, debug, test) - just asking for information
+        // 3. Message is primarily interrogative
+        val questionWords = listOf(
+            "what", "how", "why", "when", "where", "which", "who", "whom", "whose",
+            "can you", "could you", "would you", "should i", "is there", "are there",
+            "does", "do", "did", "will", "would", "should", "may", "might"
+        )
+        val questionIndicators = questionWords.count { messageLower.contains(it) }
+        val endsWithQuestionMark = userMessage.trim().endsWith("?")
+        val isQuestionPattern = messageLower.matches(Regex(".*\\b(what|how|why|when|where|which|who)\\b.*"))
+        
+        // Check if it's primarily a question (not a command disguised as question)
+        val isQuestionOnly = (endsWithQuestionMark || questionIndicators > 0 || isQuestionPattern) &&
+                            createScore == 0 && 
+                            debugScore == 0 && 
+                            testScore == 0 &&
+                            !messageLower.contains("create") &&
+                            !messageLower.contains("build") &&
+                            !messageLower.contains("make") &&
+                            !messageLower.contains("generate")
+        
+        if (isQuestionOnly) {
+            return IntentType.QUESTION_ONLY
+        }
         
         // PRIORITY: Check for test-only intent first (if test keywords are strong and no create keywords)
         // Test intent should be detected when:
@@ -1774,6 +1806,7 @@ class GeminiClient(
             IntentType.CREATE_NEW -> "creating a new project"
             IntentType.DEBUG_UPGRADE -> "debugging or upgrading an existing project"
             IntentType.TEST_ONLY -> "running tests and fixing issues"
+            IntentType.QUESTION_ONLY -> "answering a question"
         }
         
         // Add helpful guidance directly to the user message
@@ -9121,6 +9154,278 @@ exports.$functionName = (req, res, next) => {
         
         emit(GeminiStreamEvent.Chunk("\n✨ Test flow complete!\n"))
         onChunk("\n✨ Test flow complete!\n")
+        emit(GeminiStreamEvent.Done)
+    }
+    
+    /**
+     * Question flow: Answer questions by reading files if needed
+     * 1. Analyze question to determine if files need to be read
+     * 2. Read relevant files if needed
+     * 3. Answer the question using AI with file context
+     */
+    private suspend fun sendMessageQuestionFlow(
+        userMessage: String,
+        onChunk: (String) -> Unit,
+        onToolCall: (FunctionCall) -> Unit,
+        onToolResult: (String, Map<String, Any>) -> Unit
+    ): Flow<GeminiStreamEvent> = flow {
+        val signal = CancellationSignal()
+        android.util.Log.d("GeminiClient", "sendMessageQuestionFlow: Starting question flow")
+        
+        try {
+            emit(GeminiStreamEvent.Chunk("❓ Analyzing question...\n"))
+            onChunk("❓ Analyzing question...\n")
+        } catch (e: Exception) {
+            android.util.Log.e("GeminiClient", "Error in question flow", e)
+            emit(GeminiStreamEvent.Error("Failed to start: ${e.message}"))
+            return@flow
+        }
+        
+        // Add user message to history
+        chatHistory.add(
+            Content(
+                role = "user",
+                parts = listOf(Part.TextPart(text = userMessage))
+            )
+        )
+        
+        val model = ApiProviderManager.getCurrentModel()
+        val systemInfo = SystemInfoService.detectSystemInfo()
+        val systemContext = SystemInfoService.generateSystemContext()
+        
+        // Helper function to wrap emit as suspend function
+        suspend fun emitEvent(event: GeminiStreamEvent) {
+            emit(event)
+        }
+        
+        // Phase 1: Analyze question to determine if files need to be read
+        emit(GeminiStreamEvent.Chunk("🔍 Phase 1: Determining if files need to be read...\n"))
+        onChunk("🔍 Phase 1: Determining if files need to be read...\n")
+        
+        val analysisPrompt = """
+            You are analyzing a user's question to determine if files need to be read to answer it.
+            
+            User Question: $userMessage
+            
+            Analyze the question and determine:
+            1. Does this question require reading files from the workspace?
+            2. If yes, which files are relevant?
+            3. What specific information from those files is needed?
+            
+            Format your response as JSON:
+            {
+              "needs_files": true/false,
+              "files_to_read": [
+                {
+                  "file_path": "path/to/file.ext",
+                  "reason": "Why this file is needed to answer the question",
+                  "sections": ["specific function/class names or line ranges if applicable"]
+                }
+              ],
+              "question_type": "code_understanding|configuration|documentation|other"
+            }
+            
+            If the question can be answered without reading files (general knowledge, explanation, etc.), set "needs_files" to false.
+        """.trimIndent()
+        
+        val analysisRequest = JSONObject().apply {
+            put("contents", JSONArray().apply {
+                put(JSONObject().apply {
+                    put("role", "user")
+                    put("parts", JSONArray().apply {
+                        put(JSONObject().apply {
+                            put("text", analysisPrompt)
+                        })
+                    })
+                })
+            })
+            put("systemInstruction", JSONObject().apply {
+                put("parts", JSONArray().apply {
+                    put(JSONObject().apply {
+                        put("text", systemContext)
+                    })
+                })
+            })
+        }
+        
+        val key = ApiProviderManager.getNextApiKey()
+            ?: throw Exception("No API key available")
+        
+        val analysisText = makeApiCallWithRetryAndCorrection(
+            model, analysisRequest, "analysis", signal, null, ::emitEvent, onChunk
+        )
+        
+        if (analysisText == null) {
+            emit(GeminiStreamEvent.Error("Failed to analyze question"))
+            return@flow
+        }
+        
+        // Parse analysis
+        val analysisJson = try {
+            val jsonStart = analysisText.indexOf('{')
+            val jsonEnd = analysisText.lastIndexOf('}') + 1
+            if (jsonStart >= 0 && jsonEnd > jsonStart) {
+                JSONObject(analysisText.substring(jsonStart, jsonEnd))
+            } else {
+                null
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("GeminiClient", "Failed to parse analysis", e)
+            null
+        }
+        
+        if (analysisJson == null) {
+            emit(GeminiStreamEvent.Error("Failed to parse analysis results"))
+            return@flow
+        }
+        
+        val needsFiles = analysisJson.optBoolean("needs_files", false)
+        val filesToRead = analysisJson.optJSONArray("files_to_read")
+        val fileContents = mutableMapOf<String, String>()
+        
+        // Phase 2: Read files if needed
+        if (needsFiles && filesToRead != null && filesToRead.length() > 0) {
+            emit(GeminiStreamEvent.Chunk("📖 Phase 2: Reading relevant files...\n"))
+            onChunk("📖 Phase 2: Reading relevant files...\n")
+            
+            for (i in 0 until filesToRead.length()) {
+                val fileInfo = filesToRead.getJSONObject(i)
+                val filePath = fileInfo.getString("file_path")
+                
+                try {
+                    val readCall = FunctionCall(
+                        name = "read_file",
+                        args = mapOf("file_path" to filePath)
+                    )
+                    emit(GeminiStreamEvent.ToolCall(readCall))
+                    onToolCall(readCall)
+                    
+                    val readResult = executeToolSync("read_file", readCall.args)
+                    emit(GeminiStreamEvent.ToolResult("read_file", readResult))
+                    onToolResult("read_file", readCall.args)
+                    
+                    if (readResult.error == null) {
+                        fileContents[filePath] = readResult.llmContent
+                        emit(GeminiStreamEvent.Chunk("✅ Read: $filePath\n"))
+                        onChunk("✅ Read: $filePath\n")
+                    } else {
+                        emit(GeminiStreamEvent.Chunk("⚠️ Could not read: $filePath (${readResult.error?.message})\n"))
+                        onChunk("⚠️ Could not read: $filePath (${readResult.error?.message})\n")
+                    }
+                } catch (e: Exception) {
+                    android.util.Log.e("GeminiClient", "Error reading file $filePath", e)
+                    emit(GeminiStreamEvent.Chunk("⚠️ Error reading $filePath: ${e.message}\n"))
+                    onChunk("⚠️ Error reading $filePath: ${e.message}\n")
+                }
+            }
+        } else {
+            emit(GeminiStreamEvent.Chunk("ℹ️ No files need to be read for this question\n"))
+            onChunk("ℹ️ No files need to be read for this question\n")
+        }
+        
+        // Phase 3: Answer the question
+        emit(GeminiStreamEvent.Chunk("💬 Phase 3: Answering question...\n"))
+        onChunk("💬 Phase 3: Answering question...\n")
+        
+        val answerPrompt = buildString {
+            append("User Question: $userMessage\n\n")
+            
+            if (fileContents.isNotEmpty()) {
+                append("Relevant file contents:\n\n")
+                fileContents.forEach { (filePath, content) ->
+                    append("=== File: $filePath ===\n")
+                    append(content)
+                    append("\n\n")
+                }
+            }
+            
+            append("""
+                Please answer the user's question based on:
+                1. The question itself
+                2. The file contents provided (if any)
+                3. Your general knowledge
+                
+                Provide a clear, comprehensive answer. If the question is about code, explain it in detail.
+                If you don't have enough information, say so and suggest what additional information might be needed.
+            """.trimIndent())
+        }
+        
+        val answerRequest = JSONObject().apply {
+            put("contents", JSONArray().apply {
+                // Add chat history
+                chatHistory.forEach { content ->
+                    put(JSONObject().apply {
+                        put("role", content.role)
+                        put("parts", JSONArray().apply {
+                            content.parts.forEach { part ->
+                                when (part) {
+                                    is Part.TextPart -> {
+                                        put(JSONObject().apply {
+                                            put("text", part.text)
+                                        })
+                                    }
+                                    is Part.FunctionCallPart -> {
+                                        put(JSONObject().apply {
+                                            put("functionCall", JSONObject().apply {
+                                                put("name", part.functionCall.name)
+                                                put("args", JSONObject(part.functionCall.args))
+                                            })
+                                        })
+                                    }
+                                    is Part.FunctionResponsePart -> {
+                                        put(JSONObject().apply {
+                                            put("functionResponse", JSONObject().apply {
+                                                put("name", part.functionResponse.name)
+                                                put("response", JSONObject(part.functionResponse.response))
+                                            })
+                                        })
+                                    }
+                                }
+                            }
+                        })
+                    })
+                }
+                // Add answer prompt
+                put(JSONObject().apply {
+                    put("role", "user")
+                    put("parts", JSONArray().apply {
+                        put(JSONObject().apply {
+                            put("text", answerPrompt)
+                        })
+                    })
+                })
+            })
+            put("systemInstruction", JSONObject().apply {
+                put("parts", JSONArray().apply {
+                    put(JSONObject().apply {
+                        put("text", systemContext)
+                    })
+                })
+            })
+        }
+        
+        val answerText = makeApiCallWithRetryAndCorrection(
+            model, answerRequest, "answer", signal, null, ::emitEvent, onChunk
+        )
+        
+        if (answerText == null) {
+            emit(GeminiStreamEvent.Error("Failed to generate answer"))
+            return@flow
+        }
+        
+        // Emit the answer
+        val cleanAnswer = answerText.trim()
+        emit(GeminiStreamEvent.Chunk("\n$cleanAnswer\n"))
+        onChunk("\n$cleanAnswer\n")
+        
+        // Add answer to chat history
+        chatHistory.add(
+            Content(
+                role = "model",
+                parts = listOf(Part.TextPart(text = cleanAnswer))
+            )
+        )
+        
         emit(GeminiStreamEvent.Done)
     }
     
