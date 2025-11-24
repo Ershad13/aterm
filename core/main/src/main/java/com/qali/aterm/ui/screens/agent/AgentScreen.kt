@@ -1820,14 +1820,13 @@ fun AgentScreen(
                                     val prompt = inputText
                                     inputText = ""
                                     
+                                    // Cancel previous job if any (before starting new one)
+                                    val previousJob = currentAgentJob
+                                    currentAgentJob = null // Clear reference before cancelling to avoid race conditions
+                                    previousJob?.cancel()
+                                    
                                     // Send to Gemini API with tools
                                     val job = scope.launch {
-                                        // Cancel previous job if any
-                                        currentAgentJob?.cancel()
-                                        // Store this job reference
-                                        val currentJobFromContext = coroutineContext[Job]
-                                        currentAgentJob = currentJobFromContext
-                                        
                                         android.util.Log.d("AgentScreen", "Starting message send for: ${prompt.take(50)}...")
                                         val loadingMessage = AgentMessage(
                                             text = "Thinking...",
@@ -2007,7 +2006,8 @@ fun AgentScreen(
                                                     } // closes collect lambda
                                                 } // closes withContext
                                             } catch (e: kotlinx.coroutines.CancellationException) {
-                                                android.util.Log.d("AgentScreen", "Stream collection cancelled")
+                                                android.util.Log.d("AgentScreen", "Stream collection cancelled: ${e.message}")
+                                                android.util.Log.d("AgentScreen", "Cancellation stack trace", e)
                                                 // Clean up loading message for cancellations
                                                 if (messages.isNotEmpty() && messages.last().text == "Thinking...") {
                                                     messages = messages.dropLast(1)
@@ -2048,7 +2048,8 @@ fun AgentScreen(
                                             )
                                             messages = messages.dropLast(1) + exhaustedMessage
                                         } catch (e: kotlinx.coroutines.CancellationException) {
-                                            android.util.Log.d("AgentScreen", "Message send cancelled")
+                                            android.util.Log.d("AgentScreen", "Message send cancelled: ${e.message}")
+                                            android.util.Log.d("AgentScreen", "Cancellation cause", e)
                                             // Clean up loading message
                                             if (messages.isNotEmpty() && messages.last().text == "Thinking...") {
                                                 messages = messages.dropLast(1)
@@ -2067,6 +2068,7 @@ fun AgentScreen(
                                             currentAgentJob = null
                                         }
                                     }
+                                    // Store job reference immediately after launching
                                     currentAgentJob = job
                                 }
                             },
