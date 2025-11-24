@@ -48,6 +48,9 @@ import com.rk.settings.Settings
 import java.io.File
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.collectAsState
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.Dispatchers
@@ -1506,7 +1509,9 @@ fun AgentScreen(
     var showWorkspacePicker by remember { mutableStateOf(false) }
     var showHistory by remember { mutableStateOf(false) }
     var showDebugDialog by remember { mutableStateOf(false) }
-    var isPaused by remember(sessionId) { mutableStateOf(false) }
+    // Use StateFlow for isPaused so coroutines can properly observe state changes
+    val isPausedFlow = remember(sessionId) { MutableStateFlow(false) }
+    val isPaused by isPausedFlow.collectAsState()
     var showSessionMenu by remember { mutableStateOf(false) }
     var showTerminateDialog by remember { mutableStateOf(false) }
     var showNewSessionDialog by remember { mutableStateOf(false) }
@@ -1686,9 +1691,9 @@ fun AgentScreen(
                 // Pause/Resume button
                 IconButton(
                     onClick = { 
-                        isPaused = !isPaused
+                        isPausedFlow.value = !isPausedFlow.value
                         // Cancel current job if pausing
-                        if (isPaused) {
+                        if (isPausedFlow.value) {
                             android.util.Log.d("AgentScreen", "Session $sessionId paused - cancelling current job")
                             currentAgentJob?.cancel()
                             currentAgentJob = null
@@ -1747,9 +1752,9 @@ fun AgentScreen(
                         DropdownMenuItem(
                             text = { Text(if (isPaused) "Resume Session" else "Pause Session") },
                             onClick = {
-                                isPaused = !isPaused
+                                isPausedFlow.value = !isPausedFlow.value
                                 // Cancel current job if pausing
-                                if (isPaused) {
+                                if (isPausedFlow.value) {
                                     currentAgentJob?.cancel()
                                     currentAgentJob = null
                                 }
@@ -1916,7 +1921,7 @@ fun AgentScreen(
                                                 (aiClient as OllamaClient).sendMessageStream(
                                                     userMessage = prompt,
                                                     onChunk = { chunk ->
-                                                        if (isPaused) return@sendMessageStream
+                                                        if (isPausedFlow.value) return@sendMessageStream
                                                         currentResponseText += chunk
                                                         val currentMessages = if (messages.isNotEmpty()) messages.dropLast(1) else messages
                                                         messages = currentMessages + AgentMessage(
@@ -1926,7 +1931,7 @@ fun AgentScreen(
                                                         )
                                                     },
                                                     onToolCall = { functionCall ->
-                                                        if (isPaused) return@sendMessageStream
+                                                        if (isPausedFlow.value) return@sendMessageStream
                                                         val toolMessage = AgentMessage(
                                                             text = "🔧 Calling tool: ${functionCall.name}",
                                                             isUser = false,
@@ -1935,7 +1940,7 @@ fun AgentScreen(
                                                         messages = messages + toolMessage
                                                     },
                                                     onToolResult = { toolName, args ->
-                                                        if (isPaused) return@sendMessageStream
+                                                        if (isPausedFlow.value) return@sendMessageStream
                                                         val resultMessage = AgentMessage(
                                                             text = "✅ Tool '$toolName' completed",
                                                             isUser = false,
@@ -1948,7 +1953,7 @@ fun AgentScreen(
                                                 (aiClient as GeminiClient).sendMessageStream(
                                                     userMessage = prompt,
                                                     onChunk = { chunk ->
-                                                        if (isPaused) return@sendMessageStream
+                                                        if (isPausedFlow.value) return@sendMessageStream
                                                         currentResponseText += chunk
                                                         val currentMessages = if (messages.isNotEmpty()) messages.dropLast(1) else messages
                                                         messages = currentMessages + AgentMessage(
@@ -1958,7 +1963,7 @@ fun AgentScreen(
                                                         )
                                                     },
                                                     onToolCall = { functionCall ->
-                                                        if (isPaused) return@sendMessageStream
+                                                        if (isPausedFlow.value) return@sendMessageStream
                                                         val toolMessage = AgentMessage(
                                                             text = "🔧 Calling tool: ${functionCall.name}",
                                                             isUser = false,
@@ -1967,7 +1972,7 @@ fun AgentScreen(
                                                         messages = messages + toolMessage
                                                     },
                                                     onToolResult = { toolName, args ->
-                                                        if (isPaused) return@sendMessageStream
+                                                        if (isPausedFlow.value) return@sendMessageStream
                                                         val resultMessage = AgentMessage(
                                                             text = "✅ Tool '$toolName' completed",
                                                             isUser = false,
@@ -1994,9 +1999,16 @@ fun AgentScreen(
                                                     stream.collect { event ->
                                                     android.util.Log.d("AgentScreen", "Stream collect lambda called, job active: ${currentJob?.isActive}")
                                                     // Check if paused - if so, wait until resumed (only if actually paused)
-                                                    if (isPaused) {
-                                                        while (isPaused && currentJob?.isActive == true) {
-                                                            kotlinx.coroutines.delay(100)
+                                                    // Use StateFlow to properly observe pause state changes in coroutine
+                                                    if (isPausedFlow.value) {
+                                                        // Wait for the pause state to become false using StateFlow
+                                                        // This will suspend until isPaused becomes false
+                                                        try {
+                                                            isPausedFlow.first { !it }
+                                                        } catch (e: kotlinx.coroutines.CancellationException) {
+                                                            // Job was cancelled during pause
+                                                            android.util.Log.d("AgentScreen", "Stream collection cancelled during pause")
+                                                            return@collect
                                                         }
                                                         // After resuming, check if job was cancelled during pause
                                                         if (currentJob?.isActive != true) {
@@ -2363,7 +2375,7 @@ fun AgentScreen(
                             messages = emptyList()
                             messageHistory = emptyList()
                             inputText = ""
-                            isPaused = false
+                            isPausedFlow.value = false
                             currentResponseText = ""
                             
                             // Clear client history
@@ -2449,7 +2461,7 @@ fun AgentScreen(
                             }
                             
                             // Reset pause state
-                            isPaused = false
+                            isPausedFlow.value = false
                             
                             showTerminateDialog = false
                         }
