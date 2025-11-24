@@ -1983,13 +1983,20 @@ fun AgentScreen(
                                             val currentJob = this@launch.coroutineContext[Job]
                                             try {
                                                 stream.collect { event ->
-                                                    // Check if paused - if so, wait until resumed
-                                                    while (isPaused && currentJob?.isActive == true) {
-                                                        kotlinx.coroutines.delay(100)
+                                                    // Check if paused - if so, wait until resumed (only if actually paused)
+                                                    if (isPaused) {
+                                                        while (isPaused && currentJob?.isActive == true) {
+                                                            kotlinx.coroutines.delay(100)
+                                                        }
+                                                        // After resuming, check if job was cancelled during pause
+                                                        if (currentJob?.isActive != true) {
+                                                            android.util.Log.d("AgentScreen", "Stream collection cancelled during pause")
+                                                            return@collect
+                                                        }
                                                     }
                                                     
-                                                    // Check if cancelled
-                                                    if (currentJob?.isActive != true) {
+                                                    // Check if cancelled (only if not paused, to avoid false positives)
+                                                    if (!isPaused && currentJob?.isActive == false) {
                                                         android.util.Log.d("AgentScreen", "Stream collection cancelled")
                                                         return@collect
                                                     }
@@ -2092,16 +2099,24 @@ fun AgentScreen(
                                                 }
                                             } catch (e: kotlinx.coroutines.CancellationException) {
                                                 android.util.Log.d("AgentScreen", "Stream collection cancelled")
-                                                // Clean up loading message
-                                                if (messages.isNotEmpty() && messages.last().text == "Thinking...") {
-                                                    messages = messages.dropLast(1)
+                                                // Only show paused message if actually paused, otherwise it was cancelled for another reason
+                                                if (isPaused) {
+                                                    // Clean up loading message
+                                                    if (messages.isNotEmpty() && messages.last().text == "Thinking...") {
+                                                        messages = messages.dropLast(1)
+                                                    }
+                                                    val pausedMessage = AgentMessage(
+                                                        text = "⏸️ Workflow paused",
+                                                        isUser = false,
+                                                        timestamp = System.currentTimeMillis()
+                                                    )
+                                                    messages = messages + pausedMessage
+                                                } else {
+                                                    // Clean up loading message for non-pause cancellations
+                                                    if (messages.isNotEmpty() && messages.last().text == "Thinking...") {
+                                                        messages = messages.dropLast(1)
+                                                    }
                                                 }
-                                                val pausedMessage = AgentMessage(
-                                                    text = "⏸️ Workflow paused",
-                                                    isUser = false,
-                                                    timestamp = System.currentTimeMillis()
-                                                )
-                                                messages = messages + pausedMessage
                                                 throw e
                                             } catch (e: Exception) {
                                                 android.util.Log.e("AgentScreen", "Error in stream collection", e)
