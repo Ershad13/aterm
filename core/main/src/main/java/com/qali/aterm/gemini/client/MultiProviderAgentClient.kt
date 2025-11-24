@@ -3932,6 +3932,24 @@ exports.$functionName = (req, res, next) => {
                     }
                 }
                 
+                // Check if we're in a restricted environment before trying fallbacks
+                val isRestricted = isRestrictedEnvironment(workspaceRoot)
+                if (isRestricted && errorType == ErrorType.COMMAND_NOT_FOUND) {
+                    emit(GeminiStreamEvent.Chunk("⚠️ Restricted Environment Detected\n"))
+                    onChunk("⚠️ Restricted Environment Detected\n")
+                    emit(GeminiStreamEvent.Chunk("❌ This environment appears to be restricted. Basic commands (apk, curl, tar, etc.) are not available.\n"))
+                    onChunk("❌ This environment appears to be restricted. Basic commands (apk, curl, tar, etc.) are not available.\n")
+                    emit(GeminiStreamEvent.Chunk("💡 Suggestions:\n"))
+                    onChunk("💡 Suggestions:\n")
+                    emit(GeminiStreamEvent.Chunk("  1. Install required tools manually in the environment\n"))
+                    onChunk("  1. Install required tools manually in the environment\n")
+                    emit(GeminiStreamEvent.Chunk("  2. Use a different environment with package manager access\n"))
+                    onChunk("  2. Use a different environment with package manager access\n")
+                    emit(GeminiStreamEvent.Chunk("  3. Check if Node.js/npm are already installed: ls -la $(which node 2>/dev/null || echo 'not found')\n"))
+                    onChunk("  3. Check if Node.js/npm are already installed: ls -la $(which node 2>/dev/null || echo 'not found')\n")
+                    return false // Stop trying fallbacks
+                }
+                
                 // Analyze failure and generate fallback plans
                 val failureAnalysis = analyzeCommandFailure(
                     command.primaryCommand,
@@ -3944,9 +3962,28 @@ exports.$functionName = (req, res, next) => {
                 emit(GeminiStreamEvent.Chunk("🔍 Failure Analysis: ${failureAnalysis.reason}\n"))
                 onChunk("🔍 Failure Analysis: ${failureAnalysis.reason}\n")
                 
+                // If we've already tried many fallbacks and they all failed with command not found, check for restricted environment
+                if (failureAnalysis.fallbackPlans.isEmpty() && errorType == ErrorType.COMMAND_NOT_FOUND) {
+                    if (isRestricted) {
+                        emit(GeminiStreamEvent.Chunk("⚠️ No fallback commands available in restricted environment\n"))
+                        onChunk("⚠️ No fallback commands available in restricted environment\n")
+                        return false
+                    }
+                }
+                
                 // Try fallback plans in order
                 var fallbackAttempted = false
+                var consecutiveCommandNotFound = 0
                 for ((index, fallbackPlan) in failureAnalysis.fallbackPlans.withIndex()) {
+                    // Stop if we've had too many consecutive command not found errors
+                    if (consecutiveCommandNotFound >= 3) {
+                        emit(GeminiStreamEvent.Chunk("⚠️ Too many consecutive 'command not found' errors. Stopping fallback attempts.\n"))
+                        onChunk("⚠️ Too many consecutive 'command not found' errors. Stopping fallback attempts.\n")
+                        emit(GeminiStreamEvent.Chunk("💡 This suggests a restricted environment where package managers and basic tools are unavailable.\n"))
+                        onChunk("💡 This suggests a restricted environment where package managers and basic tools are unavailable.\n")
+                        break
+                    }
+                    
                     if (fallbackAttempted && index >= 2) break // Limit to 2 fallback attempts
                     
                     val fallbackMsg = "🔄 Fallback Plan ${index + 1}: ${fallbackPlan.description}\n"
@@ -3971,6 +4008,17 @@ exports.$functionName = (req, res, next) => {
                         
                         val fallbackOutput = fallbackResult.llmContent ?: ""
                         val fallbackHasFailure = fallbackResult.error != null || detectFailureKeywords(fallbackOutput)
+                        
+                        // Check if this is a command not found error
+                        val isCommandNotFound = fallbackResult.error?.message?.contains("127") == true || 
+                                               fallbackOutput.contains("not found") || 
+                                               fallbackOutput.contains("inaccessible")
+                        
+                        if (isCommandNotFound) {
+                            consecutiveCommandNotFound++
+                        } else {
+                            consecutiveCommandNotFound = 0 // Reset counter if we get a different error
+                        }
                         
                         if (!fallbackHasFailure) {
                             emit(GeminiStreamEvent.Chunk("✅ Fallback plan succeeded!\n"))
@@ -4765,10 +4813,18 @@ exports.$functionName = (req, res, next) => {
      * Get hardcoded fallback commands based on error type and system info
      * This reduces API calls by using pre-defined fallbacks
      */
+    // Cache for command availability checks to avoid repeated checks
+    private val commandAvailabilityCache = mutableMapOf<String, Boolean>()
+    
     /**
      * Check if a command is available in the system
      */
     private suspend fun isCommandAvailable(command: String, workspaceRoot: String): Boolean {
+        // Check cache first
+        if (commandAvailabilityCache.containsKey(command)) {
+            return commandAvailabilityCache[command] ?: false
+        }
+        
         return try {
             val checkCall = FunctionCall(
                 name = "shell",
@@ -4778,11 +4834,54 @@ exports.$functionName = (req, res, next) => {
                 )
             )
             val result = executeToolSync("shell", checkCall.args)
-            result.error == null && result.llmContent.isNotEmpty() && 
+            val available = result.error == null && result.llmContent.isNotEmpty() && 
             !result.llmContent.contains("not found") && 
             !result.llmContent.contains("inaccessible")
+            
+            // Cache the result
+            commandAvailabilityCache[command] = available
+            available
         } catch (e: Exception) {
+            commandAvailabilityCache[command] = false
             false
+        }
+    }
+    
+    /**
+     * Check if we're in a restricted environment where even basic commands aren't available
+     */
+    private suspend fun isRestrictedEnvironment(workspaceRoot: String): Boolean {
+        // First, try a simple command to see if shell works at all
+        return try {
+            val testCall = FunctionCall(
+                name = "shell",
+                args = mapOf(
+                    "command" to "echo test",
+                    "description" to "Test basic shell functionality"
+                )
+            )
+            val testResult = executeToolSync("shell", testCall.args)
+            
+            // If even echo fails, we're definitely in a restricted environment
+            if (testResult.error != null && testResult.error?.message?.contains("127") == true) {
+                return true
+            }
+            
+            // Check if even basic commands are available
+            val basicCommands = listOf("ls", "pwd")
+            var availableCount = 0
+            
+            for (cmd in basicCommands) {
+                if (isCommandAvailable(cmd, workspaceRoot)) {
+                    availableCount++
+                }
+            }
+            
+            // If less than half of basic commands are available, we're in a restricted environment
+            availableCount < basicCommands.size / 2
+        } catch (e: Exception) {
+            // If we can't even test, assume restricted
+            true
         }
     }
     
