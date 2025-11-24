@@ -3894,6 +3894,49 @@ exports.$functionName = (req, res, next) => {
                 // Classify error type
                 val errorType = classifyErrorType(outputText, errorMsg, command.primaryCommand)
                 
+                // If it's a package.json JSON parse error from npm install, fix it first
+                val isNpmInstall = command.primaryCommand.contains("npm install") || 
+                                   command.primaryCommand.contains("npm ci") ||
+                                   command.primaryCommand.contains("yarn install")
+                val isPackageJsonError = (outputText.contains("EJSONPARSE") || 
+                                         outputText.contains("JSON.parse") ||
+                                         outputText.contains("package.json") && 
+                                         (outputText.contains("parse") || outputText.contains("syntax") || outputText.contains("Unexpected"))) &&
+                                        errorType == ErrorType.CONFIGURATION_ERROR
+                
+                if (isNpmInstall && isPackageJsonError) {
+                    emit(GeminiStreamEvent.Chunk("🔧 Detected package.json JSON parse error - fixing it first...\n"))
+                    onChunk("🔧 Detected package.json JSON parse error - fixing it first...\n")
+                    
+                    val fixSuccess = fixPackageJsonError(
+                        workspaceRoot,
+                        outputText,
+                        emit,
+                        onChunk,
+                        onToolCall,
+                        onToolResult
+                    )
+                    
+                    if (fixSuccess) {
+                        emit(GeminiStreamEvent.Chunk("✅ package.json fixed, retrying npm install...\n"))
+                        onChunk("✅ package.json fixed, retrying npm install...\n")
+                        
+                        // Retry the original command after fixing package.json
+                        val retryResult = executeToolSync("shell", primaryCall.args)
+                        emit(GeminiStreamEvent.ToolResult("shell", retryResult))
+                        onToolResult("shell", primaryCall.args)
+                        
+                        val retryOutput = retryResult.llmContent ?: ""
+                        val retryHasFailure = retryResult.error != null || detectFailureKeywords(retryOutput)
+                        
+                        if (!retryHasFailure) {
+                            emit(GeminiStreamEvent.Chunk("✅ npm install succeeded after fixing package.json!\n"))
+                            onChunk("✅ npm install succeeded after fixing package.json!\n")
+                            return true
+                        }
+                    }
+                }
+                
                 // If it's a code error, debug the code first before trying fallbacks
                 if (errorType == ErrorType.CODE_ERROR) {
                     emit(GeminiStreamEvent.Chunk("🐛 Code error detected - debugging code first...\n"))
@@ -4258,10 +4301,13 @@ exports.$functionName = (req, res, next) => {
             return ErrorType.NETWORK_ERROR
         }
         
-        // Configuration errors
+        // Configuration errors (including package.json JSON parse errors)
         if (combined.contains("invalid") || combined.contains("wrong") ||
             combined.contains("incorrect") || combined.contains("bad") ||
-            combined.contains("configuration") || combined.contains("config error")) {
+            combined.contains("configuration") || combined.contains("config error") ||
+            combined.contains("ejsonparse") || combined.contains("json parse") ||
+            (combined.contains("npm") && combined.contains("error") && combined.contains("code")) ||
+            (combined.contains("package.json") && (combined.contains("parse") || combined.contains("json") || combined.contains("syntax")))) {
             return ErrorType.CONFIGURATION_ERROR
         }
         
@@ -4696,6 +4742,149 @@ exports.$functionName = (req, res, next) => {
             android.util.Log.e("GeminiClient", "Failed to debug code error: ${e.message}", e)
             emit(GeminiStreamEvent.Chunk("⚠️ Code debugging failed: ${e.message}\n"))
             onChunk("⚠️ Code debugging failed: ${e.message}\n")
+            return false
+        }
+    }
+    
+    /**
+     * Fix package.json JSON parse errors
+     * Returns true if package.json was successfully fixed
+     */
+    private suspend fun fixPackageJsonError(
+        workspaceRoot: String,
+        errorOutput: String,
+        emit: suspend (GeminiStreamEvent) -> Unit,
+        onChunk: (String) -> Unit,
+        onToolCall: (FunctionCall) -> Unit,
+        onToolResult: (String, Map<String, Any>) -> Unit
+    ): Boolean {
+        val workspaceDir = File(workspaceRoot)
+        val packageJsonFile = File(workspaceDir, "package.json")
+        
+        if (!packageJsonFile.exists()) {
+            emit(GeminiStreamEvent.Chunk("⚠️ package.json not found\n"))
+            onChunk("⚠️ package.json not found\n")
+            return false
+        }
+        
+        try {
+            // Try to read and parse package.json to see if it's valid JSON
+            val packageJsonContent = packageJsonFile.readText()
+            
+            // Try parsing to see if it's valid JSON
+            try {
+                JSONObject(packageJsonContent)
+                // If we get here, JSON is valid, so the error might be something else
+                android.util.Log.d("GeminiClient", "package.json is valid JSON, error might be elsewhere")
+                return false
+            } catch (e: Exception) {
+                // JSON is invalid, need to fix it
+                android.util.Log.d("GeminiClient", "package.json has JSON parse error: ${e.message}")
+            }
+            
+            // Use AI to fix the JSON
+            val systemContext = SystemInfoService.generateSystemContext()
+            val model = ApiProviderManager.getCurrentModel()
+            
+            val fixPrompt = """
+                Fix the JSON syntax error in package.json. Return ONLY the corrected JSON content, no explanations, no markdown, no code blocks.
+                
+                **Error Output:**
+                ${errorOutput.take(1000)}
+                
+                **Current package.json content:**
+                ```json
+                ${packageJsonContent.take(5000)}
+                ```
+                
+                Common JSON errors to fix:
+                - Missing commas between properties
+                - Trailing commas
+                - Unclosed brackets/braces
+                - Invalid string quotes
+                - Comments (JSON doesn't support comments)
+                - Duplicate keys
+                
+                Return ONLY the fixed JSON as a valid JSON object, nothing else.
+            """.trimIndent()
+            
+            val request = JSONObject().apply {
+                put("contents", JSONArray().apply {
+                    put(JSONObject().apply {
+                        put("role", "user")
+                        put("parts", JSONArray().apply {
+                            put(JSONObject().apply {
+                                put("text", fixPrompt)
+                            })
+                        })
+                    })
+                })
+                put("systemInstruction", JSONObject().apply {
+                    put("parts", JSONArray().apply {
+                        put(JSONObject().apply {
+                            put("text", systemContext)
+                        })
+                    })
+                })
+            }
+            
+            val apiKey = ApiProviderManager.getNextApiKey() ?: return false
+            
+            val response = withContext(Dispatchers.IO) {
+                makeApiCallSimple(apiKey, model, request, useLongTimeout = false)
+            }
+            
+            if (response.isEmpty()) return false
+            
+            // Extract JSON from response (might be wrapped in markdown or text)
+            val jsonStart = response.indexOf('{')
+            val jsonEnd = response.lastIndexOf('}') + 1
+            
+            if (jsonStart >= 0 && jsonEnd > jsonStart) {
+                val fixedJson = response.substring(jsonStart, jsonEnd)
+                
+                // Validate the fixed JSON
+                try {
+                    JSONObject(fixedJson)
+                    
+                    // Write the fixed package.json
+                    val writeCall = FunctionCall(
+                        name = "write",
+                        args = mapOf(
+                            "file_path" to "package.json",
+                            "contents" to fixedJson
+                        )
+                    )
+                    emit(GeminiStreamEvent.ToolCall(writeCall))
+                    onToolCall(writeCall)
+                    
+                    val writeResult = executeToolSync("write", writeCall.args)
+                    emit(GeminiStreamEvent.ToolResult("write", writeResult))
+                    onToolResult("write", writeCall.args)
+                    
+                    if (writeResult.error == null) {
+                        emit(GeminiStreamEvent.Chunk("✅ Fixed package.json JSON syntax errors\n"))
+                        onChunk("✅ Fixed package.json JSON syntax errors\n")
+                        return true
+                    } else {
+                        emit(GeminiStreamEvent.Chunk("⚠️ Failed to write fixed package.json: ${writeResult.error?.message}\n"))
+                        onChunk("⚠️ Failed to write fixed package.json: ${writeResult.error?.message}\n")
+                        return false
+                    }
+                } catch (e: Exception) {
+                    android.util.Log.e("GeminiClient", "Fixed JSON is still invalid: ${e.message}")
+                    emit(GeminiStreamEvent.Chunk("⚠️ AI-generated fix is still invalid JSON\n"))
+                    onChunk("⚠️ AI-generated fix is still invalid JSON\n")
+                    return false
+                }
+            } else {
+                android.util.Log.e("GeminiClient", "Could not extract JSON from AI response")
+                return false
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("GeminiClient", "Failed to fix package.json: ${e.message}", e)
+            emit(GeminiStreamEvent.Chunk("⚠️ Failed to fix package.json: ${e.message}\n"))
+            onChunk("⚠️ Failed to fix package.json: ${e.message}\n")
             return false
         }
     }
