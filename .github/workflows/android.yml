@@ -30,6 +30,20 @@ jobs:
           target: default
           ndk-version: 27.2.12479018
           arch: x64
+      
+      - name: Setup Android NDK
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: 27.2.12479018
+          add-to-path: true
+      
+      - name: Accept Android SDK licenses
+        run: |
+          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
+          $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0" "ndk;27.2.12479018"
+        env:
+          ANDROID_HOME: ${{ env.ANDROID_HOME }}
+          ANDROID_SDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}
 
       - name: Decode and create xed.keystore
         run: echo "${{ secrets.KEYSTORE }}" | base64 -d > /tmp/xed.keystore
