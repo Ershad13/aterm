@@ -23,6 +23,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -50,7 +51,6 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.flow.collectAsState
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.Dispatchers
@@ -2115,7 +2115,8 @@ fun AgentScreen(
                                                         )
                                                         messages = if (messages.isNotEmpty()) messages.dropLast(1) + errorMessage else messages + errorMessage
                                                     }
-                                                }
+                                                    } // closes collect lambda
+                                                } // closes withContext
                                             } catch (e: kotlinx.coroutines.CancellationException) {
                                                 android.util.Log.d("AgentScreen", "Stream collection cancelled")
                                                 // Only show paused message if actually paused, otherwise it was cancelled for another reason
