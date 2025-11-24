@@ -313,7 +313,7 @@ class GeminiClient(
         }
     }
     
-    private fun makeApiCall(
+    private suspend fun makeApiCall(
         apiKey: String,
         model: String,
         requestBody: JSONObject,
@@ -966,7 +966,7 @@ class GeminiClient(
         return ollamaRequest
     }
     
-    private fun processResponse(
+    private suspend fun processResponse(
         json: JSONObject,
         onChunk: (String) -> Unit,
         onToolCall: (FunctionCall) -> Unit,
@@ -9647,7 +9647,7 @@ exports.$functionName = (req, res, next) => {
      * Simple API call that returns the full response text (non-streaming)
      * Note: This is a blocking function, should be called from within withContext(Dispatchers.IO)
      */
-    private fun makeApiCallSimple(
+    private suspend fun makeApiCallSimple(
         apiKey: String,
         model: String,
         requestBody: JSONObject,
