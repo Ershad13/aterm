@@ -30,7 +30,7 @@ jobs:
           target: default
           arch: x64
       
-      - name: Accept Android SDK licenses and install NDK
+      - name: Accept Android SDK licenses and install components
         run: |
           SDKMANAGER_CMD=""
           if [ -d "$ANDROID_HOME/cmdline-tools/latest/bin" ]; then
@@ -44,10 +44,10 @@ jobs:
           if [ -n "$SDKMANAGER_CMD" ]; then
             yes | $SDKMANAGER_CMD --licenses || true
             $SDKMANAGER_CMD "platform-tools" "platforms;android-35" "build-tools;35.0.0"
-            # Try to install NDK - if specific version fails, try latest
-            $SDKMANAGER_CMD "ndk;27.2.12479018" || $SDKMANAGER_CMD "ndk;27.1.10909125" || $SDKMANAGER_CMD "ndk-bundle" || echo "NDK installation attempted"
+            # Try to install NDK - Gradle will download it if not found
+            $SDKMANAGER_CMD "ndk;27.2.12479018" || $SDKMANAGER_CMD "ndk;27.1.10909125" || $SDKMANAGER_CMD "ndk;26.1.10909125" || echo "NDK will be downloaded by Gradle if needed"
           else
-            echo "sdkmanager not found, NDK may need to be installed manually"
+            echo "sdkmanager not found, Gradle will download NDK if needed"
           fi
         env:
           ANDROID_HOME: ${{ env.ANDROID_HOME }}
