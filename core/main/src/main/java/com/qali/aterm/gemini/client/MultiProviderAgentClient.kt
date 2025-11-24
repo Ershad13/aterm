@@ -499,7 +499,7 @@ class GeminiClient(
     /**
      * Parse Gemini SSE response format
      */
-    private fun parseGeminiSSEResponse(
+    private suspend fun parseGeminiSSEResponse(
         bodyString: String,
         onChunk: (String) -> Unit,
         onToolCall: (FunctionCall) -> Unit,
