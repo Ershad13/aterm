@@ -83,58 +83,60 @@ fun ApiProviderSettings() {
             }
         }
         
-        // API Keys Management
-        PreferenceGroup(heading = "API Keys for ${selectedProvider.displayName}") {
-            val currentProvider = providers[selectedProvider] ?: ApiProvider(selectedProvider)
-            val apiKeys = currentProvider.apiKeys
-            
-            if (apiKeys.isEmpty()) {
-                SettingsCard(
-                    title = { Text("No API keys configured") },
-                    description = { Text("Tap to add your first API key") },
-                    onClick = { showAddKeyDialog = true }
-                )
-            } else {
-                apiKeys.forEach { key ->
+        // API Keys Management (hidden for AutoAgent as it doesn't need API keys)
+        if (selectedProvider != ApiProviderType.AUTOAGENT) {
+            PreferenceGroup(heading = "API Keys for ${selectedProvider.displayName}") {
+                val currentProvider = providers[selectedProvider] ?: ApiProvider(selectedProvider)
+                val apiKeys = currentProvider.apiKeys
+                
+                if (apiKeys.isEmpty()) {
                     SettingsCard(
-                        title = { 
-                            Text(
-                                key.label.ifEmpty { "API Key ${key.id.take(8)}" },
-                                fontWeight = if (key.isActive) FontWeight.Normal else FontWeight.Light
-                            )
-                        },
-                        description = { 
-                            Text(
-                                if (key.isActive) "Active" else "Inactive",
-                                style = MaterialTheme.typography.bodySmall
-                            )
-                        },
-                        endWidget = {
-                            Row {
-                                IconButton(
-                                    onClick = { showEditKeyDialog = key }
-                                ) {
-                                    Icon(Icons.Default.Edit, contentDescription = "Edit")
+                        title = { Text("No API keys configured") },
+                        description = { Text("Tap to add your first API key") },
+                        onClick = { showAddKeyDialog = true }
+                    )
+                } else {
+                    apiKeys.forEach { key ->
+                        SettingsCard(
+                            title = { 
+                                Text(
+                                    key.label.ifEmpty { "API Key ${key.id.take(8)}" },
+                                    fontWeight = if (key.isActive) FontWeight.Normal else FontWeight.Light
+                                )
+                            },
+                            description = { 
+                                Text(
+                                    if (key.isActive) "Active" else "Inactive",
+                                    style = MaterialTheme.typography.bodySmall
+                                )
+                            },
+                            endWidget = {
+                                Row {
+                                    IconButton(
+                                        onClick = { showEditKeyDialog = key }
+                                    ) {
+                                        Icon(Icons.Default.Edit, contentDescription = "Edit")
+                                    }
+                                    IconButton(
+                                        onClick = { showDeleteKeyDialog = key }
+                                    ) {
+                                        Icon(Icons.Default.Delete, contentDescription = "Delete")
+                                    }
                                 }
-                                IconButton(
-                                    onClick = { showDeleteKeyDialog = key }
-                                ) {
-                                    Icon(Icons.Default.Delete, contentDescription = "Delete")
-                                }
-                            }
+                            },
+                            onClick = { showEditKeyDialog = key }
+                        )
+                    }
+                    
+                    SettingsCard(
+                        title = { Text("Add API Key") },
+                        description = { Text("Add a new API key for ${selectedProvider.displayName}") },
+                        startWidget = {
+                            Icon(Icons.Default.Add, contentDescription = null)
                         },
-                        onClick = { showEditKeyDialog = key }
+                        onClick = { showAddKeyDialog = true }
                     )
                 }
-                
-                SettingsCard(
-                    title = { Text("Add API Key") },
-                    description = { Text("Add a new API key for ${selectedProvider.displayName}") },
-                    startWidget = {
-                        Icon(Icons.Default.Add, contentDescription = null)
-                    },
-                    onClick = { showAddKeyDialog = true }
-                )
             }
         }
     }

@@ -99,7 +99,7 @@ object ApiProviderManager {
             ApiProviderType.COHERE -> "command-r-plus"
             ApiProviderType.MISTRAL -> "mistral-large-latest"
             ApiProviderType.CUSTOM -> ""
-            ApiProviderType.AUTOAGENT -> "offline-learned"
+            ApiProviderType.AUTOAGENT -> "aterm-offline"
         }
     }
     

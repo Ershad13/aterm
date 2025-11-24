@@ -12,10 +12,14 @@ import androidx.compose.ui.unit.dp
 import com.rk.components.compose.preferences.base.PreferenceGroup
 import com.qali.aterm.autogent.ClassificationModelManager
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.io.File
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import okhttp3.OkHttpClient
+import okhttp3.Request
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -445,20 +449,35 @@ private fun DownloadModelDialog(
                         error = null
                         scope.launch {
                             try {
-                                // Download logic would go here
-                                // For now, simulate download
-                                kotlinx.coroutines.delay(1000)
                                 val filePath = ClassificationModelManager.getModelFilePath(model.id)
-                                if (filePath != null) {
+                                if (filePath != null && model.downloadUrl != null) {
+                                    val outputFile = File(filePath)
+                                    outputFile.parentFile?.mkdirs()
+                                    
+                                    withContext(Dispatchers.IO) {
+                                        downloadModelFile(
+                                            url = model.downloadUrl,
+                                            outputFile = outputFile,
+                                            onProgress = { downloaded, total ->
+                                                withContext(Dispatchers.Main) {
+                                                    downloadProgress = downloaded.toFloat() / total
+                                                }
+                                            }
+                                        )
+                                    }
+                                    
                                     ClassificationModelManager.updateModelDownloadStatus(
                                         model.id,
                                         filePath,
                                         true
                                     )
                                     onDownloadComplete()
+                                } else {
+                                    error = "Invalid file path or download URL"
+                                    isDownloading = false
                                 }
                             } catch (e: Exception) {
-                                error = e.message
+                                error = e.message ?: "Download failed"
                                 isDownloading = false
                             }
                         }
@@ -475,5 +494,31 @@ private fun DownloadModelDialog(
             }
         }
     )
+}
+
+private suspend fun downloadModelFile(
+    url: String,
+    outputFile: File,
+    onProgress: (Long, Long) -> Unit
+) {
+    OkHttpClient().newCall(Request.Builder().url(url).build()).execute().use { response ->
+        if (!response.isSuccessful) throw Exception("Failed to download file: ${response.code}")
+        
+        val body = response.body ?: throw Exception("Empty response body")
+        val totalBytes = body.contentLength()
+        var downloadedBytes = 0L
+        
+        outputFile.outputStream().use { output ->
+            body.byteStream().use { input ->
+                val buffer = ByteArray(8 * 1024)
+                var bytesRead: Int
+                while (input.read(buffer).also { bytesRead = it } != -1) {
+                    output.write(buffer, 0, bytesRead)
+                    downloadedBytes += bytesRead
+                    onProgress(downloadedBytes, totalBytes)
+                }
+            }
+        }
+    }
 }
 

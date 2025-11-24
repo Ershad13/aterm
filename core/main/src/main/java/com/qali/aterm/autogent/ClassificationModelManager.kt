@@ -43,11 +43,19 @@ object ClassificationModelManager {
             isBuiltIn = true
         ),
         ClassificationModel(
-            id = "universal_sentence_encoder",
-            name = "Universal Sentence Encoder",
-            description = "Google's Universal Sentence Encoder for semantic similarity and classification",
-            modelType = ModelType.UNIVERSAL_SENTENCE_ENCODER,
-            downloadUrl = "https://tfhub.dev/google/universal-sentence-encoder/4",
+            id = "mediapipe_bert_en_v2",
+            name = "Mediapipe BERT English v2",
+            description = "Updated BERT text classifier with improved accuracy",
+            modelType = ModelType.MEDIAPIPE_BERT,
+            downloadUrl = "https://storage.googleapis.com/mediapipe-models/text_classifier/bert_classifier/float32/2/bert_classifier.tflite",
+            isBuiltIn = true
+        ),
+        ClassificationModel(
+            id = "mediapipe_average_word_embedding",
+            name = "Mediapipe Average Word Embedding",
+            description = "Lightweight text classifier using average word embeddings",
+            modelType = ModelType.MEDIAPIPE_BERT,
+            downloadUrl = "https://storage.googleapis.com/mediapipe-models/text_classifier/average_word_embedding/float32/1/average_word_embedding.tflite",
             isBuiltIn = true
         )
     )
