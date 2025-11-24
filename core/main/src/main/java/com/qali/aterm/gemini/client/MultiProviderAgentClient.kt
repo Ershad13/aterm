@@ -4765,7 +4765,28 @@ exports.$functionName = (req, res, next) => {
      * Get hardcoded fallback commands based on error type and system info
      * This reduces API calls by using pre-defined fallbacks
      */
-    private fun getHardcodedFallbacks(
+    /**
+     * Check if a command is available in the system
+     */
+    private suspend fun isCommandAvailable(command: String, workspaceRoot: String): Boolean {
+        return try {
+            val checkCall = FunctionCall(
+                name = "shell",
+                args = mapOf(
+                    "command" to "which $command || command -v $command || type $command",
+                    "description" to "Check if $command is available"
+                )
+            )
+            val result = executeToolSync("shell", checkCall.args)
+            result.error == null && result.llmContent.isNotEmpty() && 
+            !result.llmContent.contains("not found") && 
+            !result.llmContent.contains("inaccessible")
+        } catch (e: Exception) {
+            false
+        }
+    }
+    
+    private suspend fun getHardcodedFallbacks(
         errorType: ErrorType,
         command: String,
         output: String,
@@ -4778,6 +4799,17 @@ exports.$functionName = (req, res, next) => {
         val updateCmd = systemInfo.packageManagerCommands["update"] ?: "update"
         val commandLower = command.lowercase()
         val outputLower = output.lowercase()
+        
+        // Check if package manager is available
+        val pmAvailable = when (systemInfo.packageManager) {
+            "apk" -> isCommandAvailable("apk", workspaceRoot)
+            "apt", "apt-get" -> isCommandAvailable("apt-get", workspaceRoot) || isCommandAvailable("apt", workspaceRoot)
+            "yum" -> isCommandAvailable("yum", workspaceRoot)
+            "dnf" -> isCommandAvailable("dnf", workspaceRoot)
+            "pacman" -> isCommandAvailable("pacman", workspaceRoot)
+            "brew" -> isCommandAvailable("brew", workspaceRoot)
+            else -> false
+        }
         
         // Detect language versions
         val versions = detectLanguageVersion(workspaceRoot)
@@ -4805,17 +4837,18 @@ exports.$functionName = (req, res, next) => {
                 // Node.js/npm not found
                 if (commandLower.contains("node") || commandLower.contains("npm")) {
                     val nodeVersion = versions["node"]
-                    when (systemInfo.packageManager) {
-                        "apk" -> {
-                            if (nodeVersion != null && nodeVersion.startsWith("20")) {
-                                fallbacks.add(FallbackPlan("apk add nodejs20 npm", "Install Node.js 20 via apk", true))
-                            } else if (nodeVersion != null && nodeVersion.startsWith("18")) {
-                                fallbacks.add(FallbackPlan("apk add nodejs18 npm", "Install Node.js 18 via apk", true))
+                    if (pmAvailable) {
+                        when (systemInfo.packageManager) {
+                            "apk" -> {
+                                if (nodeVersion != null && nodeVersion.startsWith("20")) {
+                                    fallbacks.add(FallbackPlan("apk add nodejs20 npm", "Install Node.js 20 via apk", true))
+                                } else if (nodeVersion != null && nodeVersion.startsWith("18")) {
+                                    fallbacks.add(FallbackPlan("apk add nodejs18 npm", "Install Node.js 18 via apk", true))
+                                }
+                                fallbacks.add(FallbackPlan("apk add nodejs npm", "Install Node.js and npm via apk", true))
+                                fallbacks.add(FallbackPlan("apk update && apk add nodejs npm", "Update apk and install Node.js/npm", true))
+                                fallbacks.add(FallbackPlan("apk add nodejs-current npm", "Install current Node.js version", true))
                             }
-                            fallbacks.add(FallbackPlan("apk add nodejs npm", "Install Node.js and npm via apk", true))
-                            fallbacks.add(FallbackPlan("apk update && apk add nodejs npm", "Update apk and install Node.js/npm", true))
-                            fallbacks.add(FallbackPlan("apk add nodejs-current npm", "Install current Node.js version", true))
-                        }
                         "apt", "apt-get" -> {
                             if (nodeVersion != null) {
                                 val majorVersion = nodeVersion.split(".").firstOrNull() ?: "lts"
@@ -4858,6 +4891,12 @@ exports.$functionName = (req, res, next) => {
                             }
                             fallbacks.add(FallbackPlan("brew install node", "Install Node.js via Homebrew", true))
                         }
+                    }
+                    } else {
+                        // Package manager not available - suggest alternative installation methods
+                        fallbacks.add(FallbackPlan("curl -fsSL https://nodejs.org/dist/v20.11.0/node-v20.11.0-linux-arm64.tar.xz -o /tmp/node.tar.xz && tar -xf /tmp/node.tar.xz -C /tmp && export PATH=\"/tmp/node-v20.11.0-linux-arm64/bin:\$PATH\"", "Download and extract Node.js binary (no package manager)", false))
+                        fallbacks.add(FallbackPlan("curl -fsSL https://nodejs.org/dist/v18.19.0/node-v18.19.0-linux-arm64.tar.xz -o /tmp/node.tar.xz && tar -xf /tmp/node.tar.xz -C /tmp && export PATH=\"/tmp/node-v18.19.0-linux-arm64/bin:\$PATH\"", "Download Node.js 18 LTS binary", false))
+                        fallbacks.add(FallbackPlan("⚠️ Package manager (${systemInfo.packageManager}) not available. Node.js cannot be installed automatically. Please install manually or use a different environment.", "Package manager unavailable warning", false))
                     }
                 }
                 
