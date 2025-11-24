@@ -404,9 +404,14 @@ fun RootfsSettings(
                                             requestStoragePermission()
                                         }
                                     },
-                                    modifier = Modifier.fillMaxWidth(),
-                                    leadingIcon = { Icon(Icons.Default.FolderOpen, null) }
+                                    modifier = Modifier.fillMaxWidth()
                                 ) {
+                                    Icon(
+                                        imageVector = Icons.Default.FolderOpen,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(8.dp))
                                     Text("Browse Files")
                                 }
                                 Text(
