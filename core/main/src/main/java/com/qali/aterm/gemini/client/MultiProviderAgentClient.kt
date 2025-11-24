@@ -7334,6 +7334,21 @@ exports.$functionName = (req, res, next) => {
         val signal = CancellationSignal()
         android.util.Log.d("GeminiClient", "sendMessageNonStreamingReverse: Starting reverse flow for debug/upgrade")
         
+        try {
+            // Emit initial event immediately to ensure flow is active
+            android.util.Log.d("GeminiClient", "sendMessageNonStreamingReverse: About to emit initial event")
+            emit(GeminiStreamEvent.Chunk("🚀 Starting...\n"))
+            onChunk("🚀 Starting...\n")
+            android.util.Log.d("GeminiClient", "sendMessageNonStreamingReverse: Initial event emitted successfully")
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            android.util.Log.e("GeminiClient", "Flow builder cancelled before initial emit", e)
+            throw e
+        } catch (e: Exception) {
+            android.util.Log.e("GeminiClient", "Error emitting initial event in sendMessageNonStreamingReverse", e)
+            emit(GeminiStreamEvent.Error("Failed to start: ${e.message}"))
+            return@flow
+        }
+        
         // Add user message to history
         chatHistory.add(
             Content(

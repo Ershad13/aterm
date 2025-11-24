@@ -995,10 +995,8 @@ fun RootfsSettings(
                 initialPath = getInitialStoragePath(context),
                 onDismiss = { 
                     showFilePicker = false
-                    // Reset selection if user cancels without selecting
-                    if (selectedFile == null && selectedType == RootfsType.FILE_PICKER) {
-                        selectedType = null
-                    }
+                    // Don't reset selectedType - keep FILE_PICKER selected so the button remains visible
+                    // User can still click the button again to open the picker
                 },
                 onFileSelected = { file ->
                     if (file.name.endsWith(".tar.gz", ignoreCase = true) || file.name.endsWith(".tar", ignoreCase = true)) {
