@@ -1989,7 +1989,9 @@ fun AgentScreen(
                                             }
                                             try {
                                                 android.util.Log.d("AgentScreen", "About to start stream.collect")
-                                                stream.collect { event ->
+                                                // Collect on IO dispatcher to avoid blocking main thread
+                                                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                                                    stream.collect { event ->
                                                     android.util.Log.d("AgentScreen", "Stream collect lambda called, job active: ${currentJob?.isActive}")
                                                     // Check if paused - if so, wait until resumed (only if actually paused)
                                                     if (isPaused) {
