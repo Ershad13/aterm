@@ -48,21 +48,57 @@ class ShellToolInvocation(
         }
         
         return try {
-            val workingDir: File = if (params.dir_path != null) {
-                val dir = File(workspaceRoot, params.dir_path)
-                // Try to create directory if it doesn't exist
-                if (!dir.exists()) {
+            val workingDir: File = if (params.dir_path != null && params.dir_path.isNotEmpty()) {
+                val dirPath = params.dir_path.trim()
+                
+                // If dir_path is the same as workspace root, just use workspace root
+                val finalDir = if (dirPath == workspaceRoot) {
+                    File(workspaceRoot)
+                } else {
                     try {
-                        dir.mkdirs()
-                        android.util.Log.d("ShellTool", "Created working directory: ${dir.absolutePath}")
-                        dir
+                        // Check if paths are equivalent (canonical comparison)
+                        val dirPathFile = File(dirPath)
+                        val workspaceRootFile = File(workspaceRoot)
+                        if (dirPathFile.canonicalPath == workspaceRootFile.canonicalPath) {
+                            File(workspaceRoot)
+                        } else {
+                            // Check if it's an absolute path
+                            val dir = if (dirPathFile.isAbsolute) {
+                                // Already absolute, use as-is
+                                dirPathFile
+                            } else {
+                                // Relative path, resolve from workspace root
+                                File(workspaceRoot, dirPath)
+                            }
+                            
+                            // Normalize the path to avoid duplication
+                            try {
+                                dir.canonicalFile
+                            } catch (e: Exception) {
+                                // If canonicalization fails, use the dir as-is
+                                dir
+                            }
+                        }
+                    } catch (e: Exception) {
+                        // If path comparison fails, fall back to workspace root
+                        android.util.Log.w("ShellTool", "Path comparison failed: ${e.message}")
+                        File(workspaceRoot)
+                    }
+                }
+                
+                // Try to create directory if it doesn't exist
+                if (!finalDir.exists()) {
+                    try {
+                        finalDir.mkdirs()
+                        android.util.Log.d("ShellTool", "Created working directory: ${finalDir.absolutePath}")
+                        finalDir
                     } catch (e: Exception) {
                         android.util.Log.w("ShellTool", "Failed to create directory, using workspace root: ${e.message}")
                         // Fallback to workspace root if directory creation fails
                         File(workspaceRoot)
                     }
                 } else {
-                    dir
+                    finalDir
                 }
             } else {
                 File(workspaceRoot)

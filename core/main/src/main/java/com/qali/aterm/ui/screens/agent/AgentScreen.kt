@@ -1169,6 +1169,32 @@ fun DebugDialog(
                     testInfoBuilder.appendLine("  - Successful: $apiSuccess ($apiSuccessRate%)")
                 }
                 
+                // Recommendations based on errors
+                val recommendations = mutableListOf<String>()
+                if (commandErrors > 0 && commandErrors > codeErrors) {
+                    recommendations.add("Install missing commands using package manager")
+                }
+                if (dependencyErrors > 0) {
+                    recommendations.add("Run dependency installation (npm install, pip install, etc.)")
+                }
+                if (editErrors > 0) {
+                    recommendations.add("Check file content matches before editing")
+                }
+                if (apiSuccessRate < 50 && apiCalls > 10) {
+                    recommendations.add("Check API key validity and rate limits")
+                }
+                if (fallbackAttempts > 10) {
+                    recommendations.add("Many fallback attempts - check package manager detection")
+                }
+                
+                if (recommendations.isNotEmpty()) {
+                    testInfoBuilder.appendLine()
+                    testInfoBuilder.appendLine("Recommendations:")
+                    recommendations.forEach { rec ->
+                        testInfoBuilder.appendLine("  - $rec")
+                    }
+                }
+                
                 testInfo = testInfoBuilder.toString()
             } catch (e: Exception) {
                 testInfo = "Error getting test info: ${e.message}"
@@ -1385,6 +1411,35 @@ fun DebugDialog(
                                     testInfoBuilder.appendLine("API Calls:")
                                     testInfoBuilder.appendLine("  - Total: $apiCalls")
                                     testInfoBuilder.appendLine("  - Successful: $apiSuccess ($apiSuccessRate%)")
+                                }
+                                
+                                // Recommendations
+                                val recommendations = mutableListOf<String>()
+                                if (commandErrors > 0 && commandErrors > codeErrors) {
+                                    recommendations.add("Install missing commands using package manager")
+                                }
+                                if (dependencyErrors > 0) {
+                                    recommendations.add("Run dependency installation (npm install, pip install, etc.)")
+                                }
+                                if (editErrors > 0) {
+                                    recommendations.add("Check file content matches before editing")
+                                }
+                                if (apiCalls > 0) {
+                                    val apiSuccessRate = (apiSuccess * 100.0 / apiCalls).toInt()
+                                    if (apiSuccessRate < 50 && apiCalls > 10) {
+                                        recommendations.add("Check API key validity and rate limits")
+                                    }
+                                }
+                                if (fallbackAttempts > 10) {
+                                    recommendations.add("Many fallback attempts - check package manager detection")
+                                }
+                                
+                                if (recommendations.isNotEmpty()) {
+                                    testInfoBuilder.appendLine()
+                                    testInfoBuilder.appendLine("Recommendations:")
+                                    recommendations.forEach { rec ->
+                                        testInfoBuilder.appendLine("  - $rec")
+                                    }
                                 }
                                 
                                 testInfo = testInfoBuilder.toString()

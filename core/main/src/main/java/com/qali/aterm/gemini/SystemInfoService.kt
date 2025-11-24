@@ -52,6 +52,10 @@ object SystemInfoService {
                 // Try to detect specific Linux distribution
                 when {
                     File("/etc/alpine-release").exists() -> "Alpine Linux"
+                    // Check for Alpine in common paths (Android chroot environments)
+                    File("/data/user/0/com.qali.aterm/local/alpine").exists() -> "Alpine Linux"
+                    System.getProperty("user.dir", "").contains("alpine", ignoreCase = true) -> "Alpine Linux"
+                    System.getenv("PATH")?.contains("alpine", ignoreCase = true) == true -> "Alpine Linux"
                     File("/etc/debian_version").exists() -> "Debian/Ubuntu"
                     File("/etc/redhat-release").exists() -> "RedHat/CentOS"
                     File("/etc/arch-release").exists() -> "Arch Linux"
@@ -101,7 +105,7 @@ object SystemInfoService {
     
     private fun detectPackageManager(os: String): String {
         return when {
-            os.contains("Alpine") -> "apk"
+            os.contains("Alpine", ignoreCase = true) -> "apk"
             os.contains("Debian") || os.contains("Ubuntu") -> "apt"
             os.contains("RedHat") || os.contains("CentOS") || os.contains("Fedora") -> {
                 // Check for dnf (newer) or yum (older)
@@ -118,6 +122,7 @@ object SystemInfoService {
             os == "Windows" -> "choco" // Chocolatey
             else -> {
                 // Try to detect by checking which package manager exists
+                // Prioritize apk for Alpine environments
                 val packageManagers = listOf("apk", "apt", "yum", "dnf", "pacman", "brew")
                 for (pm in packageManagers) {
                     try {
@@ -130,6 +135,14 @@ object SystemInfoService {
                         // Continue checking
                     }
                 }
+                
+                // Last resort: check for Alpine indicators
+                if (File("/etc/alpine-release").exists() || 
+                    System.getProperty("user.dir", "").contains("alpine", ignoreCase = true) ||
+                    System.getenv("PATH")?.contains("alpine", ignoreCase = true) == true) {
+                    return "apk"
+                }
+                
                 "unknown"
             }
         }
