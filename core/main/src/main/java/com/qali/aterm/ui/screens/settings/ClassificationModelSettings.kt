@@ -449,34 +449,57 @@ private fun DownloadModelDialog(
                         error = null
                         scope.launch {
                             try {
-                                val filePath = ClassificationModelManager.getModelFilePath(model.id)
-                                if (filePath != null && model.downloadUrl != null) {
-                                    val outputFile = File(filePath)
-                                    outputFile.parentFile?.mkdirs()
-                                    
-                                    withContext(Dispatchers.IO) {
-                                        downloadModelFile(
-                                            url = model.downloadUrl,
-                                            outputFile = outputFile,
-                                            onProgress = { downloaded, total ->
-                                                // Update progress on main thread using coroutine scope
-                                                scope.launch(Dispatchers.Main) {
-                                                    downloadProgress = downloaded.toFloat() / total
-                                                }
+                                if (model.downloadUrl == null) {
+                                    error = "No download URL available"
+                                    isDownloading = false
+                                    return@launch
+                                }
+                                
+                                // Get or create file path
+                                val existingPath = ClassificationModelManager.getModelFilePath(model.id)
+                                val filePath = existingPath ?: run {
+                                    // Create default path if it doesn't exist yet
+                                    val modelDir = File(com.rk.libcommons.localDir(), "aterm/model").apply { mkdirs() }
+                                    val extension = when (model.modelType) {
+                                        ClassificationModelManager.ModelType.CODEBERT_ONNX -> {
+                                            when {
+                                                model.id.contains("vocab") -> ".json"
+                                                model.id.contains("merges") -> ".txt"
+                                                else -> ".onnx"
                                             }
-                                        )
+                                        }
+                                        else -> ".tflite"
                                     }
-                                    
+                                    File(modelDir, "${model.id}$extension").absolutePath
+                                }
+                                
+                                val outputFile = File(filePath)
+                                outputFile.parentFile?.mkdirs()
+                                
+                                withContext(Dispatchers.IO) {
+                                    downloadModelFile(
+                                        url = model.downloadUrl,
+                                        outputFile = outputFile,
+                                        onProgress = { downloaded, total ->
+                                            // Update progress on main thread using coroutine scope
+                                            scope.launch(Dispatchers.Main) {
+                                                downloadProgress = downloaded.toFloat() / total
+                                            }
+                                        }
+                                    )
+                                }
+                                
+                                // For built-in models, use markBuiltInDownloaded to persist
+                                if (model.isBuiltIn) {
+                                    ClassificationModelManager.markBuiltInDownloaded(model.id, filePath)
+                                } else {
                                     ClassificationModelManager.updateModelDownloadStatus(
                                         model.id,
                                         filePath,
                                         true
                                     )
-                                    onDownloadComplete()
-                                } else {
-                                    error = "Invalid file path or download URL"
-                                    isDownloading = false
                                 }
+                                onDownloadComplete()
                             } catch (e: Exception) {
                                 error = e.message ?: "Download failed"
                                 isDownloading = false

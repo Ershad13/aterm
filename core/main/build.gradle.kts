@@ -110,6 +110,9 @@ dependencies {
     api(libs.gson)
 //    api(libs.termux.shared)
 
+    // ONNX Runtime for CodeBERT
+    api("com.microsoft.onnxruntime:onnxruntime-android:1.18.0")
+
     api(project(":core:resources"))
     api(project(":core:components"))
 }
