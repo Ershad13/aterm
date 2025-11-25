@@ -36,6 +36,7 @@ import com.qali.aterm.api.ApiProviderManager
 import com.qali.aterm.api.ApiProviderManager.KeysExhaustedException
 import com.qali.aterm.api.ApiProviderType
 import com.qali.aterm.autogent.AutoAgentLogger
+import com.qali.aterm.autogent.AutoAgentLearningService
 import com.qali.aterm.gemini.GeminiService
 import com.qali.aterm.gemini.HistoryPersistenceService
 import com.qali.aterm.gemini.SessionMetadata
@@ -1227,24 +1228,98 @@ fun DebugDialog(
             }
         }
         
-        // Load AutoAgent debug info if AutoAgent is selected
-        if (ApiProviderManager.selectedProvider == ApiProviderType.AUTOAGENT) {
-            scope.launch(Dispatchers.IO) {
-                try {
-                    val debugInfo = AutoAgentLogger.getDebugInfo()
-                    // Update UI state on Main dispatcher
-                    withContext(Dispatchers.Main) {
-                        autoAgentDebugInfo = debugInfo
-                    }
-                } catch (e: Exception) {
-                    // Update UI state on Main dispatcher
-                    withContext(Dispatchers.Main) {
-                        autoAgentDebugInfo = "Error loading AutoAgent debug info: ${e.message}"
+        // Always load AutoAgent learning info (even when other providers are active)
+        // This allows monitoring AutoAgent learning in the background
+        scope.launch(Dispatchers.IO) {
+            try {
+                val debugInfo = if (ApiProviderManager.selectedProvider == ApiProviderType.AUTOAGENT) {
+                    // Full debug info when AutoAgent is selected
+                    AutoAgentLogger.getDebugInfo()
+                } else {
+                    // Learning-focused info when other providers are active
+                    buildString {
+                        appendLine("=== AutoAgent Learning (Background) ===")
+                        appendLine("Note: AutoAgent is learning from your interactions even though another provider is active.")
+                        appendLine()
+                        
+                        // Learning Statistics
+                        appendLine("--- Learning Statistics ---")
+                        try {
+                            val stats = AutoAgentLearningService.getLearningStats()
+                            val codeSnippetType = com.qali.aterm.autogent.LearnedDataType.CODE_SNIPPET
+                            val apiUsageType = com.qali.aterm.autogent.LearnedDataType.API_USAGE
+                            val fixPatchType = com.qali.aterm.autogent.LearnedDataType.FIX_PATCH
+                            val metadataType = com.qali.aterm.autogent.LearnedDataType.METADATA_TRANSFORMATION
+                            
+                            appendLine("Code Snippets: ${stats.typeCounts[codeSnippetType] ?: 0}")
+                            appendLine("API Usage: ${stats.typeCounts[apiUsageType] ?: 0}")
+                            appendLine("Fix Patches: ${stats.typeCounts[fixPatchType] ?: 0}")
+                            appendLine("Metadata Transformations: ${stats.typeCounts[metadataType] ?: 0}")
+                            appendLine("Total Score: ${stats.totalScore}")
+                        } catch (e: Exception) {
+                            appendLine("Error loading stats: ${e.message}")
+                        }
+                        appendLine()
+                        
+                        // Recent Learning Activity
+                        appendLine("--- Recent Learning Activity ---")
+                        val learningLogs = AutoAgentLogger.getLogsByCategory("AutoAgentLearning")
+                            .takeLast(20)
+                        if (learningLogs.isNotEmpty()) {
+                            val dateFormat = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault())
+                            learningLogs.forEach { entry ->
+                                val timeStr = dateFormat.format(java.util.Date(entry.timestamp))
+                                appendLine("[$timeStr] ${entry.message}")
+                                entry.metadata?.forEach { (key, value) ->
+                                    appendLine("  $key: $value")
+                                }
+                            }
+                        } else {
+                            appendLine("No recent learning activity")
+                        }
+                        appendLine()
+                        
+                        // Enhanced Learning Activity
+                        val enhancedLogs = AutoAgentLogger.getLogsByCategory("EnhancedLearning")
+                            .takeLast(10)
+                        if (enhancedLogs.isNotEmpty()) {
+                            appendLine("--- Enhanced Learning Activity (last 10) ---")
+                            val dateFormat = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault())
+                            enhancedLogs.forEach { entry ->
+                                val timeStr = dateFormat.format(java.util.Date(entry.timestamp))
+                                appendLine("[$timeStr] ${entry.message}")
+                            }
+                            appendLine()
+                        }
+                        
+                        // Learning Events Summary
+                        val allLearningLogs = AutoAgentLogger.getAllLogs()
+                            .filter { it.category.contains("Learning", ignoreCase = true) }
+                        appendLine("--- Learning Summary ---")
+                        appendLine("Total Learning Events: ${allLearningLogs.size}")
+                        appendLine("Recent (last hour): ${allLearningLogs.count { 
+                            System.currentTimeMillis() - it.timestamp < 3600000 
+                        }}")
+                        appendLine("Today: ${allLearningLogs.count { 
+                            val today = java.util.Calendar.getInstance()
+                            today.set(java.util.Calendar.HOUR_OF_DAY, 0)
+                            today.set(java.util.Calendar.MINUTE, 0)
+                            today.set(java.util.Calendar.SECOND, 0)
+                            it.timestamp >= today.timeInMillis
+                        }}")
                     }
                 }
+                
+                // Update UI state on Main dispatcher
+                withContext(Dispatchers.Main) {
+                    autoAgentDebugInfo = debugInfo
+                }
+            } catch (e: Exception) {
+                // Update UI state on Main dispatcher
+                withContext(Dispatchers.Main) {
+                    autoAgentDebugInfo = "Error loading AutoAgent learning info: ${e.message}"
+                }
             }
-        } else {
-            autoAgentDebugInfo = null
         }
     }
     
@@ -1302,10 +1377,17 @@ fun DebugDialog(
             appendLine(logcatLogs ?: "Loading...")
             appendLine()
             
-            // AutoAgent Debug Information (if AutoAgent is selected)
+            // AutoAgent Debug Information
             if (ApiProviderManager.selectedProvider == ApiProviderType.AUTOAGENT) {
                 appendLine("--- AutoAgent Debug Information ---")
                 appendLine(autoAgentDebugInfo ?: "Loading AutoAgent debug info...")
+            } else if (autoAgentDebugInfo != null) {
+                // Show learning info when other providers are active
+                appendLine("--- AutoAgent Learning (Background) ---")
+                appendLine("AutoAgent is learning from your interactions in the background.")
+                appendLine("Switch to AutoAgent provider to use the learned knowledge.")
+                appendLine()
+                appendLine(autoAgentDebugInfo)
             }
         }
     }

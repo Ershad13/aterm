@@ -3995,24 +3995,50 @@ exports.$functionName = (req, res, next) => {
         emit(GeminiStreamEvent.Chunk(runningMsg))
         onChunk(runningMsg)
         
-        // Check if command/tool is available
+        // Check if command/tool is available - use cache first
         if (command.checkCommand != null) {
-            val checkCall = FunctionCall(
-                name = "shell",
-                args = mapOf(
-                    "command" to command.checkCommand!!,
-                    "description" to "Check if ${command.description} tool is available"
-                )
+            // Try to get from cache first
+            val dependencyName = command.description.lowercase().split(" ").firstOrNull() ?: "tool"
+            val cachedAvailable = com.qali.aterm.gemini.utils.DependencyCache.isAvailable(
+                dependency = dependencyName,
+                checkCommand = command.checkCommand!!,
+                workspaceRoot = workspaceRoot
             )
-            emit(GeminiStreamEvent.ToolCall(checkCall))
-            onToolCall(checkCall)
             
-            try {
-                val checkResult = executeToolSync("shell", checkCall.args)
-                emit(GeminiStreamEvent.ToolResult("shell", checkResult))
-                onToolResult("shell", checkCall.args)
+            if (cachedAvailable == false) {
+                // Tool is known to be unavailable from cache, skip to fallbacks
+                android.util.Log.d("GeminiClient", "Tool $dependencyName unavailable (cached), skipping check")
+                // Fall through to fallback logic
+            } else if (cachedAvailable == true) {
+                // Tool is known to be available from cache, skip check
+                android.util.Log.d("GeminiClient", "Tool $dependencyName available (cached), skipping check")
+                // Continue with primary command
+            } else {
+                // Cache miss - need to check
+                val checkCall = FunctionCall(
+                    name = "shell",
+                    args = mapOf(
+                        "command" to command.checkCommand!!,
+                        "description" to "Check if ${command.description} tool is available"
+                    )
+                )
+                emit(GeminiStreamEvent.ToolCall(checkCall))
+                onToolCall(checkCall)
                 
-                if (checkResult.error != null) {
+                try {
+                    val checkResult = executeToolSync("shell", checkCall.args)
+                    emit(GeminiStreamEvent.ToolResult("shell", checkResult))
+                    onToolResult("shell", checkCall.args)
+                    
+                    // Cache the result
+                    com.qali.aterm.gemini.utils.DependencyCache.cacheResult(
+                        dependency = dependencyName,
+                        available = checkResult.error == null,
+                        checkCommand = command.checkCommand!!,
+                        workspaceRoot = workspaceRoot
+                    )
+                    
+                    if (checkResult.error != null) {
                     // Tool not available, try fallbacks in order
                     val fallbackMsg = "⚠️ Tool not found, trying fallbacks...\n"
                     emit(GeminiStreamEvent.Chunk(fallbackMsg))
@@ -4072,12 +4098,68 @@ exports.$functionName = (req, res, next) => {
                                 }
                             }
                         } catch (e: Exception) {
-                            android.util.Log.w("GeminiClient", "Fallback command failed: ${e.message}")
-                            // Continue to next fallback
-                        }
+                        android.util.Log.w("GeminiClient", "Fallback command failed: ${e.message}")
+                        // Continue to next fallback
                     }
+                }
+            }
+            
+            // If tool check failed or was unavailable, try fallbacks
+            val shouldTryFallbacks = cachedAvailable == false || 
+                (cachedAvailable == null && checkResult?.error != null)
+            
+            if (shouldTryFallbacks && command.fallbacks.isNotEmpty()) {
+                val fallbackMsg = "⚠️ Tool not found, trying fallbacks...\n"
+                emit(GeminiStreamEvent.Chunk(fallbackMsg))
+                onChunk(fallbackMsg)
+                
+                var fallbackSuccess = false
+                for ((index, fallback) in command.fallbacks.withIndex()) {
+                    val fallbackStepMsg = "📦 Fallback ${index + 1}/${command.fallbacks.size}: $fallback\n"
+                    emit(GeminiStreamEvent.Chunk(fallbackStepMsg))
+                    onChunk(fallbackStepMsg)
                     
-                    if (!fallbackSuccess && command.fallbacks.isNotEmpty()) {
+                    val fallbackCall = FunctionCall(
+                        name = "shell",
+                        args = mapOf(
+                            "command" to fallback,
+                            "description" to "Fallback: $fallback"
+                        )
+                    )
+                    emit(GeminiStreamEvent.ToolCall(fallbackCall))
+                    onToolCall(fallbackCall)
+                    
+                    try {
+                        val fallbackResult = executeToolSync("shell", fallbackCall.args)
+                        emit(GeminiStreamEvent.ToolResult("shell", fallbackResult))
+                        onToolResult("shell", fallbackCall.args)
+                        
+                        if (fallbackResult.error == null) {
+                            // Fallback successful, continue to next or retry check
+                            fallbackSuccess = true
+                            
+                            // Cache successful fallback
+                            com.qali.aterm.gemini.utils.DependencyCache.cacheResult(
+                                dependency = dependencyName,
+                                available = true,
+                                checkCommand = command.checkCommand!!,
+                                workspaceRoot = workspaceRoot
+                            )
+                            
+                            if (fallback.contains("venv") || fallback.contains("activate")) {
+                                // Venv activation, retry check
+                                continue
+                            } else {
+                                break // Fallback installed tool, can proceed
+                            }
+                        }
+                    } catch (e: Exception) {
+                        android.util.Log.w("GeminiClient", "Fallback command failed: ${e.message}")
+                        // Continue to next fallback
+                    }
+                }
+                
+                if (!fallbackSuccess && command.fallbacks.isNotEmpty()) {
                         val allFailedMsg = "⚠️ All fallbacks failed, but continuing with primary command...\n"
                         emit(GeminiStreamEvent.Chunk(allFailedMsg))
                         onChunk(allFailedMsg)

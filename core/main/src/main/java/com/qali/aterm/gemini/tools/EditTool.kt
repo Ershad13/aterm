@@ -9,6 +9,8 @@ import com.qali.aterm.gemini.utils.createPatch
 import com.qali.aterm.gemini.utils.getDiffStat
 import com.qali.aterm.gemini.utils.FileCoherenceManager
 import com.qali.aterm.gemini.utils.AutoErrorDetection
+import com.qali.aterm.gemini.utils.FuzzyStringMatcher
+import com.qali.aterm.gemini.utils.EditFailureMonitor
 import com.qali.aterm.autogent.AutoAgentLearningService
 import com.qali.aterm.autogent.LearnedDataSource
 import com.qali.aterm.autogent.EnhancedLearningService
@@ -135,14 +137,69 @@ class EditToolInvocation(
             )
         }
         
-        // Count occurrences
-        val occurrences = if (currentContent != null) {
+        // Count occurrences - try exact match first, then fuzzy matching
+        var occurrences = if (currentContent != null) {
             currentContent.split(params.old_string).size - 1
         } else {
             0
         }
         
+        var actualOldString = params.old_string
+        var fuzzyMatchUsed = false
+        
+        // If exact match fails, try fuzzy matching
+        if (occurrences == 0 && !isNewFile && currentContent != null) {
+            android.util.Log.d("EditTool", "Exact match failed, trying fuzzy matching for: ${params.file_path}")
+            
+            val fuzzyMatch = FuzzyStringMatcher.findBestMatch(
+                content = currentContent,
+                oldString = params.old_string,
+                minSimilarity = 0.85,
+                contextWindow = 50
+            )
+            
+            if (fuzzyMatch != null && fuzzyMatch.similarity >= 0.85) {
+                android.util.Log.d("EditTool", "Fuzzy match found with similarity: ${fuzzyMatch.similarity}")
+                actualOldString = fuzzyMatch.matchedText
+                occurrences = 1
+                fuzzyMatchUsed = true
+                
+                // Log fuzzy match usage for monitoring
+                EditFailureMonitor.recordFuzzyMatchSuccess(
+                    filePath = params.file_path,
+                    similarity = fuzzyMatch.similarity
+                )
+            } else {
+                // Try context-aware matching as last resort
+                val contextMatch = FuzzyStringMatcher.findContextAwareMatch(
+                    content = currentContent,
+                    oldString = params.old_string,
+                    contextLines = 5
+                )
+                
+                if (contextMatch != null) {
+                    android.util.Log.d("EditTool", "Context-aware match found at line ${contextMatch.lineNumber}")
+                    actualOldString = contextMatch.matchedText
+                    occurrences = 1
+                    fuzzyMatchUsed = true
+                    
+                    EditFailureMonitor.recordFuzzyMatchSuccess(
+                        filePath = params.file_path,
+                        similarity = 0.90 // Context matches are considered high confidence
+                    )
+                }
+            }
+        }
+        
         if (occurrences == 0 && !isNewFile) {
+            // Record edit failure for monitoring
+            EditFailureMonitor.recordEditFailure(
+                filePath = params.file_path,
+                reason = "String not found",
+                oldStringLength = params.old_string.length,
+                fileSize = currentContent?.length ?: 0
+            )
+            
             return ToolResult(
                 llmContent = "Failed to edit, could not find the string to replace. The exact text in old_string was not found. Ensure you're not escaping content incorrectly and check whitespace, indentation, and context. Use read_file tool to verify.",
                 returnDisplay = "Error: String not found",
@@ -164,10 +221,10 @@ class EditToolInvocation(
             )
         }
         
-        // Apply replacement
+        // Apply replacement using actual matched string (may be fuzzy-matched)
         val newContent = applyReplacement(
             currentContent,
-            params.old_string,
+            actualOldString,
             params.new_string,
             isNewFile
         )
@@ -363,6 +420,9 @@ class EditToolInvocation(
             } else {
                 finalMessage
             }
+            
+            // Record successful edit
+            EditFailureMonitor.recordEditSuccess(params.file_path)
             
             ToolResult(
                 llmContent = messageWithErrors,
