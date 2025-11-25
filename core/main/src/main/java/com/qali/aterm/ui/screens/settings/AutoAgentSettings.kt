@@ -33,6 +33,7 @@ fun AutoAgentSettings() {
     var showAddModelDialog by remember { mutableStateOf(false) }
     var showDownloadDialog by remember { mutableStateOf<ClassificationModelManager.ClassificationModel?>(null) }
     var showResetConfirmation by remember { mutableStateOf(false) }
+    var dbModelName by remember { mutableStateOf(ClassificationModelManager.getAutoAgentModelName()) }
     val scope = rememberCoroutineScope()
     
     LaunchedEffect(Unit) {
@@ -137,7 +138,6 @@ fun AutoAgentSettings() {
             // AutoAgent Database Model Name (separate from text classifier)
             Divider(modifier = Modifier.padding(vertical = 8.dp))
             var showDbNameDialog by remember { mutableStateOf(false) }
-            var dbModelName by remember { mutableStateOf(ClassificationModelManager.getAutoAgentModelName()) }
             
             SettingsCard(
                 title = { Text("Database Model Name") },
