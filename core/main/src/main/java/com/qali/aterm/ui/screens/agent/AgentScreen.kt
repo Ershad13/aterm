@@ -1552,6 +1552,83 @@ fun AgentScreen(
         GeminiService.initialize(workspaceRoot, useOllama, ollamaUrl, ollamaModel, sessionId, mainActivity)
     }
     
+    // Ensure agent session exists when AgentScreen opens
+    // This creates the hidden terminal session for the agent if it doesn't exist
+    LaunchedEffect(sessionId) {
+        if (mainActivity.sessionBinder != null) {
+            val agentSessionId = "${sessionId}_agent"
+            val agentSession = mainActivity.sessionBinder!!.getSession(agentSessionId)
+            
+            if (agentSession == null) {
+                // Agent session doesn't exist, create it
+                android.util.Log.d("AgentScreen", "Creating agent session: $agentSessionId")
+                
+                // Get the main session to determine working mode
+                val mainSession = mainActivity.sessionBinder!!.getSession(sessionId)
+                
+                if (mainSession != null) {
+                    // Main session exists, create just the agent session with matching working mode
+                    val workingMode = mainActivity.sessionBinder!!.getSessionWorkingMode(sessionId) ?: com.rk.settings.Settings.working_Mode
+                    
+                    val agentClient = object : com.termux.terminal.TerminalSessionClient {
+                        override fun onTextChanged(changedSession: com.termux.terminal.TerminalSession) {}
+                        override fun onTitleChanged(changedSession: com.termux.terminal.TerminalSession) {}
+                        override fun onSessionFinished(finishedSession: com.termux.terminal.TerminalSession) {}
+                        override fun onCopyTextToClipboard(session: com.termux.terminal.TerminalSession, text: String) {}
+                        override fun onPasteTextFromClipboard(session: com.termux.terminal.TerminalSession?) {}
+                        override fun setTerminalShellPid(session: com.termux.terminal.TerminalSession, pid: Int) {}
+                        override fun onBell(session: com.termux.terminal.TerminalSession) {}
+                        override fun onColorsChanged(session: com.termux.terminal.TerminalSession) {}
+                        override fun onTerminalCursorStateChange(state: Boolean) {}
+                        override fun getTerminalCursorStyle(): Int = com.termux.terminal.TerminalEmulator.DEFAULT_TERMINAL_CURSOR_STYLE
+                        override fun logError(tag: String?, message: String?) {}
+                        override fun logWarn(tag: String?, message: String?) {}
+                        override fun logInfo(tag: String?, message: String?) {}
+                        override fun logDebug(tag: String?, message: String?) {}
+                        override fun logVerbose(tag: String?, message: String?) {}
+                        override fun logStackTraceWithMessage(tag: String?, message: String?, e: Exception?) {}
+                        override fun logStackTrace(tag: String?, e: Exception?) {}
+                    }
+                    
+                    mainActivity.sessionBinder!!.createSession(agentSessionId, agentClient, mainActivity, workingMode)
+                    android.util.Log.d("AgentScreen", "Created agent session: $agentSessionId with working mode: $workingMode")
+                } else {
+                    // Main session doesn't exist either, create both using createSessionWithHidden
+                    val dummyClient = object : com.termux.terminal.TerminalSessionClient {
+                        override fun onTextChanged(changedSession: com.termux.terminal.TerminalSession) {}
+                        override fun onTitleChanged(changedSession: com.termux.terminal.TerminalSession) {}
+                        override fun onSessionFinished(finishedSession: com.termux.terminal.TerminalSession) {}
+                        override fun onCopyTextToClipboard(session: com.termux.terminal.TerminalSession, text: String) {}
+                        override fun onPasteTextFromClipboard(session: com.termux.terminal.TerminalSession?) {}
+                        override fun setTerminalShellPid(session: com.termux.terminal.TerminalSession, pid: Int) {}
+                        override fun onBell(session: com.termux.terminal.TerminalSession) {}
+                        override fun onColorsChanged(session: com.termux.terminal.TerminalSession) {}
+                        override fun onTerminalCursorStateChange(state: Boolean) {}
+                        override fun getTerminalCursorStyle(): Int = com.termux.terminal.TerminalEmulator.DEFAULT_TERMINAL_CURSOR_STYLE
+                        override fun logError(tag: String?, message: String?) {}
+                        override fun logWarn(tag: String?, message: String?) {}
+                        override fun logInfo(tag: String?, message: String?) {}
+                        override fun logDebug(tag: String?, message: String?) {}
+                        override fun logVerbose(tag: String?, message: String?) {}
+                        override fun logStackTraceWithMessage(tag: String?, message: String?, e: Exception?) {}
+                        override fun logStackTrace(tag: String?, e: Exception?) {}
+                    }
+                    
+                    // Create main session with hidden agent session (this creates both)
+                    mainActivity.sessionBinder!!.createSessionWithHidden(
+                        sessionId,
+                        dummyClient,
+                        mainActivity,
+                        com.rk.settings.Settings.working_Mode
+                    )
+                    android.util.Log.d("AgentScreen", "Created main session and agent session: $sessionId -> $agentSessionId")
+                }
+            } else {
+                android.util.Log.d("AgentScreen", "Agent session already exists: $agentSessionId")
+            }
+        }
+    }
+    
     // Load history on init for this session and restore to client
     LaunchedEffect(sessionId, aiClient) {
         val loadedHistory = HistoryPersistenceService.loadHistory(sessionId)

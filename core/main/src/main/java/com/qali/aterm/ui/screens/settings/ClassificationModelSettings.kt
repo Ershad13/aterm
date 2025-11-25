@@ -118,20 +118,54 @@ fun ClassificationModelSettings() {
         
         Divider(modifier = Modifier.padding(vertical = 8.dp))
         
-        // Built-in models
+        // Built-in models - Group by type
         PreferenceGroup(heading = "Built-in Models") {
-            models.filter { it.isBuiltIn }.forEach { model ->
-                ModelCard(
-                    model = model,
-                    isSelected = selectedModel?.id == model.id,
-                    onSelect = {
-                        ClassificationModelManager.setSelectedModel(model.id)
-                        selectedModel = ClassificationModelManager.getSelectedModel()
-                    },
-                    onDownload = {
-                        showDownloadDialog = model
-                    }
+            // TFLite models (Mediapipe)
+            val tfliteModels = models.filter { it.isBuiltIn && it.modelType == ClassificationModelManager.ModelType.MEDIAPIPE_BERT }
+            if (tfliteModels.isNotEmpty()) {
+                Text(
+                    "TensorFlow Lite Models",
+                    style = MaterialTheme.typography.labelMedium,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                    color = MaterialTheme.colorScheme.primary
                 )
+                tfliteModels.forEach { model ->
+                    ModelCard(
+                        model = model,
+                        isSelected = selectedModel?.id == model.id,
+                        onSelect = {
+                            ClassificationModelManager.setSelectedModel(model.id)
+                            selectedModel = ClassificationModelManager.getSelectedModel()
+                        },
+                        onDownload = {
+                            showDownloadDialog = model
+                        }
+                    )
+                }
+            }
+            
+            // ONNX models (CodeBERT)
+            val onnxModels = models.filter { it.isBuiltIn && it.modelType == ClassificationModelManager.ModelType.CODEBERT_ONNX }
+            if (onnxModels.isNotEmpty()) {
+                Text(
+                    "ONNX Models (CodeBERT)",
+                    style = MaterialTheme.typography.labelMedium,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                    color = MaterialTheme.colorScheme.tertiary
+                )
+                onnxModels.forEach { model ->
+                    ModelCard(
+                        model = model,
+                        isSelected = selectedModel?.id == model.id,
+                        onSelect = {
+                            ClassificationModelManager.setSelectedModel(model.id)
+                            selectedModel = ClassificationModelManager.getSelectedModel()
+                        },
+                        onDownload = if (model.downloadUrl != null) {
+                            { showDownloadDialog = model }
+                        } else null
+                    )
+                }
             }
         }
         
@@ -237,23 +271,55 @@ private fun ModelCard(
             }
         },
         description = {
-            Column {
+            Column(
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
                 Text(
                     model.description,
                     style = MaterialTheme.typography.bodySmall
                 )
-                if (model.isDownloaded) {
-                    Text(
-                        "✓ Downloaded",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.primary
-                    )
-                } else if (model.downloadUrl != null) {
-                    Text(
-                        "Available for download",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    if (model.isDownloaded) {
+                        Text(
+                            "✓ Downloaded",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                    } else if (model.downloadUrl != null) {
+                        Text(
+                            "Available for download",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    } else if (model.modelType == ClassificationModelManager.ModelType.CODEBERT_ONNX && model.id == "codebert_onnx") {
+                        Text(
+                            "⚠ No download URL - Add custom ONNX model",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error
+                        )
+                    }
+                    // Show model type badge
+                    Surface(
+                        color = when (model.modelType) {
+                            ClassificationModelManager.ModelType.CODEBERT_ONNX -> MaterialTheme.colorScheme.tertiaryContainer
+                            ClassificationModelManager.ModelType.MEDIAPIPE_BERT -> MaterialTheme.colorScheme.primaryContainer
+                            else -> MaterialTheme.colorScheme.surfaceVariant
+                        },
+                        shape = MaterialTheme.shapes.small
+                    ) {
+                        Text(
+                            when (model.modelType) {
+                                ClassificationModelManager.ModelType.CODEBERT_ONNX -> "ONNX"
+                                ClassificationModelManager.ModelType.MEDIAPIPE_BERT -> "TFLite"
+                                else -> "Custom"
+                            },
+                            style = MaterialTheme.typography.labelSmall,
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                        )
+                    }
                 }
             }
         },
@@ -265,7 +331,7 @@ private fun ModelCard(
         },
         endWidget = {
             Row {
-                if (onDownload != null && !model.isDownloaded) {
+                if (onDownload != null && !model.isDownloaded && model.downloadUrl != null) {
                     IconButton(onClick = onDownload) {
                         Icon(Icons.Default.Download, contentDescription = "Download")
                     }
@@ -334,14 +400,20 @@ private fun AddModelDialog(
                 }
                 
                 if (!useFilePicker) {
-                    OutlinedTextField(
-                        value = downloadUrl,
-                        onValueChange = { downloadUrl = it },
-                        label = { Text("Download URL") },
-                        placeholder = { Text("https://...") },
-                        modifier = Modifier.fillMaxWidth(),
-                        singleLine = true
-                    )
+                OutlinedTextField(
+                    value = downloadUrl,
+                    onValueChange = { downloadUrl = it },
+                    label = { Text("Download URL") },
+                    placeholder = { Text("https://...") },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    supportingText = {
+                        Text(
+                            "For ONNX models, use .onnx file URLs. For TFLite models, use .tflite file URLs.",
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
+                )
                 }
                 
                 Row(
@@ -444,7 +516,7 @@ private fun DownloadModelDialog(
         confirmButton = {
             TextButton(
                 onClick = {
-                    if (!isDownloading && model.downloadUrl != null) {
+                    if (!isDownloading && model.downloadUrl != null && model.downloadUrl.isNotBlank()) {
                         isDownloading = true
                         error = null
                         scope.launch {

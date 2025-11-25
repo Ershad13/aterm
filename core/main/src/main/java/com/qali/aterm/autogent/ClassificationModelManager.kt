@@ -36,14 +36,14 @@ object ClassificationModelManager {
     }
     
     // Predefined Mediapipe models
-    // Note: Using working Mediapipe model URLs
+    // Using official Mediapipe model repository URLs from GitHub releases
     val builtInModels = listOf(
         ClassificationModel(
             id = "mediapipe_bert_en",
             name = "Mediapipe BERT English",
             description = "BERT-based text classifier optimized by Mediapipe for English text classification",
             modelType = ModelType.MEDIAPIPE_BERT,
-            downloadUrl = "https://storage.googleapis.com/mediapipe-models/text_classifier/bert_text_classifier/float32/1/bert_text_classifier.tflite",
+            downloadUrl = "https://github.com/google/mediapipe/raw/master/mediapipe/tasks/metadata/text_classifier/bert_text_classifier.tflite",
             isBuiltIn = true
         ),
         ClassificationModel(
@@ -51,7 +51,7 @@ object ClassificationModelManager {
             name = "Mediapipe BERT English Lite",
             description = "Lightweight BERT text classifier for faster inference",
             modelType = ModelType.MEDIAPIPE_BERT,
-            downloadUrl = "https://storage.googleapis.com/mediapipe-models/text_classifier/bert_text_classifier/float32/lite/bert_text_classifier.tflite",
+            downloadUrl = "https://github.com/google/mediapipe/raw/master/mediapipe/tasks/metadata/text_classifier/bert_text_classifier_lite.tflite",
             isBuiltIn = true
         ),
         ClassificationModel(
@@ -59,21 +59,21 @@ object ClassificationModelManager {
             name = "Mediapipe Average Word Embedding",
             description = "Lightweight text classifier using average word embeddings",
             modelType = ModelType.MEDIAPIPE_BERT,
-            downloadUrl = "https://storage.googleapis.com/mediapipe-models/text_classifier/average_word_embedding/float32/1/average_word_embedding.tflite",
+            downloadUrl = "https://github.com/google/mediapipe/raw/master/mediapipe/tasks/metadata/text_classifier/average_word_embedding.tflite",
             isBuiltIn = true
         ),
         ClassificationModel(
             id = "codebert_onnx",
             name = "CodeBERT (ONNX)",
-            description = "Code understanding model based on Microsoft CodeBERT, exported to ONNX and optimized for mobile.",
+            description = "Code understanding model. IMPORTANT: This requires a CodeBERT model exported to ONNX format. You can export it using transformers.onnx or use a pre-exported ONNX model from HuggingFace. The download URL points to the PyTorch model - you'll need to convert it to ONNX or provide your own ONNX model URL.",
             modelType = ModelType.CODEBERT_ONNX,
-            downloadUrl = "https://huggingface.co/hf-internal-testing/tiny-random-roberta/resolve/main/model.onnx",
+            downloadUrl = null, // No direct ONNX download available - user must provide their own
             isBuiltIn = true
         ),
         ClassificationModel(
             id = "codebert_tokenizer_vocab",
             name = "CodeBERT Vocabulary",
-            description = "Tokenizer vocabulary for CodeBERT",
+            description = "Tokenizer vocabulary file (vocab.json) for CodeBERT - Required for CodeBERT ONNX model",
             modelType = ModelType.CODEBERT_ONNX,
             downloadUrl = "https://huggingface.co/microsoft/codebert-base/resolve/main/vocab.json",
             isBuiltIn = true
@@ -81,7 +81,7 @@ object ClassificationModelManager {
         ClassificationModel(
             id = "codebert_tokenizer_merges",
             name = "CodeBERT BPE merges",
-            description = "Tokenizer merges file for CodeBERT",
+            description = "Tokenizer BPE merges file (merges.txt) for CodeBERT - Required for CodeBERT ONNX model",
             modelType = ModelType.CODEBERT_ONNX,
             downloadUrl = "https://huggingface.co/microsoft/codebert-base/resolve/main/merges.txt",
             isBuiltIn = true
