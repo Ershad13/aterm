@@ -2012,8 +2012,8 @@ fun AgentScreen(
                                                 (aiClient as OllamaClient).sendMessageStream(
                                                     userMessage = prompt,
                                                     onChunk = { chunk ->
-                                                        // Update UI state on main dispatcher
-                                                        withContext(Dispatchers.Main) {
+                                                        // Update UI state on main dispatcher - launch coroutine since callback is not suspend
+                                                        scope.launch(Dispatchers.Main) {
                                                             currentResponseText += chunk
                                                             val currentMessages = if (messages.isNotEmpty()) messages.dropLast(1) else messages
                                                             messages = currentMessages + AgentMessage(
@@ -2024,8 +2024,8 @@ fun AgentScreen(
                                                         }
                                                     },
                                                     onToolCall = { functionCall ->
-                                                        // Update UI state on main dispatcher
-                                                        withContext(Dispatchers.Main) {
+                                                        // Update UI state on main dispatcher - launch coroutine since callback is not suspend
+                                                        scope.launch(Dispatchers.Main) {
                                                             val toolMessage = AgentMessage(
                                                                 text = "🔧 Calling tool: ${functionCall.name}",
                                                                 isUser = false,
@@ -2035,8 +2035,8 @@ fun AgentScreen(
                                                         }
                                                     },
                                                     onToolResult = { toolName, args ->
-                                                        // Update UI state on main dispatcher
-                                                        withContext(Dispatchers.Main) {
+                                                        // Update UI state on main dispatcher - launch coroutine since callback is not suspend
+                                                        scope.launch(Dispatchers.Main) {
                                                             val resultMessage = AgentMessage(
                                                                 text = "✅ Tool '$toolName' completed",
                                                                 isUser = false,
@@ -2050,8 +2050,8 @@ fun AgentScreen(
                                                 (aiClient as GeminiClient).sendMessageStream(
                                                     userMessage = prompt,
                                                     onChunk = { chunk ->
-                                                        // Update UI state on main dispatcher
-                                                        withContext(Dispatchers.Main) {
+                                                        // Update UI state on main dispatcher - launch coroutine since callback is not suspend
+                                                        scope.launch(Dispatchers.Main) {
                                                             currentResponseText += chunk
                                                             val currentMessages = if (messages.isNotEmpty()) messages.dropLast(1) else messages
                                                             messages = currentMessages + AgentMessage(
@@ -2062,8 +2062,8 @@ fun AgentScreen(
                                                         }
                                                     },
                                                     onToolCall = { functionCall ->
-                                                        // Update UI state on main dispatcher
-                                                        withContext(Dispatchers.Main) {
+                                                        // Update UI state on main dispatcher - launch coroutine since callback is not suspend
+                                                        scope.launch(Dispatchers.Main) {
                                                             val toolMessage = AgentMessage(
                                                                 text = "🔧 Calling tool: ${functionCall.name}",
                                                                 isUser = false,
@@ -2073,8 +2073,8 @@ fun AgentScreen(
                                                         }
                                                     },
                                                     onToolResult = { toolName, args ->
-                                                        // Update UI state on main dispatcher
-                                                        withContext(Dispatchers.Main) {
+                                                        // Update UI state on main dispatcher - launch coroutine since callback is not suspend
+                                                        scope.launch(Dispatchers.Main) {
                                                             val resultMessage = AgentMessage(
                                                                 text = "✅ Tool '$toolName' completed",
                                                                 isUser = false,
@@ -2224,23 +2224,28 @@ fun AgentScreen(
                                             android.util.Log.d("AgentScreen", "Finished collecting stream events")
                                             
                                             // Final safety check: ensure loading message is cleaned up on Main dispatcher
-                                            withContext(Dispatchers.Main) {
-                                                currentAgentJob = null
-                                                try {
-                                                    if (currentResponseText.isNotEmpty() && messages.isNotEmpty()) {
-                                                        val lastMessage = messages.last()
-                                                        if (lastMessage.text == "Thinking..." || lastMessage.text.isEmpty()) {
-                                                            val currentMessages = messages.dropLast(1)
-                                                            messages = currentMessages + AgentMessage(
-                                                            text = currentResponseText,
-                                                            isUser = false,
-                                                            timestamp = System.currentTimeMillis()
-                                                        )
+                                            try {
+                                                withContext(Dispatchers.Main) {
+                                                    currentAgentJob = null
+                                                    try {
+                                                        if (currentResponseText.isNotEmpty() && messages.isNotEmpty()) {
+                                                            val lastMessage = messages.last()
+                                                            if (lastMessage.text == "Thinking..." || lastMessage.text.isEmpty()) {
+                                                                val currentMessages = messages.dropLast(1)
+                                                                messages = currentMessages + AgentMessage(
+                                                                    text = currentResponseText,
+                                                                    isUser = false,
+                                                                    timestamp = System.currentTimeMillis()
+                                                                )
+                                                            }
+                                                        }
+                                                    } catch (e: Exception) {
+                                                        android.util.Log.e("AgentScreen", "Error in final cleanup after stream", e)
                                                     }
+                                                    currentResponseText = ""
                                                 }
-                                                currentResponseText = ""
                                             } catch (e: Exception) {
-                                                android.util.Log.e("AgentScreen", "Error in final cleanup after stream", e)
+                                                android.util.Log.e("AgentScreen", "Error in final cleanup after stream (outer)", e)
                                             }
                                         } catch (e: KeysExhaustedException) {
                                             android.util.Log.e("AgentScreen", "KeysExhaustedException caught", e)
