@@ -6060,8 +6060,8 @@ exports.$functionName = (req, res, next) => {
         )
         
         val model = ApiProviderManager.getCurrentModel()
-        val systemInfo = SystemInfoService.detectSystemInfo()
-        val systemContext = SystemInfoService.generateSystemContext()
+        val systemInfo = SystemInfoService.detectSystemInfo(workspaceRoot)
+        val systemContext = SystemInfoService.generateSystemContext(workspaceRoot)
         
         // Check if task only needs commands (no file creation)
         val commandsOnly = detectCommandsOnly(userMessage, workspaceRoot)
@@ -7574,8 +7574,8 @@ exports.$functionName = (req, res, next) => {
         )
         
         val model = ApiProviderManager.getCurrentModel()
-        val systemInfo = SystemInfoService.detectSystemInfo()
-        val systemContext = SystemInfoService.generateSystemContext()
+        val systemInfo = SystemInfoService.detectSystemInfo(workspaceRoot)
+        val systemContext = SystemInfoService.generateSystemContext(workspaceRoot)
         
         // Check if task needs documentation search
         val needsDocSearch = needsDocumentationSearch(userMessage)
@@ -8764,8 +8764,8 @@ exports.$functionName = (req, res, next) => {
         )
         
         val model = ApiProviderManager.getCurrentModel()
-        val systemInfo = SystemInfoService.detectSystemInfo()
-        val systemContext = SystemInfoService.generateSystemContext()
+        val systemInfo = SystemInfoService.detectSystemInfo(workspaceRoot)
+        val systemContext = SystemInfoService.generateSystemContext(workspaceRoot)
         
         // Helper function to wrap emit as suspend function
         suspend fun emitEvent(event: GeminiStreamEvent) {
@@ -9313,8 +9313,8 @@ exports.$functionName = (req, res, next) => {
         )
         
         val model = ApiProviderManager.getCurrentModel()
-        val systemInfo = SystemInfoService.detectSystemInfo()
-        val systemContext = SystemInfoService.generateSystemContext()
+        val systemInfo = SystemInfoService.detectSystemInfo(workspaceRoot)
+        val systemContext = SystemInfoService.generateSystemContext(workspaceRoot)
         
         // Helper function to wrap emit as suspend function
         suspend fun emitEvent(event: GeminiStreamEvent) {

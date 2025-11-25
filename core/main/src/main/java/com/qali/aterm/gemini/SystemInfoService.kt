@@ -1,6 +1,7 @@
 package com.qali.aterm.gemini
 
 import java.io.File
+import com.rk.libcommons.getRootfsDir
 
 /**
  * Service for detecting system information (OS, architecture, package manager, etc.)
@@ -21,10 +22,11 @@ object SystemInfoService {
     
     /**
      * Detect system information by checking various indicators
+     * @param workspaceRoot Optional workspace root path to help detect the correct OS/distro
      */
-    fun detectSystemInfo(): SystemInfo {
-        val os = detectOS()
-        val osVersion = detectOSVersion()
+    fun detectSystemInfo(workspaceRoot: String? = null): SystemInfo {
+        val os = detectOS(workspaceRoot)
+        val osVersion = detectOSVersion(workspaceRoot)
         val architecture = detectArchitecture()
         val packageManager = detectPackageManager(os)
         val packageManagerCommands = getPackageManagerCommands(packageManager)
@@ -44,21 +46,61 @@ object SystemInfoService {
         )
     }
     
-    private fun detectOS(): String {
+    private fun detectOS(workspaceRoot: String? = null): String {
         val osName = System.getProperty("os.name", "").lowercase()
         
         return when {
             osName.contains("linux") -> {
-                // Try to detect specific Linux distribution
+                // First, check workspace root path to determine distro (most reliable)
+                val rootfsPath = workspaceRoot ?: getRootfsDir().absolutePath
                 when {
+                    // Check workspace root path first - this is the most reliable indicator
+                    rootfsPath.contains("/ubuntu", ignoreCase = true) -> {
+                        // Verify it's actually Ubuntu by checking for Ubuntu-specific files
+                        val osReleaseFile = File(rootfsPath, "etc/os-release")
+                        if (osReleaseFile.exists()) {
+                            try {
+                                val osRelease = osReleaseFile.readText()
+                                if (osRelease.contains("Ubuntu", ignoreCase = true)) {
+                                    "Ubuntu"
+                                } else if (osRelease.contains("Debian", ignoreCase = true)) {
+                                    "Debian"
+                                } else {
+                                    "Debian/Ubuntu"
+                                }
+                            } catch (e: Exception) {
+                                "Debian/Ubuntu"
+                            }
+                        } else {
+                            "Debian/Ubuntu"
+                        }
+                    }
+                    rootfsPath.contains("/alpine", ignoreCase = true) -> "Alpine Linux"
+                    // Then check system files
                     File("/etc/alpine-release").exists() -> "Alpine Linux"
-                    // Check for Alpine in common paths (Android chroot environments)
-                    File("/data/user/0/com.qali.aterm/local/alpine").exists() -> "Alpine Linux"
-                    System.getProperty("user.dir", "").contains("alpine", ignoreCase = true) -> "Alpine Linux"
-                    System.getenv("PATH")?.contains("alpine", ignoreCase = true) == true -> "Alpine Linux"
                     File("/etc/debian_version").exists() -> "Debian/Ubuntu"
+                    File("/etc/os-release").exists() -> {
+                        try {
+                            val osRelease = File("/etc/os-release").readText()
+                            when {
+                                osRelease.contains("Ubuntu", ignoreCase = true) -> "Ubuntu"
+                                osRelease.contains("Debian", ignoreCase = true) -> "Debian"
+                                osRelease.contains("Alpine", ignoreCase = true) -> "Alpine Linux"
+                                else -> "Linux"
+                            }
+                        } catch (e: Exception) {
+                            "Linux"
+                        }
+                    }
                     File("/etc/redhat-release").exists() -> "RedHat/CentOS"
                     File("/etc/arch-release").exists() -> "Arch Linux"
+                    // Fallback: check common paths
+                    File("/data/user/0/com.qali.aterm/local/alpine").exists() -> "Alpine Linux"
+                    File("/data/user/0/com.qali.aterm/local/ubuntu").exists() -> "Debian/Ubuntu"
+                    System.getProperty("user.dir", "").contains("ubuntu", ignoreCase = true) -> "Debian/Ubuntu"
+                    System.getProperty("user.dir", "").contains("alpine", ignoreCase = true) -> "Alpine Linux"
+                    System.getenv("PATH")?.contains("ubuntu", ignoreCase = true) == true -> "Debian/Ubuntu"
+                    System.getenv("PATH")?.contains("alpine", ignoreCase = true) == true -> "Alpine Linux"
                     else -> "Linux"
                 }
             }
@@ -71,11 +113,20 @@ object SystemInfoService {
         }
     }
     
-    private fun detectOSVersion(): String? {
+    private fun detectOSVersion(workspaceRoot: String? = null): String? {
         return try {
+            val rootfsPath = workspaceRoot ?: getRootfsDir().absolutePath
             when {
+                File(rootfsPath, "etc/alpine-release").exists() -> {
+                    File(rootfsPath, "etc/alpine-release").readText().trim()
+                }
                 File("/etc/alpine-release").exists() -> {
                     File("/etc/alpine-release").readText().trim()
+                }
+                File(rootfsPath, "etc/os-release").exists() -> {
+                    val osRelease = File(rootfsPath, "etc/os-release").readText()
+                    val versionId = Regex("VERSION_ID=\"?([^\"]+)\"?").find(osRelease)
+                    versionId?.groupValues?.get(1)
                 }
                 File("/etc/os-release").exists() -> {
                     val osRelease = File("/etc/os-release").readText()
@@ -233,9 +284,10 @@ object SystemInfoService {
     
     /**
      * Generate a system context string for AI prompts
+     * @param workspaceRoot Optional workspace root path to help detect the correct OS/distro
      */
-    fun generateSystemContext(): String {
-        val info = detectSystemInfo()
+    fun generateSystemContext(workspaceRoot: String? = null): String {
+        val info = detectSystemInfo(workspaceRoot)
         
         return buildString {
             appendLine("## System Information")

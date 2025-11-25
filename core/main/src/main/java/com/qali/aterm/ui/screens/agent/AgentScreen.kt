@@ -1074,7 +1074,7 @@ fun DebugDialog(
                 
                 // Get system info from SystemInfoService
                 try {
-                    val systemInfo = com.qali.aterm.gemini.SystemInfoService.detectSystemInfo()
+                    val systemInfo = com.qali.aterm.gemini.SystemInfoService.detectSystemInfo(workspaceRoot)
                     systemInfoBuilder.appendLine()
                     systemInfoBuilder.appendLine("OS: ${systemInfo.os}")
                     systemInfoBuilder.appendLine("OS Version: ${systemInfo.osVersion ?: "Unknown"}")
@@ -1352,7 +1352,7 @@ fun DebugDialog(
                                 
                                 // Get system info
                                 try {
-                                    val sysInfo = com.qali.aterm.gemini.SystemInfoService.detectSystemInfo()
+                                    val sysInfo = com.qali.aterm.gemini.SystemInfoService.detectSystemInfo(workspaceRoot)
                                     systemInfoBuilder.appendLine()
                                     systemInfoBuilder.appendLine("OS: ${sysInfo.os}")
                                     systemInfoBuilder.appendLine("OS Version: ${sysInfo.osVersion ?: "Unknown"}")
@@ -1524,7 +1524,17 @@ fun AgentScreen(
     var lastFailedPrompt by remember { mutableStateOf<String?>(null) }
     var retryCountdown by remember { mutableStateOf(0) }
     var currentResponseText by remember { mutableStateOf("") }
-    var workspaceRoot by remember(sessionId) { mutableStateOf(com.rk.libcommons.alpineDir().absolutePath) }
+    // Get workspace root based on session's working mode
+    var workspaceRoot by remember(sessionId) { 
+        mutableStateOf(
+            if (mainActivity.sessionBinder != null) {
+                val workingMode = mainActivity.sessionBinder!!.getSessionWorkingMode(sessionId)
+                com.rk.libcommons.getRootfsDirForSession(sessionId, workingMode).absolutePath
+            } else {
+                com.rk.libcommons.getRootfsDir().absolutePath
+            }
+        )
+    }
     var showWorkspacePicker by remember { mutableStateOf(false) }
     var showHistory by remember { mutableStateOf(false) }
     var showDebugDialog by remember { mutableStateOf(false) }
