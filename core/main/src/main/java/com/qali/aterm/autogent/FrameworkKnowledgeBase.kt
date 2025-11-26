@@ -334,14 +334,14 @@ object FrameworkKnowledgeBase {
                                 board[index] = currentPlayer;
                                 const winner = calculateWinner(board);
                                 if (winner) {
-                                    statusElement.textContent = `Player ${winner} wins!`;
+                                    statusElement.textContent = 'Player ' + winner + ' wins!';
                                     isGameOver = true;
                                 } else if (board.every(cell => cell)) {
                                     statusElement.textContent = 'Draw!';
                                     isGameOver = true;
                                 } else {
                                     currentPlayer = currentPlayer === 'X' ? 'O' : 'X';
-                                    statusElement.textContent = `Player ${currentPlayer}'s turn`;
+                                    statusElement.textContent = "Player " + currentPlayer + "'s turn";
                                 }
                                 renderBoard();
                             }
@@ -364,7 +364,7 @@ object FrameworkKnowledgeBase {
                                 board = Array(9).fill(null);
                                 currentPlayer = 'X';
                                 isGameOver = false;
-                                statusElement.textContent = `Player ${currentPlayer}'s turn`;
+                                statusElement.textContent = "Player " + currentPlayer + "'s turn";
                                 renderBoard();
                             }
                             
@@ -471,7 +471,7 @@ object FrameworkKnowledgeBase {
                     
                     const PORT = process.env.PORT || 3000;
                     app.listen(PORT, () => {
-                        console.log(`CRUD API server listening on port ${PORT}`);
+                        console.log("CRUD API server listening on port " + PORT);
                     });
                 """.trimIndent(),
                 frameworkType = "Node.js",
