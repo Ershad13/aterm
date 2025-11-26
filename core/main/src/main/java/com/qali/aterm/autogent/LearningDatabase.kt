@@ -11,7 +11,7 @@ import java.io.File
  * SQLite database for storing offline learned knowledge
  * Database location: /sdcard/aterm/model/model.db
  */
-class LearningDatabase private constructor(private val modelName: String = "aterm-offline") {
+class LearningDatabase private constructor(private val modelName: String = "aterm-db") {
     companion object {
         private const val DATABASE_VERSION = 2 // Incremented for schema changes
         
@@ -34,7 +34,7 @@ class LearningDatabase private constructor(private val modelName: String = "ater
         private var INSTANCE: LearningDatabase? = null
         
         fun getInstance(modelName: String? = null): LearningDatabase {
-            val dbName = modelName ?: "aterm-offline"
+            val dbName = modelName ?: "aterm-db"
             return INSTANCE?.takeIf { it.modelName == dbName } ?: synchronized(this) {
                 INSTANCE?.takeIf { it.modelName == dbName } ?: LearningDatabase(dbName).also { 
                     INSTANCE = it

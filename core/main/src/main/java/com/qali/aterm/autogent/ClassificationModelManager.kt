@@ -239,8 +239,7 @@ object ClassificationModelManager {
      */
     fun getAutoAgentModelName(): String {
         return Preference.getString(PREF_AUTOAGENT_MODEL_NAME, "").takeIf { it.isNotEmpty() }
-            ?: getSelectedModel()?.name
-            ?: "aterm-offline"
+            ?: "aterm-db"
     }
     
     /**
