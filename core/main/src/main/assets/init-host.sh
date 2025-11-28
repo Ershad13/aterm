@@ -25,10 +25,19 @@ if [ -z "$(ls -A "$ROOTFS_DIR_PATH" 2>/dev/null | grep -vE '^(root|tmp)$')" ]; t
     fi
     echo "Extracting $ROOTFS_FILE to $ROOTFS_DIR..."
     # Use appropriate tar flags based on file extension
+    # Suppress symlink warnings (normal on Android - symlinks point to system binaries)
     if echo "$ROOTFS_FILE" | grep -q "\.tar\.gz$"; then
-        tar -xzf "$ROOTFS_FILE_PATH" -C "$ROOTFS_DIR_PATH" --no-same-owner --no-same-permissions 2>&1 | grep -v "tar: Removing leading" | grep -v "can't link" || true
+        tar -xzf "$ROOTFS_FILE_PATH" -C "$ROOTFS_DIR_PATH" --no-same-owner --no-same-permissions 2>&1 | \
+            grep -v "tar: Removing leading" | \
+            grep -v "can't link" | \
+            grep -v "not under" | \
+            grep -v "tar: had errors" || true
     else
-        tar -xf "$ROOTFS_FILE_PATH" -C "$ROOTFS_DIR_PATH" --no-same-owner --no-same-permissions 2>&1 | grep -v "tar: Removing leading" | grep -v "can't link" || true
+        tar -xf "$ROOTFS_FILE_PATH" -C "$ROOTFS_DIR_PATH" --no-same-owner --no-same-permissions 2>&1 | \
+            grep -v "tar: Removing leading" | \
+            grep -v "can't link" | \
+            grep -v "not under" | \
+            grep -v "tar: had errors" || true
     fi
     
     # Verify extraction was successful
@@ -36,10 +45,13 @@ if [ -z "$(ls -A "$ROOTFS_DIR_PATH" 2>/dev/null | grep -vE '^(root|tmp)$')" ]; t
         echo "Error: Failed to extract $ROOTFS_FILE - no system directories found"
         exit 1
     fi
-    echo "$ROOTFS_FILE extracted successfully"
+    echo "$ROOTFS_FILE extracted successfully (some symlink warnings are normal)"
 fi
 
-[ ! -e "$PREFIX/local/bin/proot" ] && cp "$PREFIX/files/proot" "$PREFIX/local/bin"
+if [ ! -e "$PREFIX/local/bin/proot" ]; then
+    cp "$PREFIX/files/proot" "$PREFIX/local/bin"
+    chmod 755 "$PREFIX/local/bin/proot" 2>/dev/null || true
+fi
 
 for sofile in "$PREFIX/files/"*.so.2; do
     dest="$PREFIX/local/lib/$(basename "$sofile")"
@@ -104,4 +116,31 @@ ARGS="$ARGS --link2symlink"
 ARGS="$ARGS --sysvipc"
 ARGS="$ARGS -L"
 
-$LINKER $PREFIX/local/bin/proot $ARGS sh $PREFIX/local/bin/init "$@"
+# Ensure PROOT_TMP_DIR exists if set
+if [ -n "$PROOT_TMP_DIR" ]; then
+    mkdir -p "$PROOT_TMP_DIR"
+    chmod 700 "$PROOT_TMP_DIR" 2>/dev/null || true
+fi
+
+# Use absolute path to shell inside rootfs to avoid using system shell
+SHELL_PATH="/bin/sh"
+if [ ! -f "$ROOTFS_DIR_PATH$SHELL_PATH" ]; then
+    # Try alternative shell locations
+    if [ -f "$ROOTFS_DIR_PATH/bin/bash" ]; then
+        SHELL_PATH="/bin/bash"
+    elif [ -f "$ROOTFS_DIR_PATH/usr/bin/sh" ]; then
+        SHELL_PATH="/usr/bin/sh"
+    else
+        # Fallback to /system/bin/sh if rootfs shell doesn't exist
+        echo "Warning: Rootfs shell not found, using system shell"
+        SHELL_PATH="/system/bin/sh"
+    fi
+fi
+
+# Verify proot binary exists and is executable
+if [ ! -f "$PREFIX/local/bin/proot" ] || [ ! -x "$PREFIX/local/bin/proot" ]; then
+    echo "Error: proot binary not found or not executable at $PREFIX/local/bin/proot"
+    exit 1
+fi
+
+$LINKER $PREFIX/local/bin/proot $ARGS $SHELL_PATH $PREFIX/local/bin/init "$@"
