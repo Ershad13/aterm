@@ -116,25 +116,46 @@ ARGS="$ARGS --link2symlink"
 ARGS="$ARGS --sysvipc"
 ARGS="$ARGS -L"
 
-# Ensure PROOT_TMP_DIR exists if set
+# Ensure PROOT_TMP_DIR exists if set (create parent directory too)
 if [ -n "$PROOT_TMP_DIR" ]; then
+    mkdir -p "$(dirname "$PROOT_TMP_DIR")" 2>/dev/null || true
     mkdir -p "$PROOT_TMP_DIR"
     chmod 700 "$PROOT_TMP_DIR" 2>/dev/null || true
 fi
 
 # Use absolute path to shell inside rootfs to avoid using system shell
+# Use -e instead of -f to check for existence (works for files, symlinks, etc.)
 SHELL_PATH="/bin/sh"
-if [ ! -f "$ROOTFS_DIR_PATH$SHELL_PATH" ]; then
-    # Try alternative shell locations
-    if [ -f "$ROOTFS_DIR_PATH/bin/bash" ]; then
-        SHELL_PATH="/bin/bash"
-    elif [ -f "$ROOTFS_DIR_PATH/usr/bin/sh" ]; then
-        SHELL_PATH="/usr/bin/sh"
-    else
-        # Fallback to /system/bin/sh if rootfs shell doesn't exist
-        echo "Warning: Rootfs shell not found, using system shell"
-        SHELL_PATH="/system/bin/sh"
-    fi
+USE_BUSYBOX_SH=false
+
+# Check if /bin/sh exists (even as symlink - proot will resolve it)
+if [ -e "$ROOTFS_DIR_PATH$SHELL_PATH" ]; then
+    # Shell found, use it directly (proot handles symlink resolution)
+    : # No-op, SHELL_PATH is already set
+elif [ -e "$ROOTFS_DIR_PATH/bin/bash" ]; then
+    SHELL_PATH="/bin/bash"
+elif [ -e "$ROOTFS_DIR_PATH/usr/bin/sh" ]; then
+    SHELL_PATH="/usr/bin/sh"
+elif [ -e "$ROOTFS_DIR_PATH/bin/ash" ]; then
+    # Alpine Linux uses ash
+    SHELL_PATH="/bin/ash"
+elif [ -e "$ROOTFS_DIR_PATH/bin/busybox" ]; then
+    # Alpine uses busybox as shell - need to call it with 'sh' argument
+    SHELL_PATH="/bin/busybox"
+    USE_BUSYBOX_SH=true
+else
+    # Debug: list what's actually in bin directory
+    echo "Debug: Checking rootfs structure at $ROOTFS_DIR_PATH"
+    [ -d "$ROOTFS_DIR_PATH/bin" ] && echo "bin contents: $(ls -la "$ROOTFS_DIR_PATH/bin" 2>/dev/null | head -10)" || echo "bin directory not found"
+    [ -d "$ROOTFS_DIR_PATH/usr/bin" ] && echo "usr/bin contents: $(ls -la "$ROOTFS_DIR_PATH/usr/bin" 2>/dev/null | head -10)" || echo "usr/bin directory not found"
+    echo "Error: Rootfs shell not found in $ROOTFS_DIR_PATH. Cannot proceed."
+    exit 1
+fi
+
+# Verify the shell is actually accessible
+if [ ! -e "$ROOTFS_DIR_PATH$SHELL_PATH" ]; then
+    echo "Error: Shell at $SHELL_PATH not found in rootfs at $ROOTFS_DIR_PATH"
+    exit 1
 fi
 
 # Verify proot binary exists and is executable
@@ -143,4 +164,9 @@ if [ ! -f "$PREFIX/local/bin/proot" ] || [ ! -x "$PREFIX/local/bin/proot" ]; the
     exit 1
 fi
 
-$LINKER $PREFIX/local/bin/proot $ARGS $SHELL_PATH $PREFIX/local/bin/init "$@"
+# If using busybox as shell, we need to pass 'sh' as argument
+if [ "$USE_BUSYBOX_SH" = "true" ]; then
+    $LINKER $PREFIX/local/bin/proot $ARGS $SHELL_PATH sh $PREFIX/local/bin/init "$@"
+else
+    $LINKER $PREFIX/local/bin/proot $ARGS $SHELL_PATH $PREFIX/local/bin/init "$@"
+fi
