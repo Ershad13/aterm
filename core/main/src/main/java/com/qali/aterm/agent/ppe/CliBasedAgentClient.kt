@@ -162,7 +162,7 @@ system: |-
 user: "{{userMessage}}"
 assistant: "[[response]]"
 ---
-$$echo: "?=response"
+${'$'}echo: "?=response"
             """.trimIndent()
             
             defaultScript.writeText(scriptContent)
