@@ -25,7 +25,8 @@ object PpeScriptParser {
      */
     fun parse(content: String, sourcePath: String? = null): PpeScript {
         // Split content by --- or *** to separate front-matter from turns
-        val parts = content.split(Regex("(^---|^\\*\\*\\*)"), RegexOption.MULTILINE)
+        // Use inline flag (?m) for multiline mode
+        val parts = content.split(Regex("(?m)(^---|^\\*\\*\\*)"))
         
         if (parts.isEmpty()) {
             return PpeScript(sourcePath = sourcePath)
@@ -46,7 +47,7 @@ object PpeScriptParser {
         
         // Extract parameters, input, output, response_format from front-matter
         val parameters = (frontMatter["parameters"] as? Map<*, *>)?.mapKeys { it.key.toString() }
-            ?.mapValues { convertValue(it.value) } ?: emptyMap()
+            ?.mapValues { convertValue(it.value) } ?: emptyMap<String, Any>()
         
         val input = (frontMatter["input"] as? List<*>)?.mapNotNull { it?.toString() }
         
@@ -131,7 +132,7 @@ object PpeScriptParser {
             }
             
             // Check for instructions ($instruction or $instruction: value)
-            if (trimmed.startsWith("$")) {
+            if (trimmed.startsWith("\$")) {
                 // Save current message if any
                 if (currentRole != null && currentContent.isNotEmpty()) {
                     messages.add(createMessage(currentRole, currentContent.toString().trim()))

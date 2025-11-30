@@ -72,17 +72,20 @@ class CliBasedAgentClient(
                 "content" to userMessage
             )
             
-            // Execute script
+            // Track events during execution
+            val eventQueue = mutableListOf<AgentEvent>()
+            
+            // Execute script and collect results
             executionEngine.executeScript(
                 script = script,
                 inputParams = inputParams,
                 onChunk = { chunk ->
                     onChunk(chunk)
-                    emit(AgentEvent.Chunk(chunk))
+                    eventQueue.add(AgentEvent.Chunk(chunk))
                 },
                 onToolCall = { functionCall ->
                     onToolCall(functionCall)
-                    emit(AgentEvent.ToolCall(functionCall))
+                    eventQueue.add(AgentEvent.ToolCall(functionCall))
                 },
                 onToolResult = { toolName, args ->
                     onToolResult(toolName, args)
@@ -91,10 +94,16 @@ class CliBasedAgentClient(
                     val toolResult = executionEngine.getNextToolResult(toolName)
                     if (toolResult != null) {
                         // Emit tool result - AgentScreen will extract file diffs from this
-                        emit(AgentEvent.ToolResult(toolName, toolResult))
+                        eventQueue.add(AgentEvent.ToolResult(toolName, toolResult))
                     }
                 }
             ).collect { result ->
+                // Emit all queued events
+                eventQueue.forEach { event ->
+                    emit(event)
+                }
+                eventQueue.clear()
+                
                 if (result.success) {
                     // Emit final result if any
                     if (result.finalResult.isNotEmpty()) {
@@ -153,7 +162,7 @@ system: |-
 user: "{{userMessage}}"
 assistant: "[[response]]"
 ---
-$echo: "?=response"
+\$echo: "?=response"
             """.trimIndent()
             
             defaultScript.writeText(scriptContent)

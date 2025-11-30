@@ -29,7 +29,7 @@ class PpeExecutionEngine(
         inputParams: Map<String, Any> = emptyMap(),
         onChunk: (String) -> Unit = {},
         onToolCall: (FunctionCall) -> Unit = {},
-        onToolResult: (String, Map<String, Any>) -> Unit = {}
+        onToolResult: (String, Map<String, Any>) -> Unit = { _, _ -> }
     ): Flow<PpeExecutionResult> = flow {
         try {
             // Merge script parameters with input params (input takes precedence)
@@ -392,7 +392,14 @@ class PpeExecutionEngine(
             null
         }
         
-        val result = apiClient.callApi(messages, null, null, tools)
+        val result = apiClient.callApi(
+            messages = messages,
+            model = null,
+            temperature = null,
+            topP = null,
+            topK = null,
+            tools = tools
+        )
         
         return result.getOrNull()
     }
@@ -427,15 +434,10 @@ class PpeExecutionEngine(
             )
         }
         
-        // Create invocation and execute
-        val invocation = tool?.createInvocation(params)
-        val result = invocation?.execute() ?: com.qali.aterm.agent.tools.ToolResult(
-            llmContent = "Failed to execute tool: ${functionCall.name}",
-            error = com.qali.aterm.agent.tools.ToolError(
-                message = "Execution failed",
-                type = com.qali.aterm.agent.tools.ToolErrorType.EXECUTION_ERROR
-            )
-        )
+        // Create invocation and execute - use unchecked cast like AgentClient does
+        @Suppress("UNCHECKED_CAST")
+        val invocation = (tool as com.qali.aterm.agent.tools.DeclarativeTool<Any, com.qali.aterm.agent.tools.ToolResult>).createInvocation(params as Any)
+        val result = invocation.execute()
         
         // Store result in queue for file diff extraction (FIFO)
         toolResultQueue.add(Pair(functionCall.name, result))

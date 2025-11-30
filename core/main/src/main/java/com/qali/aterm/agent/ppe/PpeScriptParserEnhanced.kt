@@ -26,7 +26,8 @@ object PpeScriptParserEnhanced {
      */
     fun parse(content: String, sourcePath: String? = null): PpeScript {
         // Split content by --- or *** to separate front-matter from turns
-        val parts = content.split(Regex("(^---|^\\*\\*\\*)"), RegexOption.MULTILINE)
+        // Use inline flag (?m) for multiline mode
+        val parts = content.split(Regex("(?m)(^---|^\\*\\*\\*)"))
         
         if (parts.isEmpty()) {
             return PpeScript(sourcePath = sourcePath)
@@ -47,7 +48,7 @@ object PpeScriptParserEnhanced {
         
         // Extract all front-matter fields
         val parameters = (frontMatter["parameters"] as? Map<*, *>)?.mapKeys { it.key.toString() }
-            ?.mapValues { convertValue(it.value) } ?: emptyMap()
+            ?.mapValues { convertValue(it.value) } ?: emptyMap<String, Any>()
         
         val input = (frontMatter["input"] as? List<*>)?.mapNotNull { it?.toString() }
         
@@ -147,7 +148,7 @@ object PpeScriptParserEnhanced {
             }
             
             // Check for control flow blocks ($if, $while, etc.)
-            if (trimmed.startsWith("$if") || trimmed.startsWith("$while") || trimmed.startsWith("$for") || trimmed.startsWith("$match")) {
+            if (trimmed.startsWith("\$if") || trimmed.startsWith("\$while") || trimmed.startsWith("\$for") || trimmed.startsWith("\$match")) {
                 // Save current message if any
                 if (currentRole != null && currentContent.isNotEmpty()) {
                     messages.add(createMessage(currentRole, currentContent.toString().trim()))
@@ -186,7 +187,7 @@ object PpeScriptParserEnhanced {
             }
             
             // Check for instructions ($instruction or $instruction: value)
-            if (trimmed.startsWith("$")) {
+            if (trimmed.startsWith("\$")) {
                 // Save current message if any
                 if (currentRole != null && currentContent.isNotEmpty()) {
                     messages.add(createMessage(currentRole, currentContent.toString().trim()))
@@ -269,19 +270,19 @@ object PpeScriptParserEnhanced {
         val firstLine = lines[startIndex].trim()
         
         when {
-            firstLine.startsWith("$if") -> {
+            firstLine.startsWith("\$if") -> {
                 return parseIfBlock(lines, startIndex)
             }
-            firstLine.startsWith("$while") -> {
+            firstLine.startsWith("\$while") -> {
                 return parseWhileBlock(lines, startIndex)
             }
-            firstLine.startsWith("$for") -> {
+            firstLine.startsWith("\$for") -> {
                 return parseForBlock(lines, startIndex)
             }
-            firstLine.startsWith("$match") -> {
+            firstLine.startsWith("\$match") -> {
                 return parseMatchBlock(lines, startIndex)
             }
-            firstLine.startsWith("$pipe") -> {
+            firstLine.startsWith("\$pipe") -> {
                 return parsePipeBlock(lines, startIndex)
             }
             else -> return null
@@ -330,7 +331,7 @@ object PpeScriptParserEnhanced {
             
             // Check if we're still in the block (same or greater indent)
             if (currentIndent > indentLevel || (currentIndent == indentLevel && (inThen || inElse))) {
-                if (trimmed.startsWith("$")) {
+                if (trimmed.startsWith("\$")) {
                     val instruction = parseInstruction(trimmed)
                     if (instruction != null) {
                         if (inThen) {
@@ -342,7 +343,7 @@ object PpeScriptParserEnhanced {
                 } else if (trimmed.startsWith("-")) {
                     // YAML list item
                     val itemContent = trimmed.substring(1).trim()
-                    if (itemContent.startsWith("$")) {
+                    if (itemContent.startsWith("\$")) {
                         val instruction = parseInstruction(itemContent)
                         if (instruction != null) {
                             if (inThen) {
@@ -401,14 +402,14 @@ object PpeScriptParserEnhanced {
             }
             
             if (currentIndent > indentLevel || (currentIndent == indentLevel && inDo)) {
-                if (trimmed.startsWith("$")) {
+                if (trimmed.startsWith("\$")) {
                     val instruction = parseInstruction(trimmed)
                     if (instruction != null && inDo) {
                         doBlock.add(instruction)
                     }
                 } else if (trimmed.startsWith("-")) {
                     val itemContent = trimmed.substring(1).trim()
-                    if (itemContent.startsWith("$")) {
+                    if (itemContent.startsWith("\$")) {
                         val instruction = parseInstruction(itemContent)
                         if (instruction != null && inDo) {
                             doBlock.add(instruction)
@@ -465,7 +466,7 @@ object PpeScriptParserEnhanced {
             }
             
             // Check for case pattern
-            if (trimmed.contains(":") && !trimmed.startsWith("$")) {
+            if (trimmed.contains(":") && !trimmed.startsWith("\$")) {
                 // Save previous case
                 currentCase?.let { cases[it] = currentInstructions }
                 currentCase = trimmed.substringBefore(":").trim()
@@ -476,14 +477,14 @@ object PpeScriptParserEnhanced {
             }
             
             if (currentIndent > indentLevel && currentCase != null) {
-                if (trimmed.startsWith("$")) {
+                if (trimmed.startsWith("\$")) {
                     val instruction = parseInstruction(trimmed)
                     if (instruction != null) {
                         currentInstructions.add(instruction)
                     }
                 } else if (trimmed.startsWith("-")) {
                     val itemContent = trimmed.substring(1).trim()
-                    if (itemContent.startsWith("$")) {
+                    if (itemContent.startsWith("\$")) {
                         val instruction = parseInstruction(itemContent)
                         if (instruction != null) {
                             currentInstructions.add(instruction)
