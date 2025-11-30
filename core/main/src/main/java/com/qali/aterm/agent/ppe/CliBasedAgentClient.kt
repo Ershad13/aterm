@@ -35,22 +35,35 @@ class CliBasedAgentClient(
         onToolResult: (String, Map<String, Any>) -> Unit,
         scriptPath: String? = null
     ): Flow<AgentEvent> = flow {
+        val startTime = System.currentTimeMillis()
+        var eventCount = 0
+        var lastEventTime = startTime
+        var toolCallCount = 0
+        var toolResultCount = 0
+        var chunkCount = 0
+        
         try {
+            Log.d("CliBasedAgentClient", "Starting sendMessage for: ${userMessage.take(50)}...")
+            
             // Load script (use provided path or default)
             val script = when {
                 scriptPath != null -> {
                     val scriptFile = File(scriptPath)
                     if (scriptFile.exists()) {
+                        Log.d("CliBasedAgentClient", "Loading script from: $scriptPath")
                         PpeScriptLoader.loadScript(scriptFile)
                     } else {
+                        Log.d("CliBasedAgentClient", "Script file not found, using inline default")
                         createInlineDefaultScript(userMessage)
                     }
                 }
                 defaultScriptPath != null -> {
                     val scriptFile = File(defaultScriptPath!!)
                     if (scriptFile.exists()) {
+                        Log.d("CliBasedAgentClient", "Loading default script from: $defaultScriptPath")
                         PpeScriptLoader.loadScript(scriptFile)
                     } else {
+                        Log.d("CliBasedAgentClient", "Default script file not found, using inline default")
                         createInlineDefaultScript(userMessage)
                     }
                 }
@@ -58,8 +71,10 @@ class CliBasedAgentClient(
                     // Try to find default script in workspace
                     val defaultScript = File(workspaceRoot, "agent-scripts/default.ai.yaml")
                     if (defaultScript.exists()) {
+                        Log.d("CliBasedAgentClient", "Loading workspace script from: ${defaultScript.absolutePath}")
                         PpeScriptLoader.loadScript(defaultScript)
                     } else {
+                        Log.d("CliBasedAgentClient", "No script file found, using inline default")
                         // Use inline default script
                         createInlineDefaultScript(userMessage)
                     }
@@ -72,53 +87,92 @@ class CliBasedAgentClient(
                 "content" to userMessage
             )
             
-            // Track events during execution
-            val eventQueue = mutableListOf<AgentEvent>()
+            Log.d("CliBasedAgentClient", "Starting script execution")
             
-            // Execute script and collect results
+            // Execute script and emit events in real-time (not queued)
             executionEngine.executeScript(
                 script = script,
                 inputParams = inputParams,
                 onChunk = { chunk ->
+                    val now = System.currentTimeMillis()
+                    lastEventTime = now
+                    chunkCount++
+                    eventCount++
+                    Log.d("CliBasedAgentClient", "Chunk received (count: $chunkCount, size: ${chunk.length}, time since start: ${now - startTime}ms)")
                     onChunk(chunk)
-                    eventQueue.add(AgentEvent.Chunk(chunk))
+                    // Emit immediately instead of queuing
+                    emit(AgentEvent.Chunk(chunk))
                 },
                 onToolCall = { functionCall ->
+                    val now = System.currentTimeMillis()
+                    lastEventTime = now
+                    toolCallCount++
+                    eventCount++
+                    Log.d("CliBasedAgentClient", "Tool call received (count: $toolCallCount, tool: ${functionCall.name}, time since start: ${now - startTime}ms)")
                     onToolCall(functionCall)
-                    eventQueue.add(AgentEvent.ToolCall(functionCall))
+                    // Emit immediately instead of queuing
+                    emit(AgentEvent.ToolCall(functionCall))
                 },
                 onToolResult = { toolName, args ->
+                    val now = System.currentTimeMillis()
+                    lastEventTime = now
+                    toolResultCount++
+                    eventCount++
+                    Log.d("CliBasedAgentClient", "Tool result callback (count: $toolResultCount, tool: $toolName, time since start: ${now - startTime}ms)")
                     onToolResult(toolName, args)
                     
                     // Get tool result from execution engine (FIFO queue)
                     val toolResult = executionEngine.getNextToolResult(toolName)
                     if (toolResult != null) {
-                        // Emit tool result - AgentScreen will extract file diffs from this
-                        eventQueue.add(AgentEvent.ToolResult(toolName, toolResult))
+                        Log.d("CliBasedAgentClient", "Emitting tool result for: $toolName")
+                        // Emit tool result immediately - AgentScreen will extract file diffs from this
+                        emit(AgentEvent.ToolResult(toolName, toolResult))
+                    } else {
+                        Log.w("CliBasedAgentClient", "Tool result not found in queue for: $toolName")
                     }
                 }
             ).collect { result ->
-                // Emit all queued events
-                eventQueue.forEach { event ->
-                    emit(event)
-                }
-                eventQueue.clear()
+                val now = System.currentTimeMillis()
+                val totalTime = now - startTime
+                val timeSinceLastEvent = now - lastEventTime
+                
+                Log.d("CliBasedAgentClient", "Execution result received (success: ${result.success}, total time: ${totalTime}ms, time since last event: ${timeSinceLastEvent}ms)")
+                Log.d("CliBasedAgentClient", "Event summary - Total: $eventCount, Chunks: $chunkCount, ToolCalls: $toolCallCount, ToolResults: $toolResultCount")
                 
                 if (result.success) {
                     // Emit final result if any
                     if (result.finalResult.isNotEmpty()) {
+                        Log.d("CliBasedAgentClient", "Emitting final result (length: ${result.finalResult.length})")
                         emit(AgentEvent.Chunk(result.finalResult))
                         onChunk(result.finalResult)
+                    } else {
+                        Log.d("CliBasedAgentClient", "No final result to emit")
                     }
+                    Log.d("CliBasedAgentClient", "Emitting Done event")
                     emit(AgentEvent.Done)
                 } else {
-                    emit(AgentEvent.Error(result.error ?: "Script execution failed"))
+                    val errorMsg = result.error ?: "Script execution failed"
+                    Log.e("CliBasedAgentClient", "Script execution failed: $errorMsg")
+                    emit(AgentEvent.Error(errorMsg))
                 }
+                
+                Log.d("CliBasedAgentClient", "Script execution completed successfully (total time: ${totalTime}ms)")
             }
             
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            val totalTime = System.currentTimeMillis() - startTime
+            val timeSinceLastEvent = System.currentTimeMillis() - lastEventTime
+            Log.w("CliBasedAgentClient", "Script execution cancelled (total time: ${totalTime}ms, time since last event: ${timeSinceLastEvent}ms, events: $eventCount)")
+            Log.w("CliBasedAgentClient", "Cancellation details - Chunks: $chunkCount, ToolCalls: $toolCallCount, ToolResults: $toolResultCount")
+            throw e // Re-throw cancellation
         } catch (e: Exception) {
-            Log.e("CliBasedAgentClient", "Error executing script", e)
-            emit(AgentEvent.Error(e.message ?: "Unknown error"))
+            val totalTime = System.currentTimeMillis() - startTime
+            val timeSinceLastEvent = System.currentTimeMillis() - lastEventTime
+            Log.e("CliBasedAgentClient", "Error executing script (total time: ${totalTime}ms, time since last event: ${timeSinceLastEvent}ms)", e)
+            Log.e("CliBasedAgentClient", "Error details - Events: $eventCount, Chunks: $chunkCount, ToolCalls: $toolCallCount, ToolResults: $toolResultCount")
+            Log.e("CliBasedAgentClient", "Exception type: ${e.javaClass.simpleName}, message: ${e.message}")
+            e.printStackTrace()
+            emit(AgentEvent.Error(e.message ?: "Unknown error: ${e.javaClass.simpleName}"))
         }
     }
     

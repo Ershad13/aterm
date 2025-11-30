@@ -31,7 +31,15 @@ class PpeExecutionEngine(
         onToolCall: (FunctionCall) -> Unit = {},
         onToolResult: (String, Map<String, Any>) -> Unit = { _, _ -> }
     ): Flow<PpeExecutionResult> = flow {
+        val executionStartTime = System.currentTimeMillis()
+        var lastActivityTime = executionStartTime
+        var turnCount = 0
+        var aiCallCount = 0
+        var toolExecutionCount = 0
+        
         try {
+            Log.d("PpeExecutionEngine", "Starting script execution (turns: ${script.turns.size})")
+            
             // Merge script parameters with input params (input takes precedence)
             val variables = mutableMapOf<String, Any>().apply {
                 putAll(script.parameters)
@@ -44,7 +52,10 @@ class PpeExecutionEngine(
             
             // Execute each turn in sequence
             for (turnIndex in script.turns.indices) {
+                turnCount++
+                lastActivityTime = System.currentTimeMillis()
                 val turn = script.turns[turnIndex]
+                Log.d("PpeExecutionEngine", "Executing turn $turnCount/${script.turns.size} (messages: ${turn.messages.size}, instructions: ${turn.instructions.size})")
                 
                 // Process messages in this turn
                 val turnMessages = mutableListOf<Content>()
@@ -62,6 +73,10 @@ class PpeExecutionEngine(
                     // Check if message has AI placeholder
                     if (message.hasAiPlaceholder) {
                         hasAiPlaceholderInTurn = true
+                        aiCallCount++
+                        lastActivityTime = System.currentTimeMillis()
+                        val timeSinceStart = lastActivityTime - executionStartTime
+                        Log.d("PpeExecutionEngine", "Executing AI placeholder call #$aiCallCount (turn $turnCount, time: ${timeSinceStart}ms)")
                         // Execute AI call - include current turn's messages processed so far
                         val aiResponse = executeAiPlaceholder(
                             message,
@@ -72,6 +87,8 @@ class PpeExecutionEngine(
                             onToolCall,
                             onToolResult
                         )
+                        val aiResponseTime = System.currentTimeMillis()
+                        Log.d("PpeExecutionEngine", "AI call #$aiCallCount completed (response length: ${aiResponse.text.length}, function calls: ${aiResponse.functionCalls.size}, time: ${aiResponseTime - lastActivityTime}ms)")
                         
                         // Store AI response in variable
                         val varName = message.aiPlaceholderVar ?: "LatestResult"
@@ -90,11 +107,19 @@ class PpeExecutionEngine(
                         
                         // Handle function calls from AI response
                         if (aiResponse.functionCalls.isNotEmpty()) {
-                            for (functionCall in aiResponse.functionCalls) {
+                            Log.d("PpeExecutionEngine", "Processing ${aiResponse.functionCalls.size} function calls from AI response")
+                            for (functionCallIndex in aiResponse.functionCalls.indices) {
+                                val functionCall = aiResponse.functionCalls[functionCallIndex]
+                                toolExecutionCount++
+                                lastActivityTime = System.currentTimeMillis()
+                                Log.d("PpeExecutionEngine", "Executing tool #$toolExecutionCount: ${functionCall.name} (call ${functionCallIndex + 1}/${aiResponse.functionCalls.size})")
                                 onToolCall(functionCall)
                                 
                                 // Execute tool
+                                val toolStartTime = System.currentTimeMillis()
                                 val toolResult = executeTool(functionCall, onToolResult)
+                                val toolExecutionTime = System.currentTimeMillis() - toolStartTime
+                                Log.d("PpeExecutionEngine", "Tool #$toolExecutionCount (${functionCall.name}) completed (time: ${toolExecutionTime}ms, error: ${toolResult.error != null})")
                                 
                                 // Add tool result to chat history
                                 turnMessages.add(
@@ -419,6 +444,13 @@ class PpeExecutionEngine(
                 ?: currentVariables["LatestResult"]?.toString() 
                 ?: ""
             
+            val totalExecutionTime = System.currentTimeMillis() - executionStartTime
+            val timeSinceLastActivity = System.currentTimeMillis() - lastActivityTime
+            Log.d("PpeExecutionEngine", "Script execution completed successfully")
+            Log.d("PpeExecutionEngine", "Execution summary - Total time: ${totalExecutionTime}ms, Time since last activity: ${timeSinceLastActivity}ms")
+            Log.d("PpeExecutionEngine", "Execution stats - Turns: $turnCount, AI calls: $aiCallCount, Tool executions: $toolExecutionCount")
+            Log.d("PpeExecutionEngine", "Final result length: ${finalResult.length}")
+            
             emit(PpeExecutionResult(
                 success = true,
                 finalResult = finalResult,
@@ -427,7 +459,13 @@ class PpeExecutionEngine(
             ))
             
         } catch (e: Exception) {
+            val totalExecutionTime = System.currentTimeMillis() - executionStartTime
+            val timeSinceLastActivity = System.currentTimeMillis() - lastActivityTime
             Log.e("PpeExecutionEngine", "Script execution failed", e)
+            Log.e("PpeExecutionEngine", "Error details - Total time: ${totalExecutionTime}ms, Time since last activity: ${timeSinceLastActivity}ms")
+            Log.e("PpeExecutionEngine", "Error stats - Turns: $turnCount, AI calls: $aiCallCount, Tool executions: $toolExecutionCount")
+            Log.e("PpeExecutionEngine", "Exception type: ${e.javaClass.simpleName}, message: ${e.message}")
+            e.printStackTrace()
             emit(PpeExecutionResult(
                 success = false,
                 finalResult = "",

@@ -1974,7 +1974,45 @@ fun AgentScreen(
                                     // Send to Gemini API with tools
                                     // Launch on IO dispatcher to avoid blocking main thread
                                     val job = scope.launch(Dispatchers.IO) {
+                                        val messageStartTime = System.currentTimeMillis()
+                                        
+                                        // Shared state for timeout monitoring
+                                        data class ExecutionState(
+                                            var lastEventTime: Long = messageStartTime,
+                                            var eventCount: Int = 0,
+                                            var chunkCount: Int = 0,
+                                            var toolCallCount: Int = 0,
+                                            var toolResultCount: Int = 0,
+                                            var doneEventReceived: Boolean = false
+                                        )
+                                        val execState = ExecutionState()
+                                        
                                         android.util.Log.d("AgentScreen", "Starting message send for: ${prompt.take(50)}...")
+                                        
+                                        // Start timeout monitoring coroutine
+                                        val timeoutMonitor = scope.launch(Dispatchers.IO) {
+                                            val timeoutMs = 300000L // 5 minutes
+                                            val warningIntervalMs = 30000L // Warn every 30 seconds
+                                            var lastWarningTime = messageStartTime
+                                            
+                                            while (!execState.doneEventReceived && isActive) {
+                                                delay(5000) // Check every 5 seconds
+                                                val now = System.currentTimeMillis()
+                                                val timeSinceStart = now - messageStartTime
+                                                val timeSinceLastEvent = now - execState.lastEventTime
+                                                
+                                                if (timeSinceStart > timeoutMs) {
+                                                    android.util.Log.e("AgentScreen", "TIMEOUT: Agent execution exceeded ${timeoutMs}ms (events: ${execState.eventCount}, last event: ${timeSinceLastEvent}ms ago)")
+                                                    android.util.Log.e("AgentScreen", "Timeout details - Chunks: ${execState.chunkCount}, ToolCalls: ${execState.toolCallCount}, ToolResults: ${execState.toolResultCount}")
+                                                    break
+                                                }
+                                                
+                                                if (timeSinceLastEvent > warningIntervalMs && now - lastWarningTime > warningIntervalMs) {
+                                                    android.util.Log.w("AgentScreen", "WARNING: No events for ${timeSinceLastEvent}ms (total time: ${timeSinceStart}ms, events: ${execState.eventCount})")
+                                                    lastWarningTime = now
+                                                }
+                                            }
+                                        }
                                         
                                         // Update UI state on main dispatcher
                                         withContext(Dispatchers.Main) {
@@ -2084,13 +2122,21 @@ fun AgentScreen(
                                                 android.util.Log.d("AgentScreen", "About to start stream.collect")
                                                 // Collect on IO dispatcher to avoid blocking main thread
                                                 stream.collect { event ->
-                                                    android.util.Log.d("AgentScreen", "Stream collect lambda called")
+                                                    val eventTime = System.currentTimeMillis()
+                                                    val timeSinceStart = eventTime - messageStartTime
+                                                    val timeSinceLastEvent = eventTime - execState.lastEventTime
+                                                    execState.lastEventTime = eventTime
+                                                    execState.eventCount++
+                                                    
+                                                    android.util.Log.d("AgentScreen", "Stream collect lambda called (event #${execState.eventCount}, type: ${event.javaClass.simpleName}, time since start: ${timeSinceStart}ms, time since last: ${timeSinceLastEvent}ms)")
                                                     
                                                     try {
                                                         android.util.Log.d("AgentScreen", "Received stream event: ${event.javaClass.simpleName}")
                                                         // All state updates must happen on Main dispatcher to avoid Compose snapshot lock issues
                                                         when (event) {
                                                             is AgentEvent.Chunk -> {
+                                                                execState.chunkCount++
+                                                                android.util.Log.d("AgentScreen", "Processing Chunk event (count: ${execState.chunkCount}, size: ${event.text.length})")
                                                                 withContext(Dispatchers.Main) {
                                                                     currentResponseText += event.text
                                                                     val currentMessages = if (messages.isNotEmpty()) messages.dropLast(1) else messages
@@ -2102,6 +2148,8 @@ fun AgentScreen(
                                                                 }
                                                             }
                                                             is AgentEvent.ToolCall -> {
+                                                                execState.toolCallCount++
+                                                                android.util.Log.d("AgentScreen", "Processing ToolCall event (count: ${execState.toolCallCount}, tool: ${event.functionCall.name})")
                                                                 // Store tool call args in queue for file diff extraction
                                                                 if (event.functionCall.name == "edit" || event.functionCall.name == "write_file") {
                                                                     toolCallQueue.add(Pair(event.functionCall.name, event.functionCall.args))
@@ -2116,6 +2164,8 @@ fun AgentScreen(
                                                                 }
                                                             }
                                                             is AgentEvent.ToolResult -> {
+                                                                execState.toolResultCount++
+                                                                android.util.Log.d("AgentScreen", "Processing ToolResult event (count: ${execState.toolResultCount}, tool: ${event.toolName})")
                                                                 // Try to extract file diff from tool result
                                                                 // Find matching tool call from queue
                                                                 val toolCallIndex = toolCallQueue.indexOfFirst { it.first == event.toolName }
@@ -2138,6 +2188,7 @@ fun AgentScreen(
                                                                 }
                                                             }
                                                             is AgentEvent.Error -> {
+                                                                android.util.Log.e("AgentScreen", "Processing Error event: ${event.message}")
                                                                 withContext(Dispatchers.Main) {
                                                                     val errorMessage = AgentMessage(
                                                                         text = "❌ Error: ${event.message}",
@@ -2148,6 +2199,7 @@ fun AgentScreen(
                                                                 }
                                                             }
                                                             is AgentEvent.KeysExhausted -> {
+                                                                android.util.Log.w("AgentScreen", "Processing KeysExhausted event")
                                                                 withContext(Dispatchers.Main) {
                                                                     lastFailedPrompt = prompt
                                                                     showKeysExhaustedDialog = true
@@ -2160,7 +2212,11 @@ fun AgentScreen(
                                                                 }
                                                             }
                                                             is AgentEvent.Done -> {
-                                                                android.util.Log.d("AgentScreen", "Stream completed (Done event)")
+                                                                execState.doneEventReceived = true
+                                                                timeoutMonitor.cancel()
+                                                                val totalTime = System.currentTimeMillis() - messageStartTime
+                                                                android.util.Log.d("AgentScreen", "Stream completed (Done event) - Total time: ${totalTime}ms")
+                                                                android.util.Log.d("AgentScreen", "Event summary - Total: ${execState.eventCount}, Chunks: ${execState.chunkCount}, ToolCalls: ${execState.toolCallCount}, ToolResults: ${execState.toolResultCount}")
                                                                 withContext(Dispatchers.Main) {
                                                                     // Final cleanup: ensure loading message is replaced with final response if there's any text
                                                                     if (currentResponseText.isNotEmpty() && messages.isNotEmpty()) {
@@ -2186,6 +2242,8 @@ fun AgentScreen(
                                                         }
                                                     } catch (e: Exception) {
                                                         android.util.Log.e("AgentScreen", "Error processing stream event", e)
+                                                        android.util.Log.e("AgentScreen", "Event processing error - Event type: ${event.javaClass.simpleName}, Event count: ${execState.eventCount}")
+                                                        e.printStackTrace()
                                                         // Emit error message but don't crash
                                                         withContext(Dispatchers.Main) {
                                                             val errorMessage = AgentMessage(
@@ -2198,7 +2256,12 @@ fun AgentScreen(
                                                     }
                                                 } // closes collect lambda
                                             } catch (e: kotlinx.coroutines.CancellationException) {
+                                                timeoutMonitor.cancel()
+                                                val totalTime = System.currentTimeMillis() - messageStartTime
+                                                val timeSinceLastEvent = System.currentTimeMillis() - execState.lastEventTime
                                                 android.util.Log.d("AgentScreen", "Stream collection cancelled: ${e.message}")
+                                                android.util.Log.d("AgentScreen", "Cancellation details - Total time: ${totalTime}ms, Time since last event: ${timeSinceLastEvent}ms")
+                                                android.util.Log.d("AgentScreen", "Cancellation event summary - Total: ${execState.eventCount}, Chunks: ${execState.chunkCount}, ToolCalls: ${execState.toolCallCount}, ToolResults: ${execState.toolResultCount}, Done received: ${execState.doneEventReceived}")
                                                 android.util.Log.d("AgentScreen", "Cancellation stack trace", e)
                                                 // Clean up loading message for cancellations on Main dispatcher
                                                 withContext(Dispatchers.Main) {
@@ -2208,11 +2271,27 @@ fun AgentScreen(
                                                 }
                                                 throw e
                                             } catch (e: Exception) {
+                                                timeoutMonitor.cancel()
+                                                val totalTime = System.currentTimeMillis() - messageStartTime
+                                                val timeSinceLastEvent = System.currentTimeMillis() - execState.lastEventTime
                                                 android.util.Log.e("AgentScreen", "Error in stream collection", e)
+                                                android.util.Log.e("AgentScreen", "Stream collection error details - Total time: ${totalTime}ms, Time since last event: ${timeSinceLastEvent}ms")
+                                                android.util.Log.e("AgentScreen", "Stream collection error event summary - Total: ${execState.eventCount}, Chunks: ${execState.chunkCount}, ToolCalls: ${execState.toolCallCount}, ToolResults: ${execState.toolResultCount}, Done received: ${execState.doneEventReceived}")
+                                                android.util.Log.e("AgentScreen", "Exception type: ${e.javaClass.simpleName}, message: ${e.message}")
+                                                e.printStackTrace()
                                                 // Fall through to outer catch block
                                                 throw e
                                             }
-                                            android.util.Log.d("AgentScreen", "Finished collecting stream events")
+                                            timeoutMonitor.cancel()
+                                            val totalTime = System.currentTimeMillis() - messageStartTime
+                                            android.util.Log.d("AgentScreen", "Finished collecting stream events - Total time: ${totalTime}ms")
+                                            android.util.Log.d("AgentScreen", "Final event summary - Total: ${execState.eventCount}, Chunks: ${execState.chunkCount}, ToolCalls: ${execState.toolCallCount}, ToolResults: ${execState.toolResultCount}, Done received: ${execState.doneEventReceived}")
+                                            
+                                            // Check if Done event was received
+                                            if (!execState.doneEventReceived) {
+                                                android.util.Log.w("AgentScreen", "WARNING: Stream collection finished but Done event was never received!")
+                                                android.util.Log.w("AgentScreen", "This may indicate the agent stopped prematurely")
+                                            }
                                             
                                             // Final safety check: ensure loading message is cleaned up on Main dispatcher
                                             try {
@@ -2251,7 +2330,9 @@ fun AgentScreen(
                                                 messages = if (messages.isNotEmpty()) messages.dropLast(1) + exhaustedMessage else messages + exhaustedMessage
                                             }
                                         } catch (e: kotlinx.coroutines.CancellationException) {
+                                            val totalTime = System.currentTimeMillis() - messageStartTime
                                             android.util.Log.d("AgentScreen", "Message send cancelled: ${e.message}")
+                                            android.util.Log.d("AgentScreen", "Cancellation details - Total time: ${totalTime}ms, Events: ${execState.eventCount}")
                                             android.util.Log.d("AgentScreen", "Cancellation cause", e)
                                             // Clean up loading message on Main dispatcher
                                             withContext(Dispatchers.Main) {
@@ -2261,9 +2342,12 @@ fun AgentScreen(
                                                 currentAgentJob = null
                                             }
                                         } catch (e: Exception) {
+                                            val totalTime = System.currentTimeMillis() - messageStartTime
                                             android.util.Log.e("AgentScreen", "Exception caught in message send", e)
                                             android.util.Log.e("AgentScreen", "Exception type: ${e.javaClass.simpleName}")
                                             android.util.Log.e("AgentScreen", "Exception message: ${e.message}")
+                                            android.util.Log.e("AgentScreen", "Exception details - Total time: ${totalTime}ms, Events: ${execState.eventCount}, Chunks: ${execState.chunkCount}, ToolCalls: ${execState.toolCallCount}, ToolResults: ${execState.toolResultCount}")
+                                            e.printStackTrace()
                                             // Update UI state on Main dispatcher
                                             withContext(Dispatchers.Main) {
                                                 val errorMessage = AgentMessage(
