@@ -3900,7 +3900,7 @@ exports.$functionName = (req, res, next) => {
         if (command.checkCommand != null) {
             // Try to get from cache first
             val dependencyName = command.description.lowercase().split(" ").firstOrNull() ?: "tool"
-            val cachedAvailable = com.qali.aterm.gemini.utils.DependencyCache.isAvailable(
+            val cachedAvailable = com.qali.aterm.agent.utils.DependencyCache.isAvailable(
                 dependency = dependencyName,
                 checkCommand = command.checkCommand!!,
                 workspaceRoot = workspaceRoot
@@ -3939,7 +3939,7 @@ exports.$functionName = (req, res, next) => {
                     onToolResult("shell", checkCall.args)
                     
                     // Cache the result
-                    com.qali.aterm.gemini.utils.DependencyCache.cacheResult(
+                    com.qali.aterm.agent.utils.DependencyCache.cacheResult(
                         dependency = dependencyName,
                         available = checkResult.error == null,
                         checkCommand = command.checkCommand!!,
@@ -3948,7 +3948,7 @@ exports.$functionName = (req, res, next) => {
                 } catch (e: Exception) {
                     android.util.Log.w("AgentClient", "Check command failed: ${e.message}")
                     // Cache as unavailable
-                    com.qali.aterm.gemini.utils.DependencyCache.cacheResult(
+                    com.qali.aterm.agent.utils.DependencyCache.cacheResult(
                         dependency = dependencyName,
                         available = false,
                         checkCommand = command.checkCommand!!,
@@ -4000,7 +4000,7 @@ exports.$functionName = (req, res, next) => {
                             fallbackSuccess = true
                             
                             // Cache successful fallback
-                            com.qali.aterm.gemini.utils.DependencyCache.cacheResult(
+                            com.qali.aterm.agent.utils.DependencyCache.cacheResult(
                                 dependency = dependencyName,
                                 available = true,
                                 checkCommand = command.checkCommand!!,
@@ -9921,13 +9921,4 @@ exports.$functionName = (req, res, next) => {
             throw e
         }
     }
-}
-
-sealed class AgentEvent {
-    data class Chunk(val text: String) : AgentEvent()
-    data class ToolCall(val functionCall: FunctionCall) : AgentEvent()
-    data class ToolResult(val toolName: String, val result: com.qali.aterm.gemini.tools.ToolResult) : AgentEvent()
-    data class Error(val message: String) : AgentEvent()
-    data class KeysExhausted(val message: String) : AgentEvent()
-    object Done : AgentEvent()
 }

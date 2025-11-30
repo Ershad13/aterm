@@ -257,16 +257,16 @@ object ProviderAdapter {
         providerType: ApiProviderType,
         model: String,
         apiKey: String
-    ): Triple<String, Map<String, String>> {
+    ): Pair<String, Map<String, String>> {
         return when (providerType) {
             ApiProviderType.GOOGLE -> {
                 val url = "https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent?key=$apiKey"
-                Triple(url, emptyMap())
+                Pair(url, emptyMap())
             }
             ApiProviderType.OPENAI -> {
                 val url = "https://api.openai.com/v1/chat/completions"
                 val headers = mapOf("Authorization" to "Bearer $apiKey")
-                Triple(url, headers)
+                Pair(url, headers)
             }
             ApiProviderType.ANTHROPIC -> {
                 val url = "https://api.anthropic.com/v1/messages"
@@ -274,7 +274,7 @@ object ProviderAdapter {
                     "x-api-key" to apiKey,
                     "anthropic-version" to "2023-06-01"
                 )
-                Triple(url, headers)
+                Pair(url, headers)
             }
             ApiProviderType.CUSTOM -> {
                 // Custom provider - check if it's Ollama
@@ -286,16 +286,16 @@ object ProviderAdapter {
                         else -> "http://localhost:11434"
                     }
                     val url = "$baseUrl/api/chat"
-                    Triple(url, emptyMap())
+                    Pair(url, emptyMap())
                 } else {
                     // Generic custom API - assume it's a full URL and Gemini-compatible format
-                    Triple(apiKey, emptyMap())
+                    Pair(apiKey, emptyMap())
                 }
             }
             else -> {
                 // For other providers, use Gemini-compatible endpoint for now
                 val url = "https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent?key=$apiKey"
-                Triple(url, emptyMap())
+                Pair(url, emptyMap())
             }
         }
     }

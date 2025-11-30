@@ -1077,7 +1077,7 @@ fun DebugDialog(
                 
                 // Get system info from SystemInfoService
                 try {
-                    val sysInfo = com.qali.aterm.gemini.SystemInfoService.detectSystemInfo(workspaceRoot)
+                    val sysInfo = com.qali.aterm.agent.SystemInfoService.detectSystemInfo(workspaceRoot)
                     systemInfoBuilder.appendLine()
                     systemInfoBuilder.appendLine("OS: ${sysInfo.os}")
                     systemInfoBuilder.appendLine("OS Version: ${sysInfo.osVersion ?: "Unknown"}")
@@ -1087,8 +1087,8 @@ fun DebugDialog(
                     
                     if (sysInfo.packageManagerCommands.isNotEmpty()) {
                         systemInfoBuilder.appendLine("Package Manager Commands:")
-                        sysInfo.packageManagerCommands.forEach { (key, value) ->
-                            systemInfoBuilder.appendLine("  - $key: $value")
+                        sysInfo.packageManagerCommands.forEach { entry ->
+                            systemInfoBuilder.appendLine("  - ${entry.key}: ${entry.value}")
                         }
                     }
                 } catch (e: Exception) {
@@ -1359,7 +1359,7 @@ fun DebugDialog(
                                 
                                 // Get system info
                                 try {
-                                    val sysInfo = com.qali.aterm.gemini.SystemInfoService.detectSystemInfo(workspaceRoot)
+                                    val sysInfo = com.qali.aterm.agent.SystemInfoService.detectSystemInfo(workspaceRoot)
                                     systemInfoBuilder.appendLine()
                                     systemInfoBuilder.appendLine("OS: ${sysInfo.os}")
                                     systemInfoBuilder.appendLine("OS Version: ${sysInfo.osVersion ?: "Unknown"}")

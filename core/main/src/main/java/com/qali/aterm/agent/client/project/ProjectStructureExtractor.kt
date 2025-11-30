@@ -31,7 +31,7 @@ object ProjectStructureExtractor {
         structure.append("**Files with Code Structure:**\n\n")
         
         for (file in sourceFiles.take(50)) { // Limit to 50 files
-            if (signal?.isAborted() == true) break
+            if (signal?.isCanceled() == true) break
             
             try {
                 val relativePath = file.relativeTo(workspaceDir).path
