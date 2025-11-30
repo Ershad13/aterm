@@ -138,7 +138,6 @@ fun ApiProviderSettings() {
                 }
             }
         }
-    }
     
     // Add Key Dialog
     if (showAddKeyDialog) {
