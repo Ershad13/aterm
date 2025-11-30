@@ -1,0 +1,303 @@
+package com.qali.aterm.agent.utils
+
+import java.io.File
+import android.util.Log
+
+/**
+ * Analyzes code files to extract imports, exports, and build dependency relationships.
+ * Maintains a matrix of file relativeness to ensure code coherence.
+ */
+object CodeDependencyAnalyzer {
+    
+    data class CodeMetadata(
+        val filePath: String,
+        val imports: List<String> = emptyList(),
+        val exports: List<String> = emptyList(),
+        val classes: List<String> = emptyList(),
+        val functions: List<String> = emptyList(),
+        val language: String = "unknown"
+    )
+    
+    data class DependencyMatrix(
+        val files: Map<String, CodeMetadata> = emptyMap(),
+        val dependencies: Map<String, Set<String>> = emptyMap() // file -> set of files it depends on
+    )
+    
+    private val dependencyMatrix = mutableMapOf<String, DependencyMatrix>()
+    private val workspaceMatrices = mutableMapOf<String, MutableMap<String, CodeMetadata>>()
+    
+    /**
+     * Analyzes a code file and extracts important metadata (imports, exports, functions, classes)
+     */
+    fun analyzeFile(filePath: String, content: String, workspaceRoot: String): CodeMetadata {
+        val language = detectLanguage(filePath)
+        val normalizedPath = normalizePath(filePath, workspaceRoot)
+        
+        return when (language) {
+            "javascript", "typescript" -> analyzeJavaScript(content, normalizedPath)
+            "python" -> analyzePython(content, normalizedPath)
+            "java", "kotlin" -> analyzeJavaKotlin(content, normalizedPath)
+            else -> CodeMetadata(filePath = normalizedPath, language = language)
+        }
+    }
+    
+    /**
+     * Updates the dependency matrix for a workspace
+     */
+    fun updateDependencyMatrix(workspaceRoot: String, metadata: CodeMetadata) {
+        val normalizedRoot = File(workspaceRoot).canonicalPath
+        val matrix = workspaceMatrices.getOrPut(normalizedRoot) { mutableMapOf() }
+        matrix[metadata.filePath] = metadata
+        
+        // Rebuild dependencies
+        val dependencies = mutableMapOf<String, MutableSet<String>>()
+        matrix.values.forEach { fileMeta ->
+            val deps = mutableSetOf<String>()
+            fileMeta.imports.forEach { importPath ->
+                // Find which file this import refers to
+                val targetFile = findFileForImport(importPath, fileMeta.filePath, matrix.keys)
+                if (targetFile != null) {
+                    deps.add(targetFile)
+                }
+            }
+            dependencies[fileMeta.filePath] = deps
+        }
+        
+        dependencyMatrix[normalizedRoot] = DependencyMatrix(
+            files = matrix.toMap(),
+            dependencies = dependencies.mapValues { it.value.toSet() }
+        )
+    }
+    
+    /**
+     * Gets the dependency matrix for a workspace
+     */
+    fun getDependencyMatrix(workspaceRoot: String): DependencyMatrix {
+        val normalizedRoot = File(workspaceRoot).canonicalPath
+        return dependencyMatrix[normalizedRoot] ?: DependencyMatrix()
+    }
+    
+    /**
+     * Gets code metadata summary for chat history (important chunks)
+     */
+    fun getCodeSummaryForHistory(metadata: CodeMetadata): String {
+        val parts = mutableListOf<String>()
+        
+        if (metadata.imports.isNotEmpty()) {
+            parts.add("Imports: ${metadata.imports.joinToString(", ")}")
+        }
+        if (metadata.exports.isNotEmpty()) {
+            parts.add("Exports: ${metadata.exports.joinToString(", ")}")
+        }
+        if (metadata.classes.isNotEmpty()) {
+            parts.add("Classes: ${metadata.classes.joinToString(", ")}")
+        }
+        if (metadata.functions.isNotEmpty()) {
+            parts.add("Functions: ${metadata.functions.take(10).joinToString(", ")}${if (metadata.functions.size > 10) "..." else ""}")
+        }
+        
+        return if (parts.isNotEmpty()) {
+            "[Code Structure: ${metadata.filePath}]\n${parts.joinToString("\n")}"
+        } else {
+            ""
+        }
+    }
+    
+    /**
+     * Gets relativeness summary - which files are related to the given file
+     */
+    fun getRelativenessSummary(filePath: String, workspaceRoot: String): String {
+        val matrix = getDependencyMatrix(workspaceRoot)
+        val normalizedPath = normalizePath(filePath, workspaceRoot)
+        
+        val relatedFiles = mutableSetOf<String>()
+        
+        // Files that this file depends on
+        matrix.dependencies[normalizedPath]?.forEach { relatedFiles.add(it) }
+        
+        // Files that depend on this file
+        matrix.dependencies.forEach { (depFile, deps) ->
+            if (deps.contains(normalizedPath)) {
+                relatedFiles.add(depFile)
+            }
+        }
+        
+        if (relatedFiles.isEmpty()) {
+            return ""
+        }
+        
+        return "[File Relativeness: $normalizedPath]\nRelated files: ${relatedFiles.joinToString(", ")}"
+    }
+    
+    private fun detectLanguage(filePath: String): String {
+        return when {
+            filePath.endsWith(".js") || filePath.endsWith(".mjs") -> "javascript"
+            filePath.endsWith(".ts") || filePath.endsWith(".tsx") -> "typescript"
+            filePath.endsWith(".py") -> "python"
+            filePath.endsWith(".java") -> "java"
+            filePath.endsWith(".kt") -> "kotlin"
+            else -> "unknown"
+        }
+    }
+    
+    private fun analyzeJavaScript(content: String, filePath: String): CodeMetadata {
+        val imports = mutableListOf<String>()
+        val exports = mutableListOf<String>()
+        val functions = mutableListOf<String>()
+        val classes = mutableListOf<String>()
+        
+        val lines = content.lines()
+        
+        for (line in lines) {
+            val trimmed = line.trim()
+            
+            // Extract imports: import ... from '...' or require('...')
+            when {
+                trimmed.startsWith("import ") && "'" in trimmed -> {
+                    val match = Regex("import\\s+.*?\\s+from\\s+['\"]([^'\"]+)['\"]").find(trimmed)
+                    match?.groupValues?.get(1)?.let { imports.add(it) }
+                }
+                trimmed.startsWith("import ") && trimmed.contains("require") -> {
+                    val match = Regex("require\\(['\"]([^'\"]+)['\"]\\)").find(trimmed)
+                    match?.groupValues?.get(1)?.let { imports.add(it) }
+                }
+                trimmed.contains("require(") -> {
+                    val match = Regex("require\\(['\"]([^'\"]+)['\"]\\)").find(trimmed)
+                    match?.groupValues?.get(1)?.let { imports.add(it) }
+                }
+            }
+            
+            // Extract exports: export ... or module.exports
+            when {
+                trimmed.startsWith("export ") -> {
+                    val match = Regex("export\\s+(?:default\\s+)?(?:function|class|const|let|var)?\\s*([a-zA-Z_$][a-zA-Z0-9_$]*)").find(trimmed)
+                    match?.groupValues?.get(1)?.let { exports.add(it) }
+                }
+                trimmed.contains("module.exports") || trimmed.contains("exports.") -> {
+                    val match = Regex("(?:module\\.)?exports\\.?([a-zA-Z_$][a-zA-Z0-9_$]*)").find(trimmed)
+                    match?.groupValues?.get(1)?.let { if (it.isNotEmpty()) exports.add(it) else exports.add("default") }
+                }
+            }
+            
+            // Extract function declarations
+            Regex("(?:export\\s+)?(?:async\\s+)?function\\s+([a-zA-Z_$][a-zA-Z0-9_$]*)").find(trimmed)?.groupValues?.get(1)?.let { functions.add(it) }
+            Regex("(?:export\\s+)?const\\s+([a-zA-Z_$][a-zA-Z0-9_$]*)\\s*=\\s*(?:async\\s+)?\\(|=>").find(trimmed)?.groupValues?.get(1)?.let { functions.add(it) }
+            
+            // Extract class declarations
+            Regex("(?:export\\s+)?class\\s+([a-zA-Z_$][a-zA-Z0-9_$]*)").find(trimmed)?.groupValues?.get(1)?.let { classes.add(it) }
+        }
+        
+        return CodeMetadata(
+            filePath = filePath,
+            imports = imports.distinct(),
+            exports = exports.distinct(),
+            classes = classes.distinct(),
+            functions = functions.distinct(),
+            language = "javascript"
+        )
+    }
+    
+    private fun analyzePython(content: String, filePath: String): CodeMetadata {
+        val imports = mutableListOf<String>()
+        val exports = mutableListOf<String>()
+        val functions = mutableListOf<String>()
+        val classes = mutableListOf<String>()
+        
+        val lines = content.lines()
+        
+        for (line in lines) {
+            val trimmed = line.trim()
+            
+            // Extract imports: import ... or from ... import ...
+            when {
+                trimmed.startsWith("import ") -> {
+                    val match = Regex("import\\s+([a-zA-Z0-9_.]+)").find(trimmed)
+                    match?.groupValues?.get(1)?.let { imports.add(it) }
+                }
+                trimmed.startsWith("from ") -> {
+                    val match = Regex("from\\s+([a-zA-Z0-9_.]+)\\s+import").find(trimmed)
+                    match?.groupValues?.get(1)?.let { imports.add(it) }
+                }
+            }
+            
+            // Extract function definitions
+            Regex("def\\s+([a-zA-Z_][a-zA-Z0-9_]*)").find(trimmed)?.groupValues?.get(1)?.let { functions.add(it) }
+            
+            // Extract class definitions
+            Regex("class\\s+([a-zA-Z_][a-zA-Z0-9_]*)").find(trimmed)?.groupValues?.get(1)?.let { classes.add(it) }
+        }
+        
+        // Python exports are typically __all__ or what's imported from the module
+        exports.addAll(classes)
+        exports.addAll(functions)
+        
+        return CodeMetadata(
+            filePath = filePath,
+            imports = imports.distinct(),
+            exports = exports.distinct(),
+            classes = classes.distinct(),
+            functions = functions.distinct(),
+            language = "python"
+        )
+    }
+    
+    private fun analyzeJavaKotlin(content: String, filePath: String): CodeMetadata {
+        val imports = mutableListOf<String>()
+        val classes = mutableListOf<String>()
+        val functions = mutableListOf<String>()
+        
+        val lines = content.lines()
+        
+        for (line in lines) {
+            val trimmed = line.trim()
+            
+            // Extract imports
+            Regex("import\\s+(?:static\\s+)?([a-zA-Z0-9_.*]+)").find(trimmed)?.groupValues?.get(1)?.let { imports.add(it) }
+            
+            // Extract class/interface declarations
+            Regex("(?:public\\s+)?(?:abstract\\s+)?(?:final\\s+)?(?:class|interface|enum)\\s+([a-zA-Z_$][a-zA-Z0-9_$]*)").find(trimmed)?.groupValues?.get(1)?.let { classes.add(it) }
+            
+            // Extract function/method declarations
+            Regex("(?:public|private|protected)?\\s*(?:static\\s+)?(?:fun\\s+)?([a-zA-Z_$][a-zA-Z0-9_$]*)\\s*\\(").find(trimmed)?.groupValues?.get(1)?.let { functions.add(it) }
+        }
+        
+        return CodeMetadata(
+            filePath = filePath,
+            imports = imports.distinct(),
+            exports = classes, // In Java/Kotlin, public classes are the exports
+            classes = classes.distinct(),
+            functions = functions.distinct(),
+            language = if (filePath.endsWith(".kt")) "kotlin" else "java"
+        )
+    }
+    
+    private fun normalizePath(filePath: String, workspaceRoot: String): String {
+        return try {
+            val file = File(workspaceRoot, filePath)
+            file.canonicalPath.removePrefix(File(workspaceRoot).canonicalPath + File.separator)
+        } catch (e: Exception) {
+            filePath
+        }
+    }
+    
+    private fun findFileForImport(importPath: String, fromFile: String, availableFiles: Set<String>): String? {
+        // Try to match import path to actual file paths
+        // This is a simplified matching - could be improved with proper module resolution
+        
+        val importName = importPath.replace(".", File.separator)
+        val importNameWithExt = listOf("$importName.js", "$importName.ts", "$importName.py", "$importName/index.js")
+        
+        for (file in availableFiles) {
+            if (file.endsWith(importName) || importNameWithExt.any { file.endsWith(it) }) {
+                return file
+            }
+            // Also check if file name matches
+            val fileName = File(file).nameWithoutExtension
+            if (importPath.endsWith(fileName) || importPath.contains(fileName)) {
+                return file
+            }
+        }
+        
+        return null
+    }
+}

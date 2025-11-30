@@ -5,6 +5,7 @@ import com.qali.aterm.agent.core.FunctionDeclaration
 import com.qali.aterm.agent.core.FunctionParameters
 import com.qali.aterm.agent.core.PropertySchema
 import com.qali.aterm.agent.utils.AutoErrorDetection
+import com.qali.aterm.agent.utils.CodeDependencyAnalyzer
 import java.io.File
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -56,6 +57,31 @@ class WriteFileToolInvocation(
             
             updateOutput?.invoke("File written successfully")
             
+            // Analyze code dependencies and extract important metadata
+            val codeMetadata = try {
+                withContext(Dispatchers.IO) {
+                    CodeDependencyAnalyzer.analyzeFile(
+                        filePath = params.file_path,
+                        content = params.content,
+                        workspaceRoot = workspaceRoot
+                    )
+                }
+            } catch (e: Exception) {
+                android.util.Log.w("WriteFileTool", "Error in code dependency analysis: ${e.message}")
+                null
+            }
+            
+            // Update dependency matrix
+            codeMetadata?.let { metadata ->
+                try {
+                    withContext(Dispatchers.IO) {
+                        CodeDependencyAnalyzer.updateDependencyMatrix(workspaceRoot, metadata)
+                    }
+                } catch (e: Exception) {
+                    android.util.Log.w("WriteFileTool", "Error updating dependency matrix: ${e.message}")
+                }
+            }
+            
             // Automatically detect errors after file creation/modification
             val errorTasks = try {
                 withContext(Dispatchers.IO) {
@@ -69,11 +95,19 @@ class WriteFileToolInvocation(
                 emptyList()
             }
             
+            // Build message with code metadata for chat history
             val baseMessage = "File written successfully: ${params.file_path}"
+            val codeSummary = codeMetadata?.let { 
+                "\n\n" + CodeDependencyAnalyzer.getCodeSummaryForHistory(it)
+            } ?: ""
+            val relativenessSummary = codeMetadata?.let {
+                val rel = CodeDependencyAnalyzer.getRelativenessSummary(params.file_path, workspaceRoot)
+                if (rel.isNotEmpty()) "\n\n$rel" else ""
+            } ?: ""
             val messageWithErrors = if (errorTasks.isNotEmpty()) {
-                baseMessage + AutoErrorDetection.formatErrorDetectionMessage(errorTasks)
+                baseMessage + AutoErrorDetection.formatErrorDetectionMessage(errorTasks) + codeSummary + relativenessSummary
             } else {
-                baseMessage
+                baseMessage + codeSummary + relativenessSummary
             }
             
             ToolResult(

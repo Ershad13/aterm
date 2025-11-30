@@ -4,9 +4,12 @@ import com.rk.libcommons.alpineDir
 import com.qali.aterm.agent.core.FunctionDeclaration
 import com.qali.aterm.agent.core.FunctionParameters
 import com.qali.aterm.agent.core.PropertySchema
+import com.qali.aterm.agent.utils.CodeDependencyAnalyzer
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.*
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 data class LSToolParams(
     val dir_path: String,
@@ -107,10 +110,60 @@ class LSToolInvocation(
                 }
             }
             
-            updateOutput?.invoke(output)
+            // Add dependency matrix information for code files
+            val codeFiles = entries.filter { !it.isDirectory && 
+                (it.name.endsWith(".js") || it.name.endsWith(".ts") || 
+                 it.name.endsWith(".py") || it.name.endsWith(".java") || 
+                 it.name.endsWith(".kt")) }
+            
+            val dependencyInfo = if (codeFiles.isNotEmpty()) {
+                try {
+                    val matrix = withContext(Dispatchers.IO) {
+                        CodeDependencyAnalyzer.getDependencyMatrix(workspaceRoot)
+                    }
+                    if (matrix.files.isNotEmpty()) {
+                        buildString {
+                            appendLine("\n[Code Dependency Matrix]")
+                            codeFiles.forEach { file ->
+                                val relativePath = file.path.removePrefix(workspaceRoot + File.separator)
+                                val metadata = matrix.files[relativePath]
+                                if (metadata != null) {
+                                    appendLine("\nFile: $relativePath")
+                                    if (metadata.imports.isNotEmpty()) {
+                                        appendLine("  Imports: ${metadata.imports.joinToString(", ")}")
+                                    }
+                                    if (metadata.exports.isNotEmpty()) {
+                                        appendLine("  Exports: ${metadata.exports.joinToString(", ")}")
+                                    }
+                                    val deps = matrix.dependencies[relativePath]
+                                    if (deps != null && deps.isNotEmpty()) {
+                                        appendLine("  Depends on: ${deps.joinToString(", ")}")
+                                    }
+                                    // Find files that depend on this one
+                                    val dependents = matrix.dependencies.filter { it.value.contains(relativePath) }.keys
+                                    if (dependents.isNotEmpty()) {
+                                        appendLine("  Used by: ${dependents.joinToString(", ")}")
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        ""
+                    }
+                } catch (e: Exception) {
+                    android.util.Log.w("LSTool", "Error getting dependency matrix: ${e.message}")
+                    ""
+                }
+            } else {
+                ""
+            }
+            
+            val finalOutput = output + dependencyInfo
+            
+            updateOutput?.invoke(finalOutput)
             
             ToolResult(
-                llmContent = output,
+                llmContent = finalOutput,
                 returnDisplay = "Listed ${entries.size} items"
             )
         } catch (e: Exception) {

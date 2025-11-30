@@ -294,7 +294,8 @@ Rules:
 - Complete the entire task. Keep working until done.
 - For Node.js projects: create package.json, server files, HTML, CSS, and JavaScript.
 - After each tool call, continue with the next step automatically.
-- Maintain code coherence: check existing code structure and style before writing new code."""
+- Maintain code coherence: check existing code structure and style before writing new code.
+- IMPORTANT: Code dependency matrix is maintained automatically. When writing files, check the relativeness information in tool results. Only use imports/exports that exist in related files. Do not add extra imports or unrelated function names."""
                         ),
                         com.qali.aterm.agent.ppe.models.PpeMessage(
                             role = "user",
