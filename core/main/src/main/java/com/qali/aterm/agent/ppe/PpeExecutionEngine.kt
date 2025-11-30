@@ -706,6 +706,7 @@ class PpeExecutionEngine(
             }
             
             // Handle function calls from continuation response
+            android.util.Log.d("PpeExecutionEngine", "Checking continuation response - functionCalls size: ${continuationResponse.functionCalls.size}, isEmpty: ${continuationResponse.functionCalls.isEmpty()}")
             if (continuationResponse.functionCalls.isNotEmpty()) {
                 android.util.Log.d("PpeExecutionEngine", "Continuation has ${continuationResponse.functionCalls.size} function calls - processing them")
                 var executedAnyCall = false
@@ -825,7 +826,7 @@ class PpeExecutionEngine(
                 }
             } else {
                 // No function calls in continuation response - check if we should continue
-                android.util.Log.d("PpeExecutionEngine", "Continuation response has no function calls - checking if should continue")
+                android.util.Log.d("PpeExecutionEngine", "Continuation response has no function calls (text: '${continuationResponse.text.take(50)}...') - checking if should continue")
                 // Continue if: response is empty OR (response has text but we should prompt for next steps)
                 val recentToolCalls = messages.takeLast(10).flatMap { content ->
                     content.parts.filterIsInstance<Part.FunctionResponsePart>().map { it.functionResponse.name }
@@ -994,6 +995,75 @@ class PpeExecutionEngine(
                                     
                                     return retryResponse
                                 }
+                            }
+                        }
+                        
+                        // If the continuation prompt also returned no function calls, make one more attempt with a stronger prompt
+                        if (continueResponse.functionCalls.isEmpty() && continueResponse.text.isNotEmpty() && functionCall.name == "write_file") {
+                            android.util.Log.w("PpeExecutionEngine", "Continuation prompt returned no function calls for write_file - making final retry with stronger prompt")
+                            val finalRetryMessages = promptMessages + listOf(
+                                Content(
+                                    role = "model",
+                                    parts = listOf(Part.TextPart(text = continueResponse.text))
+                                ),
+                                Content(
+                                    role = "user",
+                                    parts = listOf(Part.TextPart(text = "You must continue creating files. The project is not complete yet. Create the remaining files now: package.json (if not created), HTML file (index.html), CSS file (style.css or styles.css), and any client-side JavaScript files. Use write_file to create each file."))
+                                )
+                            )
+                            
+                            val finalRetryResult = apiClient.callApi(
+                                messages = finalRetryMessages,
+                                model = null,
+                                temperature = null,
+                                topP = null,
+                                topK = null,
+                                tools = if (toolRegistry.getAllTools().isNotEmpty()) {
+                                    listOf(Tool(functionDeclarations = toolRegistry.getFunctionDeclarations()))
+                                } else {
+                                    null
+                                }
+                            )
+                            
+                            val finalRetryResponse = finalRetryResult.getOrNull()
+                            if (finalRetryResponse != null) {
+                                if (finalRetryResponse.text.isNotEmpty()) {
+                                    onChunk(finalRetryResponse.text)
+                                }
+                                
+                                if (finalRetryResponse.functionCalls.isNotEmpty()) {
+                                    for (finalFunctionCall in finalRetryResponse.functionCalls) {
+                                        if (finalFunctionCall.name == "write_todos") {
+                                            android.util.Log.w("PpeExecutionEngine", "Skipping write_todos in final retry")
+                                            continue
+                                        }
+                                        
+                                        onToolCall(finalFunctionCall)
+                                        val finalToolResult = executeTool(finalFunctionCall, onToolResult)
+                                        
+                                        val finalContinuation = continueWithToolResult(
+                                            finalRetryMessages + listOf(
+                                                Content(
+                                                    role = "model",
+                                                    parts = listOf(Part.TextPart(text = finalRetryResponse.text))
+                                                )
+                                            ),
+                                            finalFunctionCall,
+                                            finalToolResult,
+                                            script,
+                                            onChunk,
+                                            onToolCall,
+                                            onToolResult,
+                                            recursionDepth + 1
+                                        )
+                                        
+                                        if (finalContinuation != null) {
+                                            return finalContinuation
+                                        }
+                                    }
+                                }
+                                
+                                return finalRetryResponse
                             }
                         }
                         
