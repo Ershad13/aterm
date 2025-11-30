@@ -393,12 +393,50 @@ class PpeExecutionEngine(
         script: PpeScript,
         onChunk: (String) -> Unit,
         onToolCall: (FunctionCall) -> Unit,
-        onToolResult: (String, Map<String, Any>) -> Unit
+        onToolResult: (String, Map<String, Any>) -> Unit,
+        recursionDepth: Int = 0
     ): PpeApiResponse? {
+        // Prevent infinite recursion (max 10 levels)
+        if (recursionDepth >= 10) {
+            android.util.Log.w("PpeExecutionEngine", "Max recursion depth reached in continueWithToolResult")
+            return null
+        }
+        
+        // Check for repeated tool calls (prevent loops)
+        val recentToolCalls = chatHistory.takeLast(10).flatMap { content ->
+            content.parts.filterIsInstance<Part.FunctionResponsePart>().map { it.functionResponse.name }
+        }
+        val sameToolCallCount = recentToolCalls.count { it == functionCall.name }
+        if (sameToolCallCount >= 3 && recursionDepth > 0) {
+            android.util.Log.w("PpeExecutionEngine", "Detected repeated calls to ${functionCall.name}, stopping recursion")
+            // Return a response that encourages moving forward
+            val stopMessage = "Tool ${functionCall.name} has been called multiple times. Please proceed with the next step in the task."
+            onChunk(stopMessage)
+            return PpeApiResponse(text = stopMessage, finishReason = "STOP")
+        }
+        
         // Build messages with tool result for continuation
         val messages = chatHistory.toMutableList()
         
         // Add tool result to messages (as function response)
+        // Format the response to be clear and actionable
+        val responseContent = when {
+            toolResult.error != null -> mapOf("error" to toolResult.error.message)
+            toolResult.llmContent is String -> {
+                // For write_todos, ensure the response is clear that todos were created/updated
+                if (functionCall.name == "write_todos") {
+                    mapOf(
+                        "output" to toolResult.llmContent,
+                        "status" to "success",
+                        "message" to "Todos have been created/updated. Proceed with implementing the tasks."
+                    )
+                } else {
+                    mapOf("output" to toolResult.llmContent)
+                }
+            }
+            else -> mapOf("output" to "Tool execution succeeded.")
+        }
+        
         messages.add(
             Content(
                 role = "user",
@@ -406,11 +444,7 @@ class PpeExecutionEngine(
                     Part.FunctionResponsePart(
                         functionResponse = FunctionResponse(
                             name = functionCall.name,
-                            response = when {
-                                toolResult.error != null -> mapOf("error" to toolResult.error.message)
-                                toolResult.llmContent is String -> mapOf("output" to toolResult.llmContent)
-                                else -> mapOf("output" to "Tool execution succeeded.")
-                            },
+                            response = responseContent,
                             id = functionCall.id ?: ""
                         )
                     )
@@ -446,20 +480,24 @@ class PpeExecutionEngine(
                     // Execute tool
                     val nextToolResult = executeTool(nextFunctionCall, onToolResult)
                     
-                    // Recursively continue with next tool result
+                    // Add the continuation response text to messages before recursive call
+                    val updatedMessages = messages + listOf(
+                        Content(
+                            role = "model",
+                            parts = listOf(Part.TextPart(text = continuationResponse.text))
+                        )
+                    )
+                    
+                    // Recursively continue with next tool result (increment recursion depth)
                     val nextContinuation = continueWithToolResult(
-                        messages + listOf(
-                            Content(
-                                role = "model",
-                                parts = listOf(Part.TextPart(text = continuationResponse.text))
-                            )
-                        ),
+                        updatedMessages,
                         nextFunctionCall,
                         nextToolResult,
                         script,
                         onChunk,
                         onToolCall,
-                        onToolResult
+                        onToolResult,
+                        recursionDepth + 1
                     )
                     
                     // If there's another continuation, use it instead
