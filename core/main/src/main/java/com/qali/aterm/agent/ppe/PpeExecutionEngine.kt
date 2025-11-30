@@ -129,6 +129,10 @@ class PpeExecutionEngine(
                                 
                                 if (continuationResponse != null) {
                                     currentVariables["LatestResult"] = continuationResponse.text
+                                    currentVariables["RESPONSE"] = continuationResponse.text
+                                    
+                                    // Emit continuation response text to UI (if not already emitted by continueWithToolResult)
+                                    // Note: continueWithToolResult already emits chunks, but we ensure it's in turnMessages for history
                                     turnMessages.add(
                                         Content(
                                             role = "model",
@@ -475,6 +479,13 @@ class PpeExecutionEngine(
             // Always emit text first (even if there are function calls)
             if (continuationResponse.text.isNotEmpty()) {
                 onChunk(continuationResponse.text)
+            } else if (continuationResponse.functionCalls.isNotEmpty()) {
+                // If no text but there are function calls, emit a brief message
+                onChunk("Continuing with next steps...\n")
+            } else {
+                // If response is empty and no function calls, the AI might have stopped
+                // This shouldn't happen often, but log it for debugging
+                android.util.Log.d("PpeExecutionEngine", "Continuation response is empty with no function calls")
             }
             
             // Handle function calls from continuation response
