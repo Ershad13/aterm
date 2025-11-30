@@ -30,7 +30,12 @@ class ApiRequestBuilder(
             // Add chat history (which already includes the user message if it's the first turn)
             chatHistory.forEach { content ->
                 val contentObj = JSONObject()
-                contentObj.put("role", content.role)
+                // Map "assistant" to "model" for Gemini API compatibility
+                val role = when (content.role) {
+                    "assistant" -> "model"
+                    else -> content.role
+                }
+                contentObj.put("role", role)
                 contentObj.put("parts", JSONArray().apply {
                     content.parts.forEach { part ->
                         when (part) {
