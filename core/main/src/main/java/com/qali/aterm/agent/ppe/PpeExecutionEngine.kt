@@ -62,11 +62,11 @@ class PpeExecutionEngine(
                     // Check if message has AI placeholder
                     if (message.hasAiPlaceholder) {
                         hasAiPlaceholderInTurn = true
-                        // Execute AI call
+                        // Execute AI call - include current turn's messages processed so far
                         val aiResponse = executeAiPlaceholder(
                             message,
                             processedContent,
-                            chatHistory,
+                            chatHistory + turnMessages, // Include current turn's messages
                             script,
                             onChunk,
                             onToolCall,
@@ -290,6 +290,11 @@ class PpeExecutionEngine(
         val messageWithoutPlaceholder = processedContent.replace(Regex("""\[\[.*?\]\]"""), "")
         if (messageWithoutPlaceholder.isNotEmpty()) {
             messages.add(Content(role = message.role, parts = listOf(Part.TextPart(text = messageWithoutPlaceholder))))
+        }
+        
+        // Safety check: ensure we have at least one message
+        if (messages.isEmpty()) {
+            throw Exception("Cannot make API call: no messages to send. Ensure user message is included before AI placeholder.")
         }
         
         // Get model from placeholder params or script
