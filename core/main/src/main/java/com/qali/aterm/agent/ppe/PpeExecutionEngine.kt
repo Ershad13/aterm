@@ -283,12 +283,23 @@ class PpeExecutionEngine(
         // Note: System messages are handled by ApiRequestBuilder via systemInstruction field
         // We don't add them to the messages list to avoid confusion
         
-        // Add chat history
-        messages.addAll(chatHistory)
+        // Add chat history (filter out system messages and empty messages)
+        // Note: Assistant messages are kept - they'll be mapped to "model" by ApiRequestBuilder
+        messages.addAll(chatHistory.filter { 
+            it.role != "system" && 
+            it.parts.isNotEmpty() && 
+            it.parts.any { part -> 
+                when (part) {
+                    is Part.TextPart -> part.text.isNotEmpty()
+                    else -> true // Keep non-text parts (function calls, etc.)
+                }
+            }
+        })
         
         // Add current message (without AI placeholder)
+        // Note: We don't add assistant messages with placeholders - they're just markers for AI response
         val messageWithoutPlaceholder = processedContent.replace(Regex("""\[\[.*?\]\]"""), "")
-        if (messageWithoutPlaceholder.isNotEmpty()) {
+        if (messageWithoutPlaceholder.isNotEmpty() && message.role != "assistant") {
             messages.add(Content(role = message.role, parts = listOf(Part.TextPart(text = messageWithoutPlaceholder))))
         }
         

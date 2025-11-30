@@ -30,10 +30,17 @@ class ApiRequestBuilder(
             // Add chat history (which already includes the user message if it's the first turn)
             chatHistory.forEach { content ->
                 val contentObj = JSONObject()
-                // Map "assistant" to "model" for Gemini API compatibility
-                val role = when (content.role) {
-                    "assistant" -> "model"
-                    else -> content.role
+                // Map roles for Gemini API compatibility
+                // Gemini only accepts "user" and "model" roles
+                val role = when (content.role.lowercase()) {
+                    "assistant", "model" -> "model"
+                    "system" -> "user" // System messages should be in systemInstruction, but if present, map to user
+                    "user" -> "user"
+                    else -> {
+                        // Default to user for unknown roles
+                        android.util.Log.w("ApiRequestBuilder", "Unknown role '${content.role}', mapping to 'user'")
+                        "user"
+                    }
                 }
                 contentObj.put("role", role)
                 contentObj.put("parts", JSONArray().apply {
