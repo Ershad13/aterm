@@ -847,7 +847,8 @@ class PpeExecutionEngine(
             // Continue if:
             // 1. Response is empty (AI might be waiting for next instruction)
             // 2. Response has text but no function calls (AI provided plan/explanation, should continue implementing)
-            // 3. We haven't exceeded recursion limits
+            // 3. Response mentions creating files but didn't call write_file (especially for script.js, app.js, client.js)
+            // 4. We haven't exceeded recursion limits
             // For write_file, shell, and read-only tools, allow more calls since we need multiple files/commands for a complete project
             val maxSameToolCalls = when (functionCall.name) {
                 "write_file" -> 10
@@ -857,8 +858,15 @@ class PpeExecutionEngine(
             }
             val hasTextButNoCalls = continuationResponse.text.isNotEmpty() && continuationResponse.functionCalls.isEmpty()
             val isEmpty = continuationResponse.text.isEmpty()
+            // Check if response mentions creating files but didn't actually call write_file
+            val mentionsCreatingFiles = continuationResponse.text.contains("create") || 
+                continuationResponse.text.contains("will create") || 
+                continuationResponse.text.contains("script.js") || 
+                continuationResponse.text.contains("app.js") || 
+                continuationResponse.text.contains("client.js")
+            val shouldForceContinue = hasTextButNoCalls && mentionsCreatingFiles && functionCall.name == "write_file"
             // For shell and write_file, be more aggressive about continuing even with minimal text
-            val shouldContinue = (isEmpty || hasTextButNoCalls) && 
+            val shouldContinue = (isEmpty || hasTextButNoCalls || shouldForceContinue) && 
                 sameToolCallCount < maxSameToolCalls && 
                 recursionDepth < 5
             

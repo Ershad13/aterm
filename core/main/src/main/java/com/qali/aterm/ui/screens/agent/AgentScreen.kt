@@ -1120,7 +1120,7 @@ fun DebugDialog(
                 val testInfoBuilder = StringBuilder()
                 // Count actual tool calls and results more reliably
                 val toolCalls = messagesSnapshot.filter { !it.isUser && (it.text.contains("🔧 Calling tool:") || it.text.contains("Tool call:") || it.text.contains("Calling tool")) }
-                val toolResults = messagesSnapshot.filter { !it.isUser && (it.text.contains("✅ Tool") || it.text.contains("Tool '") || it.text.contains("completed:") || (it.text.contains("Error") && it.text.contains("Tool"))) }
+                val toolResults = messagesSnapshot.filter { !it.isUser && (it.text.contains("✅ Tool") || it.text.contains("Tool '") || it.text.contains("completed") || (it.text.contains("Error") && it.text.contains("Tool"))) }
                 val testCommands = messagesSnapshot.filter { !it.isUser && (it.text.contains("test") || it.text.contains("npm test") || it.text.contains("pytest") || it.text.contains("cargo test") || it.text.contains("go test") || it.text.contains("mvn test") || it.text.contains("gradle test")) }
                 
                 testInfoBuilder.appendLine("Tool Calls: ${toolCalls.size}")
@@ -1393,7 +1393,7 @@ fun DebugDialog(
                                 val testInfoBuilder = StringBuilder()
                                 // Count actual tool calls and results more reliably
                                 val toolCalls = messagesSnapshot.filter { !it.isUser && (it.text.contains("🔧 Calling tool:") || it.text.contains("Tool call:") || it.text.contains("Calling tool")) }
-                                val toolResults = messagesSnapshot.filter { !it.isUser && (it.text.contains("✅ Tool") || it.text.contains("Tool '") || it.text.contains("completed:") || (it.text.contains("Error") && it.text.contains("Tool"))) }
+                                val toolResults = messagesSnapshot.filter { !it.isUser && (it.text.contains("✅ Tool") || it.text.contains("Tool '") || it.text.contains("completed") || (it.text.contains("Error") && it.text.contains("Tool"))) }
                                 val testCommands = messagesSnapshot.filter { !it.isUser && (it.text.contains("test") || it.text.contains("npm test") || it.text.contains("pytest") || it.text.contains("cargo test") || it.text.contains("go test") || it.text.contains("mvn test") || it.text.contains("gradle test")) }
                                 
                                 testInfoBuilder.appendLine("Tool Calls: ${toolCalls.size}")
@@ -1910,9 +1910,12 @@ fun AgentScreen(
                 }
             } else {
                 // Show file changes summary at the top if there are any file changes
-                val hasFileChanges = messages.any { it.fileDiff != null }
+                // Use stable key to prevent disappearing when new messages arrive
+                val fileDiffs = remember(messages) { messages.mapNotNull { it.fileDiff } }
+                val hasFileChanges = fileDiffs.isNotEmpty()
+                
                 if (hasFileChanges) {
-                    item {
+                    item(key = "file-changes-summary") {
                         FileChangesSummaryCard(
                             messages = messages,
                             modifier = Modifier.padding(bottom = 8.dp)
@@ -1928,9 +1931,9 @@ fun AgentScreen(
                         verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         MessageBubble(message = message)
-                        // Show diff card if message has file diff - use key to prevent disappearing
+                        // Show diff card if message has file diff - use stable key to prevent disappearing
                         message.fileDiff?.let { diff ->
-                            key("${message.timestamp}-${diff.filePath}") {
+                            key("file-diff-${message.timestamp}-${diff.filePath}") {
                                 CodeDiffCard(
                                     fileDiff = diff,
                                     modifier = Modifier.padding(horizontal = 8.dp)
