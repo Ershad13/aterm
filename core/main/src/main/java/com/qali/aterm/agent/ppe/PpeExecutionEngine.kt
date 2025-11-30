@@ -411,12 +411,11 @@ class PpeExecutionEngine(
             content.parts.filterIsInstance<Part.FunctionResponsePart>().map { it.functionResponse.name }
         }
         val sameToolCallCount = recentToolCalls.count { it == functionCall.name }
-        if (sameToolCallCount >= 3 && recursionDepth > 0) {
+        if (sameToolCallCount >= 2 && recursionDepth > 0) {
             android.util.Log.w("PpeExecutionEngine", "Detected repeated calls to ${functionCall.name}, stopping recursion")
-            // Return a response that encourages moving forward
-            val stopMessage = "Tool ${functionCall.name} has been called multiple times. Please proceed with the next step in the task."
-            onChunk(stopMessage)
-            return PpeApiResponse(text = stopMessage, finishReason = "STOP")
+            // Don't emit a message that might trigger another call - just stop silently
+            // The agent should have enough context to proceed
+            return null
         }
         
         // Build messages with tool result for continuation
@@ -523,21 +522,28 @@ class PpeExecutionEngine(
                 }
             } else {
                 // No function calls in continuation response - check if we should continue
-                // If response is empty or very short after a tool call, prompt to continue
-                val shouldContinue = continuationResponse.text.isEmpty() || 
-                    (continuationResponse.text.length < 50 && functionCall.name == "write_todos")
+                // Only continue if response is empty AND we haven't called this tool too many times
+                val recentToolCalls = messages.takeLast(10).flatMap { content ->
+                    content.parts.filterIsInstance<Part.FunctionResponsePart>().map { it.functionResponse.name }
+                }
+                val sameToolCallCount = recentToolCalls.count { it == functionCall.name }
                 
-                if (shouldContinue && recursionDepth < 3) {
+                // Don't auto-continue if we've already called this tool multiple times
+                val shouldContinue = continuationResponse.text.isEmpty() && 
+                    sameToolCallCount < 2 && 
+                    recursionDepth < 2
+                
+                if (shouldContinue) {
                     // Make another API call to prompt continuation
                     val promptText = when (functionCall.name) {
-                        "write_todos" -> "Todos have been created. Now proceed with implementing the tasks from the todo list."
+                        "write_todos" -> "The todo list has been created. Now proceed with implementing the first task from the list. Do not call write_todos again - start creating files."
                         else -> "Please continue with the next steps to complete the task."
                     }
                     
                     val promptMessages = messages + listOf(
                         Content(
                             role = "model",
-                            parts = listOf(Part.TextPart(text = continuationResponse.text.ifEmpty { promptText }))
+                            parts = listOf(Part.TextPart(text = promptText))
                         )
                     )
                     
@@ -564,6 +570,12 @@ class PpeExecutionEngine(
                         // Handle function calls from the continuation
                         if (continueResponse.functionCalls.isNotEmpty()) {
                             for (nextFunctionCall in continueResponse.functionCalls) {
+                                // Skip write_todos if it was just called
+                                if (nextFunctionCall.name == "write_todos" && sameToolCallCount >= 1) {
+                                    android.util.Log.w("PpeExecutionEngine", "Skipping write_todos call - already called recently")
+                                    continue
+                                }
+                                
                                 onToolCall(nextFunctionCall)
                                 val nextToolResult = executeTool(nextFunctionCall, onToolResult)
                                 
