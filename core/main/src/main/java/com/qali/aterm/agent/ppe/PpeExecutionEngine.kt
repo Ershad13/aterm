@@ -472,6 +472,11 @@ class PpeExecutionEngine(
         
         // Emit continuation response chunks to UI
         if (continuationResponse != null) {
+            // Always emit text first (even if there are function calls)
+            if (continuationResponse.text.isNotEmpty()) {
+                onChunk(continuationResponse.text)
+            }
+            
             // Handle function calls from continuation response
             if (continuationResponse.functionCalls.isNotEmpty()) {
                 for (nextFunctionCall in continuationResponse.functionCalls) {
@@ -505,9 +510,6 @@ class PpeExecutionEngine(
                         return nextContinuation
                     }
                 }
-            } else {
-                // Emit text response as chunks
-                onChunk(continuationResponse.text)
             }
         }
         
