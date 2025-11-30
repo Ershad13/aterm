@@ -153,6 +153,7 @@ class PpeExecutionEngine(
                                 )
                                 
                                 if (continuationResponse != null) {
+                                    Log.d("PpeExecutionEngine", "Continuation response received - text length: ${continuationResponse.text.length}, function calls: ${continuationResponse.functionCalls.size}")
                                     currentVariables["LatestResult"] = continuationResponse.text
                                     currentVariables["RESPONSE"] = continuationResponse.text
                                     
@@ -164,6 +165,12 @@ class PpeExecutionEngine(
                                             parts = listOf(Part.TextPart(text = continuationResponse.text))
                                         )
                                     )
+                                    
+                                    // Check if we need to continue further (response has text but no function calls)
+                                    val hasTextNoCalls = continuationResponse.text.isNotEmpty() && continuationResponse.functionCalls.isEmpty()
+                                    if (hasTextNoCalls) {
+                                        Log.d("PpeExecutionEngine", "Continuation response has text but no function calls - will check if further continuation needed")
+                                    }
                                     
                                     // Check if response is empty or has no function calls - might need fallback continuation
                                     val needsFallback = continuationResponse.text.isEmpty() && 
@@ -729,23 +736,33 @@ class PpeExecutionEngine(
                 }
             } else {
                 // No function calls in continuation response - check if we should continue
-                // Only continue if response is empty AND we haven't called this tool too many times
+                // Continue if: response is empty OR (response has text but we should prompt for next steps)
                 val recentToolCalls = messages.takeLast(10).flatMap { content ->
                     content.parts.filterIsInstance<Part.FunctionResponsePart>().map { it.functionResponse.name }
                 }
                 val sameToolCallCount = recentToolCalls.count { it == functionCall.name }
                 
-                // Don't auto-continue if we've already called this tool multiple times
-                val shouldContinue = continuationResponse.text.isEmpty() && 
-                    sameToolCallCount < 2 && 
-                    recursionDepth < 2
+                // Continue if:
+                // 1. Response is empty (AI might be waiting for next instruction)
+                // 2. Response has text but no function calls (AI provided plan/explanation, should continue implementing)
+                // 3. We haven't exceeded recursion limits
+                val hasTextButNoCalls = continuationResponse.text.isNotEmpty() && continuationResponse.functionCalls.isEmpty()
+                val isEmpty = continuationResponse.text.isEmpty()
+                val shouldContinue = (isEmpty || hasTextButNoCalls) && 
+                    sameToolCallCount < 3 && 
+                    recursionDepth < 5
+                
+                Log.d("PpeExecutionEngine", "Continuation decision - hasTextButNoCalls: $hasTextButNoCalls, isEmpty: $isEmpty, sameToolCallCount: $sameToolCallCount, recursionDepth: $recursionDepth, shouldContinue: $shouldContinue")
                 
                 if (shouldContinue) {
                     // Make another API call to prompt continuation
-                    val promptText = when (functionCall.name) {
-                        "write_todos" -> "The todo list has been created. Now proceed with implementing the first task from the list. Do not call write_todos again - start creating files."
-                        else -> "Please continue with the next steps to complete the task."
+                    val promptText = when {
+                        functionCall.name == "write_todos" -> "The todo list has been created. Now proceed with implementing the tasks. Start by creating the project files (package.json, server files, etc.) and continue until the task is complete. Do not call write_todos again."
+                        hasTextButNoCalls -> "You've provided a plan or explanation. Now proceed with implementing it. Use the available tools to create files, run commands, and complete the task. Continue until finished."
+                        else -> "Please continue with the next steps to complete the task. Use the available tools to make progress."
                     }
+                    
+                    Log.d("PpeExecutionEngine", "Prompting continuation with: ${promptText.take(100)}...")
                     
                     val promptMessages = messages + listOf(
                         Content(
