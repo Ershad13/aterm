@@ -150,7 +150,7 @@ class CliBasedAgentClient(
                     onToolResult(toolName, args)
                     
                     // Get tool result from execution engine (FIFO queue)
-                    val toolResult = executionEngine.getNextToolResult(toolName)
+                    val toolResult: com.qali.aterm.agent.tools.ToolResult? = executionEngine.getNextToolResult(toolName)
                     if (toolResult != null) {
                         Log.d("CliBasedAgentClient", "Sending tool result to channel for: $toolName")
                         // Send to channel - AgentScreen will extract file diffs from this

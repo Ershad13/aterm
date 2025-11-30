@@ -1076,7 +1076,6 @@ class PpeExecutionEngine(
                     }
                 }
             }
-        }
         
         return continuationResponse
     }
@@ -1100,7 +1099,8 @@ class PpeExecutionEngine(
         }
         
         // Validate and convert parameters
-        val params = tool?.validateParams(functionCall.args)
+        @Suppress("UNCHECKED_CAST")
+        val params = tool?.validateParams(functionCall.args) as Any?
         if (params == null) {
             return com.qali.aterm.agent.tools.ToolResult(
                 llmContent = "Invalid parameters for tool: ${functionCall.name}",
@@ -1113,7 +1113,7 @@ class PpeExecutionEngine(
         
         // Create invocation and execute - use unchecked cast like AgentClient does
         @Suppress("UNCHECKED_CAST")
-        val invocation = (tool as com.qali.aterm.agent.tools.DeclarativeTool<Any, com.qali.aterm.agent.tools.ToolResult>).createInvocation(params as Any)
+        val invocation = (tool as com.qali.aterm.agent.tools.DeclarativeTool<Any, com.qali.aterm.agent.tools.ToolResult>).createInvocation(params)
         val result = invocation.execute()
         
         // Store result in queue for file diff extraction (FIFO)
@@ -1266,7 +1266,7 @@ class PpeExecutionEngine(
                         // Script chaining
                         val script = loadChainedScript(chainItem, null)
                         if (script != null) {
-                            executeScript(
+                            this.executeScript(
                                 script = script,
                                 inputParams = variables.toMap(),
                                 onChunk = onChunk,
