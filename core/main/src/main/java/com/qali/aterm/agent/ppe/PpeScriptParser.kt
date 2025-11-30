@@ -46,21 +46,21 @@ object PpeScriptParser {
         }
         
         // Extract parameters, input, output, response_format from front-matter
-        val parameters = (frontMatter["parameters"] as? Map<*, *>)?.mapKeys { it.key.toString() }
-            ?.mapValues { convertValue(it.value) } ?: emptyMap<String, Any>()
+        val parameters = (frontMatter["parameters"] as? Map<*, *>)?.mapKeys<String, Any> { it.key.toString() }
+            ?.mapValues<String, Any> { convertValue(it.value) } ?: emptyMap<String, Any>()
         
         val input = (frontMatter["input"] as? List<*>)?.mapNotNull { it?.toString() }
         
-        val output = (frontMatter["output"] as? Map<*, *>)?.mapKeys { it.key.toString() }
-            ?.mapValues { convertValue(it.value) }
+        val output = (frontMatter["output"] as? Map<*, *>)?.mapKeys<String, Any> { it.key.toString() }
+            ?.mapValues<String, Any> { convertValue(it.value) }
         
-        val responseFormat = (frontMatter["response_format"] as? Map<*, *>)?.mapKeys { it.key.toString() }
-            ?.mapValues { convertValue(it.value) }
+        val responseFormat = (frontMatter["response_format"] as? Map<*, *>)?.mapKeys<String, Any> { it.key.toString() }
+            ?.mapValues<String, Any> { convertValue(it.value) }
         
         // Extract other metadata
         val metadata = frontMatter.filterKeys { 
             it !in listOf("parameters", "input", "output", "response_format")
-        }.mapKeys { it.key.toString() }.mapValues { convertValue(it.value) }
+        }.mapKeys<String, Any> { it.key.toString() }.mapValues<String, Any> { convertValue(it.value) }
         
         // Parse turns (everything after first ---)
         val turns = mutableListOf<PpeTurn>()
