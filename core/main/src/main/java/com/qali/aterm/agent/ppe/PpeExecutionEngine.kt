@@ -629,6 +629,7 @@ class PpeExecutionEngine(
         val maxRepeatedCalls = when (functionCall.name) {
             "write_file" -> 15
             "shell" -> 20  // Need many shell commands for setup, install, etc.
+            "ls", "read" -> 15  // Read-only tools - need to check multiple files/directories
             else -> 2
         }
         if (sameToolCallCount >= maxRepeatedCalls && recursionDepth > 0) {
@@ -847,10 +848,11 @@ class PpeExecutionEngine(
             // 1. Response is empty (AI might be waiting for next instruction)
             // 2. Response has text but no function calls (AI provided plan/explanation, should continue implementing)
             // 3. We haven't exceeded recursion limits
-            // For write_file and shell, allow more calls since we need multiple files/commands for a complete project
+            // For write_file, shell, and read-only tools, allow more calls since we need multiple files/commands for a complete project
             val maxSameToolCalls = when (functionCall.name) {
                 "write_file" -> 10
                 "shell" -> 15  // Need multiple shell commands for setup, install, etc.
+                "ls", "read" -> 10  // Read-only tools - need to check multiple files/directories
                 else -> 3
             }
             val hasTextButNoCalls = continuationResponse.text.isNotEmpty() && continuationResponse.functionCalls.isEmpty()
@@ -862,20 +864,23 @@ class PpeExecutionEngine(
             
             android.util.Log.d("PpeExecutionEngine", "Continuation decision - tool: ${functionCall.name}, hasTextButNoCalls: $hasTextButNoCalls, isEmpty: $isEmpty, sameToolCallCount: $sameToolCallCount, maxSameToolCalls: $maxSameToolCalls, recursionDepth: $recursionDepth, shouldContinue: $shouldContinue")
             
-            if (!shouldContinue && (functionCall.name == "shell" || functionCall.name == "write_file")) {
+            if (!shouldContinue && (functionCall.name == "shell" || functionCall.name == "write_file" || functionCall.name == "ls" || functionCall.name == "read")) {
                 android.util.Log.w("PpeExecutionEngine", "Not continuing for ${functionCall.name} - sameToolCallCount: $sameToolCallCount >= $maxSameToolCalls or recursionDepth: $recursionDepth >= 5")
             }
             
             if (shouldContinue) {
                 // Make another API call to prompt continuation
                 // Use clear, action-oriented prompts optimized for smaller models like gemini-2.5-flash-lite
+                // Emphasize reading existing files before modifying to maintain code coherence
                 val promptText = when {
                     functionCall.name == "write_todos" -> "The todo list is created. Now create the files. Start with package.json, then server.js, then HTML, CSS, and JavaScript files. Use write_file tool for each file. Do not call write_todos again."
                     functionCall.name == "write_file" -> "Good! Keep creating files. You need: package.json (if missing), index.html, style.css, and client.js. Use write_file to create each one. Continue until all files are created."
                     functionCall.name == "shell" -> "Good progress! Continue with the next steps. Install dependencies (npm install express), create files (use write_file), or run more commands (use shell). Keep working until the Node.js webapp is complete and ready to run."
-                    isEmpty -> "Continue with the next step. Use write_file to create files or shell to run commands. Keep working until the task is complete."
-                    hasTextButNoCalls -> "You explained the plan. Now implement it. Use write_file to create files or shell to run commands. Continue until finished."
-                    else -> "Continue with the next step. Use the available tools (write_file, shell) to complete the task."
+                    functionCall.name == "ls" -> "Good! You checked the directory. Now read the files (use read tool) to see what exists, then fix or create what's needed. Use read to check existing code before modifying it."
+                    functionCall.name == "read" -> "Good! You read a file. Now check other files if needed (use read), then fix issues using write_file or edit. Make sure code is consistent across all files."
+                    isEmpty -> "Continue with the next step. Read existing files (read tool) before modifying them. Then use write_file to create files or shell to run commands. Keep working until the task is complete."
+                    hasTextButNoCalls -> "You explained the plan. Now implement it. Read existing files first (read tool) to understand the code, then use write_file to create/modify files or shell to run commands. Continue until finished."
+                    else -> "Continue with the next step. Read files (read tool) to understand existing code, then use write_file to create/modify files or shell to run commands. Complete the task."
                 }
                 
                 Log.d("PpeExecutionEngine", "Prompting continuation with: ${promptText.take(100)}...")
@@ -1020,12 +1025,14 @@ class PpeExecutionEngine(
                         }
                         
                         // If the continuation prompt also returned no function calls, make one more attempt with a stronger prompt
-                        if (continueResponse.functionCalls.isEmpty() && continueResponse.text.isNotEmpty() && (functionCall.name == "write_file" || functionCall.name == "shell")) {
+                        if (continueResponse.functionCalls.isEmpty() && continueResponse.text.isNotEmpty() && (functionCall.name == "write_file" || functionCall.name == "shell" || functionCall.name == "ls" || functionCall.name == "read")) {
                             android.util.Log.w("PpeExecutionEngine", "Continuation prompt returned no function calls for ${functionCall.name} - making final retry with stronger prompt")
                             val finalPromptText = when (functionCall.name) {
                                 "write_file" -> "You must continue creating files. The project is not complete yet. Create the remaining files now: package.json (if not created), HTML file (index.html), CSS file (style.css or styles.css), and any client-side JavaScript files. Use write_file to create each file."
                                 "shell" -> "You must continue. The project setup is not complete. Next steps: 1) Install dependencies (npm install express), 2) Create files using write_file (package.json, server.js, index.html, style.css, client.js), 3) Test the app. Use shell for commands and write_file for creating files. Keep working until done."
-                                else -> "Continue working. Use write_file to create files or shell to run commands. Complete the task."
+                                "ls" -> "You must continue. Read the files you found (use read tool) to understand the code structure, then fix issues using write_file or edit. Make sure all files work together correctly."
+                                "read" -> "You must continue. After reading files, fix the issues. Use write_file to modify files or create missing ones. Ensure code is consistent and all files work together. Keep working until the task is complete."
+                                else -> "Continue working. Read files (read) to understand code, then use write_file to create/modify files or shell to run commands. Complete the task."
                             }
                             val finalRetryMessages = promptMessages + listOf(
                                 Content(

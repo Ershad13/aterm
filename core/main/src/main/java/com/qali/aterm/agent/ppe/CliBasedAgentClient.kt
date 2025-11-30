@@ -289,10 +289,12 @@ ${'$'}echo: "?=response"
 
 Rules:
 - Use tools to complete tasks. Don't just plan - implement.
-- Use write_file to create files. Use shell to run commands.
+- Read existing files (read tool) before modifying them to keep code consistent.
+- Use write_file to create/modify files. Use shell to run commands.
 - Complete the entire task. Keep working until done.
 - For Node.js projects: create package.json, server files, HTML, CSS, and JavaScript.
-- After each tool call, continue with the next step automatically."""
+- After each tool call, continue with the next step automatically.
+- Maintain code coherence: check existing code structure and style before writing new code."""
                         ),
                         com.qali.aterm.agent.ppe.models.PpeMessage(
                             role = "user",
