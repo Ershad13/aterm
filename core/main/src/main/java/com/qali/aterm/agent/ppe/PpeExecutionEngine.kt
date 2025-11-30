@@ -280,11 +280,8 @@ class PpeExecutionEngine(
         // Build messages for API call
         val messages = mutableListOf<Content>()
         
-        // Add system message if present in script
-        script.turns.firstOrNull()?.messages?.firstOrNull { it.role == "system" }?.let { systemMsg ->
-            val renderedSystem = PpeTemplateEngine.render(systemMsg.content, emptyMap())
-            messages.add(Content(role = "user", parts = listOf(Part.TextPart(text = renderedSystem))))
-        }
+        // Note: System messages are handled by ApiRequestBuilder via systemInstruction field
+        // We don't add them to the messages list to avoid confusion
         
         // Add chat history
         messages.addAll(chatHistory)
