@@ -138,58 +138,58 @@ fun ApiProviderSettings() {
                 }
             }
         }
-        
-        // Add Key Dialog
-        if (showAddKeyDialog) {
-            AddApiKeyDialog(
-                providerType = selectedProvider,
-                onDismiss = { showAddKeyDialog = false },
-                onSave = { apiKey ->
-                    ApiProviderManager.addApiKey(selectedProvider, apiKey)
-                    providers = ApiProviderManager.getProviders()
-                    showAddKeyDialog = false
-                }
-            )
-        }
-        
-        // Edit Key Dialog
-        showEditKeyDialog?.let { key ->
-            EditApiKeyDialog(
-                providerType = selectedProvider,
-                apiKey = key,
-                onDismiss = { showEditKeyDialog = null },
-                onSave = { updatedKey ->
-                    ApiProviderManager.updateApiKey(selectedProvider, updatedKey)
-                    providers = ApiProviderManager.getProviders()
-                    showEditKeyDialog = null
-                }
-            )
-        }
-        
-        // Delete Key Dialog
-        showDeleteKeyDialog?.let { key ->
-            AlertDialog(
-                onDismissRequest = { showDeleteKeyDialog = null },
-                title = { Text("Delete API Key?") },
-                text = { Text("Are you sure you want to delete this API key? This action cannot be undone.") },
-                confirmButton = {
-                    TextButton(
-                        onClick = {
-                            ApiProviderManager.removeApiKey(selectedProvider, key.id)
-                            providers = ApiProviderManager.getProviders()
-                            showDeleteKeyDialog = null
-                        }
-                    ) {
-                        Text("Delete", color = MaterialTheme.colorScheme.error)
+    }
+    
+    // Add Key Dialog
+    if (showAddKeyDialog) {
+        AddApiKeyDialog(
+            providerType = selectedProvider,
+            onDismiss = { showAddKeyDialog = false },
+            onSave = { apiKey ->
+                ApiProviderManager.addApiKey(selectedProvider, apiKey)
+                providers = ApiProviderManager.getProviders()
+                showAddKeyDialog = false
+            }
+        )
+    }
+    
+    // Edit Key Dialog
+    showEditKeyDialog?.let { key ->
+        EditApiKeyDialog(
+            providerType = selectedProvider,
+            apiKey = key,
+            onDismiss = { showEditKeyDialog = null },
+            onSave = { updatedKey ->
+                ApiProviderManager.updateApiKey(selectedProvider, updatedKey)
+                providers = ApiProviderManager.getProviders()
+                showEditKeyDialog = null
+            }
+        )
+    }
+    
+    // Delete Key Dialog
+    showDeleteKeyDialog?.let { key ->
+        AlertDialog(
+            onDismissRequest = { showDeleteKeyDialog = null },
+            title = { Text("Delete API Key?") },
+            text = { Text("Are you sure you want to delete this API key? This action cannot be undone.") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        ApiProviderManager.removeApiKey(selectedProvider, key.id)
+                        providers = ApiProviderManager.getProviders()
+                        showDeleteKeyDialog = null
                     }
-                },
-                dismissButton = {
-                    TextButton(onClick = { showDeleteKeyDialog = null }) {
-                        Text("Cancel")
-                    }
+                ) {
+                    Text("Delete", color = MaterialTheme.colorScheme.error)
                 }
-            )
-        }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDeleteKeyDialog = null }) {
+                    Text("Cancel")
+                }
+            }
+        )
     }
 }
 
