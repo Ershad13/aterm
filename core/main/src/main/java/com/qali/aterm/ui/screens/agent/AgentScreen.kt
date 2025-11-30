@@ -4,6 +4,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -1926,17 +1927,17 @@ fun AgentScreen(
                     )
                 }
                 
-                items(
+                itemsIndexed(
                     items = messages,
-                    key = { message -> "${message.timestamp}-${message.text.take(50)}" }
-                ) { message ->
+                    key = { index, message -> "msg-${index}-${message.timestamp}" }
+                ) { index, message ->
                     Column(
                         verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         MessageBubble(message = message)
-                        // Show diff card if message has file diff - use stable key to prevent disappearing
+                        // Show diff card if message has file diff - use index for stable key to prevent disappearing
                         message.fileDiff?.let { diff ->
-                            key("file-diff-${message.timestamp}-${diff.filePath}") {
+                            key("file-diff-${index}-${diff.filePath}") {
                                 CodeDiffCard(
                                     fileDiff = diff,
                                     modifier = Modifier.padding(horizontal = 8.dp)
