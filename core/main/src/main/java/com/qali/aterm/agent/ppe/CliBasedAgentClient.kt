@@ -5,7 +5,7 @@ import com.qali.aterm.agent.core.FunctionCall
 import com.qali.aterm.agent.tools.ToolRegistry
 import com.qali.aterm.agent.ppe.models.PpeScript
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.channelFlow
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.channels.consumeEach
 import kotlinx.coroutines.coroutineScope
@@ -38,7 +38,7 @@ class CliBasedAgentClient(
         onToolCall: (FunctionCall) -> Unit,
         onToolResult: (String, Map<String, Any>) -> Unit,
         scriptPath: String? = null
-    ): Flow<AgentEvent> = flow {
+    ): Flow<AgentEvent> = channelFlow {
         val startTime = System.currentTimeMillis()
         var eventCount = 0
         var lastEventTime = startTime
@@ -98,18 +98,18 @@ class CliBasedAgentClient(
             Log.d("CliBasedAgentClient", "Starting script execution")
             
             // Launch a coroutine to emit events from the channel
-            coroutineScope {
-                launch {
-                    try {
-                        eventChannel.consumeEach { event ->
-                            emit(event)
-                        }
-                    } catch (e: Exception) {
-                        Log.e("CliBasedAgentClient", "Error emitting events from channel", e)
+            // Using channelFlow allows emissions from multiple coroutines
+            launch {
+                try {
+                    eventChannel.consumeEach { event ->
+                        send(event) // Use send() in channelFlow instead of emit()
                     }
+                } catch (e: Exception) {
+                    Log.e("CliBasedAgentClient", "Error emitting events from channel", e)
                 }
-                
-                // Execute script and send events to channel in real-time
+            }
+            
+            // Execute script and send events to channel in real-time
             executionEngine.executeScript(
                 script = script,
                 inputParams = inputParams,
@@ -193,7 +193,6 @@ class CliBasedAgentClient(
                 // Close the channel to signal completion
                 eventChannel.close()
             }
-            } // end coroutineScope
             
         } catch (e: kotlinx.coroutines.CancellationException) {
             val totalTime = System.currentTimeMillis() - startTime
