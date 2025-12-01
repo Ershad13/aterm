@@ -181,15 +181,19 @@ class PpeExecutionEngine(
                                     
                                     // More aggressive check: if continuation response has no function calls AND we've written less than 5 files
                                     // Also check if the response text is very short or just says "done" or similar
+                                    // IMPORTANT: For write_file, if we have < 5 files and no function calls, ALWAYS trigger fallback
+                                    // even if text is not minimal - the agent might have stopped prematurely
                                     val hasMinimalText = continuationResponse.text.trim().isEmpty() || 
                                         continuationResponse.text.trim().lowercase().let { text ->
                                             text == "done" || text == "complete" || text == "finished" || 
                                             text.length < 20 // Very short responses likely mean the agent stopped
                                         }
+                                    // For write_file with < 5 files: trigger fallback if no function calls, regardless of text length
+                                    // This ensures we continue creating files even if the agent gives a longer response but no actions
                                     val needsFallbackForWriteFile = functionCall.name == "write_file" && 
                                         writeFileCount < 5 && 
-                                        continuationResponse.functionCalls.isEmpty() &&
-                                        hasMinimalText
+                                        continuationResponse.functionCalls.isEmpty()
+                                        // Removed hasMinimalText check - be more aggressive
                                     
                                     android.util.Log.d("PpeExecutionEngine", "Fallback check - writeFileCount: $writeFileCount, needsFallback: $needsFallbackForWriteFile, hasMinimalText: $hasMinimalText, continuationText: '${continuationResponse.text.take(50)}'")
                                     val needsFallback = continuationResponse.text.isEmpty() && 
@@ -814,10 +818,11 @@ class PpeExecutionEngine(
                             text.length < 20
                         }
                     
+                    // For write_file with < 5 files: trigger fallback if no function calls, regardless of text
                     val needsFallbackAfterRecursion = nextFunctionCall.name == "write_file" && 
                         writeFileCountAfterRecursion < 5 && 
-                        nextContinuation.functionCalls.isEmpty() &&
-                        hasMinimalTextAfterRecursion
+                        nextContinuation.functionCalls.isEmpty()
+                        // Removed hasMinimalTextAfterRecursion check - be more aggressive
                     
                     if (needsFallbackAfterRecursion) {
                         android.util.Log.d("PpeExecutionEngine", "Fallback needed after recursive continuation - writeFileCount: $writeFileCountAfterRecursion, hasMinimalText: $hasMinimalTextAfterRecursion")
@@ -842,10 +847,11 @@ class PpeExecutionEngine(
                     text.length < 20
                 }
             
+            // For write_file with < 5 files: trigger fallback if no function calls, regardless of text
             val needsFallbackAfterCalls = functionCall.name == "write_file" && 
                 writeFileCountAfterCalls < 5 && 
-                continuationResponse.functionCalls.isEmpty() &&
-                hasMinimalTextAfterCalls
+                continuationResponse.functionCalls.isEmpty()
+                // Removed hasMinimalTextAfterCalls check - be more aggressive
             
             if (needsFallbackAfterCalls) {
                 android.util.Log.d("PpeExecutionEngine", "Fallback needed after processing function calls - writeFileCount: $writeFileCountAfterCalls, hasMinimalText: $hasMinimalTextAfterCalls")
@@ -938,9 +944,11 @@ class PpeExecutionEngine(
                     text.length < 20
                 }
             
+            // For write_file with < 5 files: trigger fallback if no function calls, regardless of text
+            // This ensures we continue creating files even if the agent gives a response but no actions
             val needsFallbackForNoCalls = functionCall.name == "write_file" && 
-                writeFileCount < 5 && 
-                hasMinimalText
+                writeFileCount < 5
+                // Removed hasMinimalText check - be more aggressive
             
             if (needsFallbackForNoCalls) {
                 android.util.Log.d("PpeExecutionEngine", "Fallback needed - no function calls, writeFileCount: $writeFileCount, hasMinimalText: $hasMinimalText")
