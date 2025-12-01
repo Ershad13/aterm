@@ -296,10 +296,28 @@ fun parseFileDiffFromToolResult(toolName: String, toolResult: ToolResult, toolAr
             )
         } 
         // For write_file, we only have new content (creates new file or overwrites)
-        else if (toolName == "write_file" && toolArgs != null) {
-            val newContent = toolArgs["content"] as? String ?: ""
+        else if (toolName == "write_file") {
+            // Try to get content from toolArgs first, then try to read from file
+            val newContent = if (toolArgs != null) {
+                toolArgs["content"] as? String ?: ""
+            } else {
+                // If toolArgs is null, try to read the file that was written
+                // The file path should have been extracted from llmContent above
+                try {
+                    val workspaceRoot = com.rk.libcommons.alpineDir()
+                    val file = java.io.File(workspaceRoot, filePath)
+                    if (file.exists()) {
+                        file.readText()
+                    } else {
+                        "" // File doesn't exist yet, but we have a path - return empty to indicate new file
+                    }
+                } catch (e: Exception) {
+                    android.util.Log.w("AgentScreen", "Failed to read file for diff: ${e.message}")
+                    ""
+                }
+            }
+            
             // Check if file exists to determine if it's new
-            // Use a coroutine-safe check
             val workspaceRoot = com.rk.libcommons.alpineDir()
             val file = java.io.File(workspaceRoot, filePath)
             val isNewFile = !file.exists()
@@ -307,18 +325,26 @@ fun parseFileDiffFromToolResult(toolName: String, toolResult: ToolResult, toolAr
                 ""
             } else {
                 try {
-                    file.takeIf { it.exists() }?.readText() ?: ""
+                    // For existing files, we need to read the old content before the write
+                    // But since the write already happened, we can't get the old content
+                    // So we'll just use empty string and show the new content
+                    ""
                 } catch (e: Exception) {
                     ""
                 }
             }
             
-            FileDiff(
-                filePath = filePath,
-                oldContent = oldContent,
-                newContent = newContent,
-                isNewFile = isNewFile
-            )
+            // Only create FileDiff if we have content or file path is valid
+            if (newContent.isNotEmpty() || filePath.isNotEmpty()) {
+                FileDiff(
+                    filePath = filePath,
+                    oldContent = oldContent,
+                    newContent = newContent,
+                    isNewFile = isNewFile
+                )
+            } else {
+                null
+            }
         } else {
             null
         }
@@ -2216,15 +2242,22 @@ fun AgentScreen(
                                                                 execState.toolResultCount++
                                                                 android.util.Log.d("AgentScreen", "Processing ToolResult event (count: ${execState.toolResultCount}, tool: ${event.toolName})")
                                                                 // Try to extract file diff from tool result
-                                                                // Find matching tool call from queue
+                                                                // Find matching tool call from queue - use FIFO order (first in, first out)
                                                                 val toolCallIndex = toolCallQueue.indexOfFirst { it.first == event.toolName }
                                                                 val toolArgs = if (toolCallIndex >= 0) {
                                                                     val args = toolCallQueue[toolCallIndex].second
                                                                     toolCallQueue.removeAt(toolCallIndex) // Remove after use
+                                                                    android.util.Log.d("AgentScreen", "Matched tool result with tool call args: ${args.keys}")
                                                                     args
-                                                                } else null
+                                                                } else {
+                                                                    android.util.Log.w("AgentScreen", "No matching tool call found in queue for ${event.toolName} (queue size: ${toolCallQueue.size})")
+                                                                    null
+                                                                }
                                                                 
                                                                 val fileDiff = parseFileDiffFromToolResult(event.toolName, event.result, toolArgs)
+                                                                if (fileDiff == null && (event.toolName == "write_file" || event.toolName == "edit")) {
+                                                                    android.util.Log.w("AgentScreen", "Failed to extract file diff for ${event.toolName} - toolArgs: ${toolArgs != null}, llmContent length: ${event.result.llmContent.length}")
+                                                                }
                                                                 
                                                                 withContext(Dispatchers.Main) {
                                                                     val resultMessage = AgentMessage(

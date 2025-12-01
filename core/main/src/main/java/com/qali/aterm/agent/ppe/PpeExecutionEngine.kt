@@ -178,9 +178,20 @@ class PpeExecutionEngine(
                                     val writeFileCount = allMessages.takeLast(20).flatMap { content ->
                                         content.parts.filterIsInstance<Part.FunctionResponsePart>().map { it.functionResponse.name }
                                     }.count { it == "write_file" }
-                                    val needsFallbackForWriteFile = (continuationResponse.text.isEmpty() || continuationResponse.functionCalls.isEmpty()) && 
-                                        functionCall.name == "write_file" && 
-                                        writeFileCount < 5  // If we've written less than 5 files, continue aggressively
+                                    
+                                    // More aggressive check: if continuation response has no function calls AND we've written less than 5 files
+                                    // Also check if the response text is very short or just says "done" or similar
+                                    val hasMinimalText = continuationResponse.text.trim().isEmpty() || 
+                                        continuationResponse.text.trim().lowercase().let { text ->
+                                            text == "done" || text == "complete" || text == "finished" || 
+                                            text.length < 20 // Very short responses likely mean the agent stopped
+                                        }
+                                    val needsFallbackForWriteFile = functionCall.name == "write_file" && 
+                                        writeFileCount < 5 && 
+                                        continuationResponse.functionCalls.isEmpty() &&
+                                        hasMinimalText
+                                    
+                                    android.util.Log.d("PpeExecutionEngine", "Fallback check - writeFileCount: $writeFileCount, needsFallback: $needsFallbackForWriteFile, hasMinimalText: $hasMinimalText, continuationText: '${continuationResponse.text.take(50)}'")
                                     val needsFallback = continuationResponse.text.isEmpty() && 
                                         continuationResponse.functionCalls.isEmpty() && 
                                         functionCall.name == "write_todos"
