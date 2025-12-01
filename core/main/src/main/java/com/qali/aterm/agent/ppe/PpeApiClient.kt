@@ -20,9 +20,12 @@ import java.util.concurrent.TimeUnit
 /**
  * API client for PPE scripts - non-streaming only
  * Uses existing ApiProviderManager for API cycling with reprompt fallback
+ * Supports Ollama when configured (bypasses ApiProviderManager)
  */
 class PpeApiClient(
-    private val toolRegistry: com.qali.aterm.agent.tools.ToolRegistry
+    private val toolRegistry: com.qali.aterm.agent.tools.ToolRegistry,
+    private val ollamaUrl: String? = null,
+    private val ollamaModel: String? = null
 ) {
     private val client = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
@@ -33,6 +36,7 @@ class PpeApiClient(
     /**
      * Make a non-streaming API call
      * Returns the assistant response text
+     * If Ollama is configured, uses Ollama directly; otherwise uses ApiProviderManager
      */
     suspend fun callApi(
         messages: List<Content>,
@@ -44,6 +48,35 @@ class PpeApiClient(
     ): Result<PpeApiResponse> {
         return withContext(Dispatchers.IO) {
             try {
+                // If Ollama is configured, use it directly (bypass ApiProviderManager)
+                if (ollamaUrl != null && ollamaModel != null) {
+                    val actualModel = model ?: ollamaModel
+                    
+                    // Build request using existing ApiRequestBuilder
+                    val requestBuilder = ApiRequestBuilder(toolRegistry)
+                    val requestBody = requestBuilder.buildRequest(
+                        chatHistory = messages,
+                        model = actualModel
+                    )
+                    
+                    // Add generation config parameters (temperature, topP, topK) if provided
+                    if (temperature != null || topP != null || topK != null) {
+                        val generationConfig = JSONObject()
+                        temperature?.let { generationConfig.put("temperature", it) }
+                        topP?.let { generationConfig.put("topP", it) }
+                        topK?.let { generationConfig.put("topK", it) }
+                        requestBody.put("generationConfig", generationConfig)
+                    }
+                    
+                    // Convert to Ollama format
+                    val convertedBody = ProviderAdapter.convertRequestToOllama(requestBody, actualModel)
+                    
+                    // Make direct Ollama API call (non-streaming)
+                    val response = makeDirectOllamaCall(ollamaUrl, actualModel, convertedBody, temperature, topP, topK)
+                    return@withContext Result.success(response)
+                }
+                
+                // Otherwise, use ApiProviderManager (existing flow)
                 val actualModel = model ?: ApiProviderManager.getCurrentModel()
                 
                 // Build request using existing ApiRequestBuilder
@@ -89,6 +122,88 @@ class PpeApiClient(
                 Result.failure(e)
             }
         }
+    }
+    
+    /**
+     * Make direct Ollama API call (non-streaming)
+     */
+    private suspend fun makeDirectOllamaCall(
+        ollamaUrl: String,
+        model: String,
+        requestBody: JSONObject,
+        temperature: Double? = null,
+        topP: Double? = null,
+        topK: Int? = null
+    ): PpeApiResponse {
+        // Ensure URL ends with /api/chat
+        val baseUrl = ollamaUrl.trimEnd('/')
+        val url = "$baseUrl/api/chat"
+        
+        // Add parameters to Ollama request if provided
+        temperature?.let { requestBody.put("temperature", it) }
+        topP?.let { requestBody.put("top_p", it) }
+        topK?.let { requestBody.put("top_k", it) }
+        
+        // Make HTTP request (non-streaming)
+        val requestBodyString = requestBody.toString()
+        val httpRequest = Request.Builder()
+            .url(url)
+            .post(requestBodyString.toRequestBody("application/json".toMediaType()))
+            .build()
+        
+        val response = client.newCall(httpRequest).execute()
+        
+        if (!response.isSuccessful) {
+            val errorBody = response.body?.string() ?: "Unknown error"
+            throw IOException("Ollama API call failed: ${response.code} - $errorBody")
+        }
+        
+        val bodyString = response.body?.string() ?: ""
+        if (bodyString.isEmpty()) {
+            return PpeApiResponse(text = "", finishReason = "STOP")
+        }
+        
+        // Parse Ollama response
+        val chunks = mutableListOf<String>()
+        val functionCalls = mutableListOf<FunctionCall>()
+        val toolCallsToExecute = mutableListOf<Triple<FunctionCall, ToolResult, String>>()
+        
+        // Helper to convert JSONObject to Map
+        fun jsonObjectToMap(obj: JSONObject): Map<String, Any> {
+            val map = mutableMapOf<String, Any>()
+            val keys = obj.keys()
+            while (keys.hasNext()) {
+                val key = keys.next()
+                val value = obj.get(key)
+                map[key] = when (value) {
+                    is JSONObject -> jsonObjectToMap(value)
+                    is org.json.JSONArray -> {
+                        val list = mutableListOf<Any>()
+                        for (i in 0 until value.length()) {
+                            list.add(value.get(i))
+                        }
+                        list
+                    }
+                    else -> value
+                }
+            }
+            return map
+        }
+        
+        val finishReason = ApiResponseParser.parseOllamaResponse(
+            bodyString,
+            onChunk = { chunks.add(it) },
+            onToolCall = { functionCalls.add(it) },
+            onToolResult = { _, _ -> },
+            toolCallsToExecute = toolCallsToExecute,
+            jsonObjectToMap = ::jsonObjectToMap
+        )
+        
+        return PpeApiResponse(
+            text = chunks.joinToString(""),
+            finishReason = finishReason ?: "STOP",
+            functionCalls = functionCalls
+        )
     }
     
     /**

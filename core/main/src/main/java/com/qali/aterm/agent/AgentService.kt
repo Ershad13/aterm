@@ -21,24 +21,29 @@ object AgentService {
     private var useOllama: Boolean = false
     private var useCliAgent: Boolean = true // Use CLI-based agent by default
     private var currentWorkspaceRoot: String = alpineDir().absolutePath
+    private var currentOllamaUrl: String? = null
+    private var currentOllamaModel: String? = null
     
     fun initialize(workspaceRoot: String = alpineDir().absolutePath, useOllama: Boolean = false, ollamaUrl: String = "http://localhost:11434", ollamaModel: String = "llama3.2", sessionId: String? = null, mainActivity: MainActivity? = null): Any {
         val workspaceChanged = currentWorkspaceRoot != workspaceRoot
         val useOllamaChanged = this.useOllama != useOllama
+        val ollamaConfigChanged = this.currentOllamaUrl != ollamaUrl || this.currentOllamaModel != ollamaModel
         
         currentWorkspaceRoot = workspaceRoot
         this.useOllama = useOllama
+        this.currentOllamaUrl = if (useOllama) ollamaUrl else null
+        this.currentOllamaModel = if (useOllama) ollamaModel else null
         
         if (useOllama) {
             // Use CLI-based agent for Ollama too (non-streaming flow)
             if (useCliAgent) {
-                // Recreate CLI client if workspace changed, useOllama changed, or client doesn't exist
-                if (cliClient == null || workspaceChanged || useOllamaChanged) {
+                // Recreate CLI client if workspace changed, useOllama changed, Ollama config changed, or client doesn't exist
+                if (cliClient == null || workspaceChanged || useOllamaChanged || ollamaConfigChanged) {
                     val toolRegistry = ToolRegistry()
                     registerAllTools(toolRegistry, workspaceRoot, sessionId, mainActivity)
                     
-                    // Create CLI-based client (works with Ollama via ProviderAdapter)
-                    val newCliClient = CliBasedAgentClient(toolRegistry, workspaceRoot)
+                    // Create CLI-based client with Ollama configuration (bypasses ApiProviderManager)
+                    val newCliClient = CliBasedAgentClient(toolRegistry, workspaceRoot, ollamaUrl, ollamaModel)
                     cliClient = newCliClient
                     
                     // Register web search tools (need AgentClient for these, so create a temporary one)
@@ -49,7 +54,7 @@ object AgentService {
                 return cliClient!!
             } else {
                 // Fallback to old OllamaClient if CLI agent is disabled
-                if (ollamaClient == null || workspaceChanged || useOllamaChanged) {
+                if (ollamaClient == null || workspaceChanged || useOllamaChanged || ollamaConfigChanged) {
                     val toolRegistry = ToolRegistry()
                     registerAllTools(toolRegistry, workspaceRoot, sessionId, mainActivity)
                     
@@ -63,15 +68,15 @@ object AgentService {
                 return ollamaClient!!
             }
         } else {
-            // Use CLI-based agent by default
+            // Use CLI-based agent by default (without Ollama)
             if (useCliAgent) {
                 // Recreate CLI client if workspace changed or client doesn't exist
-                if (cliClient == null || workspaceChanged) {
+                if (cliClient == null || workspaceChanged || useOllamaChanged) {
                     val toolRegistry = ToolRegistry()
                     registerAllTools(toolRegistry, workspaceRoot, sessionId, mainActivity)
                     
-                    // Create CLI-based client
-                    val newCliClient = CliBasedAgentClient(toolRegistry, workspaceRoot)
+                    // Create CLI-based client (no Ollama config - uses ApiProviderManager)
+                    val newCliClient = CliBasedAgentClient(toolRegistry, workspaceRoot, null, null)
                     cliClient = newCliClient
                     
                     // Register web search tools (need AgentClient for these, so create a temporary one)

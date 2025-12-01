@@ -12,9 +12,11 @@ import android.util.Log
  */
 class PpeExecutionEngine(
     private val toolRegistry: ToolRegistry,
-    private val workspaceRoot: String
+    private val workspaceRoot: String,
+    private val ollamaUrl: String? = null,
+    private val ollamaModel: String? = null
 ) {
-    private val apiClient = PpeApiClient(toolRegistry)
+    private val apiClient = PpeApiClient(toolRegistry, ollamaUrl, ollamaModel)
     private val scriptCache = mutableMapOf<String, PpeScript>()
     
     // Track tool results for file diff extraction (queue-based to handle multiple calls)

@@ -15,9 +15,11 @@ import java.io.File
  */
 class CliBasedAgentClient(
     private val toolRegistry: ToolRegistry,
-    private val workspaceRoot: String = "/data/data/com.termux/files/home"
+    private val workspaceRoot: String = "/data/data/com.termux/files/home",
+    private val ollamaUrl: String? = null,
+    private val ollamaModel: String? = null
 ) {
-    private val executionEngine = PpeExecutionEngine(toolRegistry, workspaceRoot)
+    private val executionEngine = PpeExecutionEngine(toolRegistry, workspaceRoot, ollamaUrl, ollamaModel)
     
     /**
      * Default script path - can be overridden
