@@ -553,12 +553,27 @@ class PpeExecutionEngine(
         // Note: We don't add assistant messages with placeholders - they're just markers for AI response
         val messageWithoutPlaceholder = processedContent.replace(Regex("""\[\[.*?\]\]"""), "")
         if (messageWithoutPlaceholder.isNotEmpty() && message.role != "assistant") {
-            messages.add(Content(role = message.role, parts = listOf(Part.TextPart(text = messageWithoutPlaceholder))))
+            // Ensure we add as user role (Gemini API requirement: last message must be user)
+            val roleToUse = if (message.role == "user") "user" else "user"
+            messages.add(Content(role = roleToUse, parts = listOf(Part.TextPart(text = messageWithoutPlaceholder))))
         }
         
-        // Safety check: ensure we have at least one message
+        // Safety check: ensure we have at least one message and it's a user message
         if (messages.isEmpty()) {
             throw Exception("Cannot make API call: no messages to send. Ensure user message is included before AI placeholder.")
+        }
+        
+        // CRITICAL: Gemini API requires the last message to be a user message
+        // If the last message is not a user message, add an empty user message or convert it
+        if (messages.last().role != "user") {
+            android.util.Log.w("PpeExecutionEngine", "Last message is not user role (${messages.last().role}), ensuring user message at end")
+            // If last message has content, we'll handle it in the blueprint section below
+            // Otherwise, add an empty user message to satisfy API requirement
+            if (messages.last().parts.isEmpty() || messages.last().parts.all { 
+                it is Part.TextPart && it.text.isEmpty() 
+            }) {
+                messages.add(Content(role = "user", parts = listOf(Part.TextPart(text = "Continue."))))
+            }
         }
         
         // Get model from placeholder params or script
@@ -608,11 +623,29 @@ class PpeExecutionEngine(
         }
         
         // Update message content if modified
-        if (finalMessageContent != messageWithoutPlaceholder && messages.isNotEmpty()) {
-            messages[messages.size - 1] = Content(
-                role = message.role,
-                parts = listOf(Part.TextPart(text = finalMessageContent))
-            )
+        // CRITICAL: Ensure the last message is always a user message (Gemini API requirement)
+        if (finalMessageContent != messageWithoutPlaceholder) {
+            if (messages.isNotEmpty() && messages.last().role == "user") {
+                // Update the last user message
+                messages[messages.size - 1] = Content(
+                    role = "user",
+                    parts = listOf(Part.TextPart(text = finalMessageContent))
+                )
+            } else {
+                // Add a new user message with the blueprint (ensures last message is user)
+                messages.add(Content(
+                    role = "user",
+                    parts = listOf(Part.TextPart(text = finalMessageContent))
+                ))
+            }
+        } else if (messages.isEmpty() || messages.last().role != "user") {
+            // Safety: Ensure we always end with a user message
+            if (messageWithoutPlaceholder.isNotEmpty()) {
+                messages.add(Content(
+                    role = "user",
+                    parts = listOf(Part.TextPart(text = messageWithoutPlaceholder))
+                ))
+            }
         }
         
         // Get tools from registry
