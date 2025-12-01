@@ -2396,28 +2396,111 @@ class PpeExecutionEngine(
                 var fileCode = fileCodeResult.getOrNull()
                 if (fileCode == null) {
                     val errorMsg = fileCodeResult.exceptionOrNull()?.message ?: "unknown error"
-                    // If the model returned empty code, retry once with a simplified prompt
+                    // If the model returned empty code, retry with a more direct prompt
                     if (errorMsg.contains("Generated code is empty")) {
-                        onChunk("↻ Generated code was empty for ${file.path}. Retrying once with a simplified prompt...\n")
-                        Log.w("PpeExecutionEngine", "Empty code for ${file.path}, retrying once")
+                        onChunk("↻ Generated code was empty for ${file.path}. Retrying with a more direct prompt...\n")
+                        Log.w("PpeExecutionEngine", "Empty code for ${file.path}, retrying with direct prompt")
                         
-                        val simplifiedFile = file.copy(
-                            description = if (file.description.isNotBlank()) {
-                                "${file.description} (simple, minimal working version)"
-                            } else {
-                                "Simple, minimal working version of ${file.path}"
+                        // Use a very direct, minimal prompt for retry
+                        val directPrompt = when {
+                            file.path.endsWith(".json") -> {
+                                """Generate a valid JSON file for ${file.path}.
+${file.description}
+
+Return ONLY the JSON content, no markdown, no explanations. Start with '{'."""
                             }
+                            file.path.endsWith(".html") -> {
+                                """Generate a complete HTML file for ${file.path}.
+${file.description}
+
+Return ONLY the HTML content, no markdown, no explanations. Start with '<!DOCTYPE' or '<html'."""
+                            }
+                            file.path.endsWith(".css") -> {
+                                """Generate a complete CSS file for ${file.path}.
+${file.description}
+
+Return ONLY the CSS content, no markdown, no explanations."""
+                            }
+                            file.path.endsWith(".js") -> {
+                                """Generate a complete JavaScript file for ${file.path}.
+${file.description}
+
+Return ONLY the JavaScript code, no markdown, no explanations. Start with the actual code."""
+                            }
+                            else -> {
+                                """Generate the complete code for ${file.path}.
+${file.description}
+
+Return ONLY the raw code content. No markdown, no explanations, no code blocks. Just the code."""
+                            }
+                        }
+                        
+                        val retryMessages = updatedChatHistory.toMutableList()
+                        retryMessages.add(
+                            Content(
+                                role = "user",
+                                parts = listOf(Part.TextPart(text = directPrompt))
+                            )
                         )
-                        val retryResult = generateFileCode(
-                            simplifiedFile,
-                            filteredBlueprint,
-                            userMessage,
-                            updatedChatHistory,
-                            script
+                        
+                        // Apply rate limiting
+                        rateLimiter.acquire()
+                        
+                        val retryResult = apiClient.callApi(
+                            messages = retryMessages,
+                            model = null,
+                            temperature = getOptimalTemperature(ModelTemperatureConfig.TaskType.CODE_GENERATION),
+                            topP = null,
+                            topK = null,
+                            tools = null
                         )
-                        fileCode = retryResult.getOrNull()
-                        if (fileCode == null) {
-                            onChunk("✗ Still failed to generate code for ${file.path}: ${retryResult.exceptionOrNull()?.message}\n")
+                        
+                        val retryResponse = retryResult.getOrElse {
+                            onChunk("✗ Retry failed for ${file.path}: ${it.message}\n")
+                            continue
+                        }
+                        
+                        // Extract code from retry response
+                        var retryCode = retryResponse.text.trim()
+                        
+                        // Remove markdown code blocks
+                        val codeBlockPatterns = listOf(
+                            Regex("```(?:\\w+)?\\s*\\n?(.*?)\\n?\\s*```", RegexOption.DOT_MATCHES_ALL),
+                            Regex("```\\s*(.*?)\\s*```", RegexOption.DOT_MATCHES_ALL),
+                            Regex("```(.*?)```", RegexOption.DOT_MATCHES_ALL)
+                        )
+                        
+                        for (pattern in codeBlockPatterns) {
+                            val match = pattern.find(retryCode)
+                            if (match != null) {
+                                val extracted = match.groupValues[1].trim()
+                                if (extracted.isNotEmpty()) {
+                                    retryCode = extracted
+                                    break
+                                }
+                            }
+                        }
+                        
+                        // Remove common prefixes
+                        val prefixesToRemove = listOf(
+                            "Here is the code:", "Here's the code:", "Here is the file:", "Here's the file:",
+                            "Code for ${file.path}:", "The code is:", "The file content is:"
+                        )
+                        
+                        for (prefix in prefixesToRemove) {
+                            if (retryCode.startsWith(prefix, ignoreCase = true)) {
+                                retryCode = retryCode.substring(prefix.length).trim()
+                            }
+                        }
+                        
+                        retryCode = retryCode.trim()
+                        
+                        if (retryCode.isNotEmpty()) {
+                            fileCode = retryCode
+                            onChunk("✓ Generated code for ${file.path} on retry\n")
+                        } else {
+                            onChunk("✗ Still failed to generate code for ${file.path} (retry also returned empty)\n")
+                            Log.e("PpeExecutionEngine", "Retry also returned empty code. Response: ${retryResponse.text.take(500)}")
                             continue
                         }
                     } else {
@@ -2828,15 +2911,27 @@ JSON Blueprint:
             
             appendLine("Original User Request: $userMessage")
             appendLine("")
-            appendLine("IMPORTANT:")
-            appendLine("- Generate COMPLETE, working code for this file")
-            appendLine("- Use appropriate imports/exports based on the project type")
-            appendLine("- If importing from related files, use ONLY the names listed above")
-            appendLine("- Ensure the code is production-ready and follows best practices")
-            appendLine("- Include all necessary functionality")
-            appendLine("- Return ONLY the code, no explanations, no markdown")
+            appendLine("CRITICAL INSTRUCTIONS:")
+            appendLine("1. You MUST generate COMPLETE, working code for this file")
+            appendLine("2. Return ONLY the raw code content - NO explanations, NO markdown, NO code blocks")
+            appendLine("3. Do NOT wrap the code in ``` or any markdown")
+            appendLine("4. Do NOT add comments like 'Here is the code:' or 'Here's the file:'")
+            appendLine("5. Start directly with the actual code (e.g., '{' for JSON, '<!DOCTYPE' for HTML, 'const' for JS)")
+            appendLine("6. The response will be written directly to the file, so it must be valid code")
+            appendLine("7. Use appropriate imports/exports based on the project type")
+            appendLine("8. If importing from related files, use ONLY the names listed above")
+            appendLine("9. Ensure the code is production-ready and follows best practices")
+            appendLine("10. Include all necessary functionality")
             appendLine("")
-            appendLine("Code for ${file.path}:")
+            appendLine("EXAMPLE FORMAT:")
+            when {
+                file.path.endsWith(".json") -> appendLine("If this were package.json, you would return: {\"name\": \"my-app\", \"version\": \"1.0.0\"}")
+                file.path.endsWith(".html") -> appendLine("If this were index.html, you would return: <!DOCTYPE html><html><head>...</head><body>...</body></html>")
+                file.path.endsWith(".js") -> appendLine("If this were app.js, you would return: const express = require('express'); const app = express(); ...")
+                else -> appendLine("Return the raw code content directly, starting with the first character of the actual code.")
+            }
+            appendLine("")
+            appendLine("Now generate the code for ${file.path} (raw code only, no markdown, no explanations):")
         }
         
         val messages = chatHistory.toMutableList()
@@ -2871,19 +2966,95 @@ JSON Blueprint:
             throw Exception("File code generation failed for ${file.path}: ${it.message}", it)
         }
         
+        // Check if response has function calls instead of text (shouldn't happen with tools=null, but check anyway)
+        if (response.text.isEmpty() && response.functionCalls.isNotEmpty()) {
+            Log.w("PpeExecutionEngine", "Response has function calls but no text for ${file.path}. This shouldn't happen with tools=null.")
+            throw Exception("Model returned function calls instead of code for ${file.path}. Please retry.")
+        }
+        
         // Extract code from response (remove markdown if present)
         var code = response.text.trim()
         
-        // Remove markdown code blocks if present
-        val codeBlockPattern = Regex("```(?:\\w+)?\\s*(.*?)\\s*```", RegexOption.DOT_MATCHES_ALL)
-        codeBlockPattern.find(code)?.let { match ->
-            code = match.groupValues[1].trim()
+        // If response text is empty, log the full response for debugging
+        if (code.isEmpty()) {
+            Log.e("PpeExecutionEngine", "Response text is empty for ${file.path}. Full response: functionCalls=${response.functionCalls.size}, text length=${response.text.length}")
         }
         
-        Log.d("PpeExecutionEngine", "Generated code for ${file.path} (length: ${code.length})")
+        Log.d("PpeExecutionEngine", "Raw response for ${file.path} (length: ${code.length}): ${code.take(200)}")
+        
+        // Remove markdown code blocks if present (try multiple patterns)
+        val codeBlockPatterns = listOf(
+            Regex("```(?:\\w+)?\\s*\\n?(.*?)\\n?\\s*```", RegexOption.DOT_MATCHES_ALL), // Standard markdown
+            Regex("```\\s*(.*?)\\s*```", RegexOption.DOT_MATCHES_ALL), // Simple markdown
+            Regex("```(.*?)```", RegexOption.DOT_MATCHES_ALL) // Minimal markdown
+        )
+        
+        for (pattern in codeBlockPatterns) {
+            val match = pattern.find(code)
+            if (match != null) {
+                val extracted = match.groupValues[1].trim()
+                if (extracted.isNotEmpty()) {
+                    code = extracted
+                    Log.d("PpeExecutionEngine", "Extracted code from markdown block (length: ${code.length})")
+                    break
+                }
+            }
+        }
+        
+        // Remove common prefixes that models sometimes add
+        val prefixesToRemove = listOf(
+            "Here is the code:",
+            "Here's the code:",
+            "Here is the file:",
+            "Here's the file:",
+            "Code for ${file.path}:",
+            "The code is:",
+            "The file content is:"
+        )
+        
+        for (prefix in prefixesToRemove) {
+            if (code.startsWith(prefix, ignoreCase = true)) {
+                code = code.substring(prefix.length).trim()
+                Log.d("PpeExecutionEngine", "Removed prefix: $prefix")
+            }
+        }
+        
+        // Remove leading/trailing quotes if the entire response is quoted
+        if ((code.startsWith("\"") && code.endsWith("\"")) || 
+            (code.startsWith("'") && code.endsWith("'"))) {
+            code = code.substring(1, code.length - 1).trim()
+            Log.d("PpeExecutionEngine", "Removed surrounding quotes")
+        }
+        
+        // Final trim
+        code = code.trim()
+        
+        // If code is still empty but original response had content, try using the original response
+        if (code.isEmpty() && response.text.trim().isNotEmpty()) {
+            Log.w("PpeExecutionEngine", "Code extraction resulted in empty string, using original response")
+            code = response.text.trim()
+            
+            // Try one more aggressive extraction
+            val aggressivePattern = Regex("""```[^`]*?```""", RegexOption.DOT_MATCHES_ALL)
+            val aggressiveMatch = aggressivePattern.find(code)
+            if (aggressiveMatch != null) {
+                val extracted = aggressiveMatch.value
+                    .removePrefix("```")
+                    .removeSuffix("```")
+                    .trim()
+                    .removePrefix(Regex("""\w+""").find(extracted)?.value ?: "")
+                    .trim()
+                if (extracted.isNotEmpty()) {
+                    code = extracted
+                }
+            }
+        }
+        
+        Log.d("PpeExecutionEngine", "Final extracted code for ${file.path} (length: ${code.length}): ${code.take(200)}")
         
         // Validate code is not empty
-        if (code.trim().isEmpty()) {
+        if (code.isEmpty()) {
+            Log.e("PpeExecutionEngine", "Generated code is empty for ${file.path}. Original response (full): ${response.text}")
             throw Exception("Generated code is empty for ${file.path}")
         }
         

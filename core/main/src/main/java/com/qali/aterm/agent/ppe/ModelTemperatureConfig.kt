@@ -64,7 +64,7 @@ object ModelTemperatureConfig {
         ModelCategory.PRECISION to 0.3,
         ModelCategory.BALANCED to 0.6,
         ModelCategory.CREATIVE to 0.8,
-        ModelCategory.CODE_FOCUSED to 0.2,
+        ModelCategory.CODE_FOCUSED to 0.4, // Increased from 0.2 to encourage code generation
         ModelCategory.ANALYSIS to 0.7
     )
     
@@ -84,7 +84,7 @@ object ModelTemperatureConfig {
      * Task type adjustments (multipliers)
      */
     private val taskAdjustments = mapOf(
-        TaskType.CODE_GENERATION to 0.7,      // Reduce by 30%
+        TaskType.CODE_GENERATION to 1.0,      // No reduction - keep temperature to encourage generation
         TaskType.CODE_ANALYSIS to 0.85,        // Reduce by 15%
         TaskType.CREATIVE_WRITING to 1.3,      // Increase by 30%
         TaskType.PROBLEM_SOLVING to 1.0,       // No change
