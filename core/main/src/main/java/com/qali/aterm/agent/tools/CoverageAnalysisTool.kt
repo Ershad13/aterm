@@ -499,7 +499,7 @@ class CoverageAnalysisToolInvocation(
                 appendLine()
                 
                 // Sort by coverage (lowest first)
-                val sortedFiles = result.fileCoverage.toList().sortedBy { it.value }
+                val sortedFiles = result.fileCoverage.toList().sortedBy { (_, coverage) -> coverage }
                 
                 appendLine("| File | Coverage |")
                 appendLine("|------|----------|")

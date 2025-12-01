@@ -288,7 +288,7 @@ class DocumentationGenerationToolInvocation(
     private fun formatOutput(content: String, format: String): String {
         return when (format.lowercase()) {
             "markdown", "md" -> content
-            "text", "txt" -> content.replace(Regex("[`*_#>"]"), "")
+            "text", "txt" -> content.replace(Regex("[`*_#>]"), "")
             "html" -> {
                 """<html><body><pre>${escapeHtml(content)}</pre></body></html>""".trimIndent()
             }

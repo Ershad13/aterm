@@ -88,7 +88,7 @@ class CodeReviewToolInvocation(
     
     override suspend fun execute(
         signal: CancellationSignal?,
-        updateOutput: ((String) -> Unit?
+        updateOutput: ((String) -> Unit)?
     ): ToolResult = withContext(Dispatchers.IO) {
         if (signal?.isAborted() == true) {
             return@withContext ToolResult(
@@ -898,7 +898,10 @@ class CodeReviewTool(
             "focus" to PropertySchema(
                 type = "array",
                 description = "Focus areas: bugs, security, style, performance, best_practices, all (default: all)",
-                items = PropertySchema(type = "string")
+                items = PropertySchema(
+                    type = "string",
+                    description = "Focus area name"
+                )
             ),
             "severity" to PropertySchema(
                 type = "string",

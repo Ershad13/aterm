@@ -77,7 +77,7 @@ object CommandHistoryManager {
      * Get recent history
      */
     fun getRecentHistory(limit: Int = 50): List<CommandHistoryEntry> {
-        return history.takeLast(limit)
+        return history.toList().takeLast(limit)
     }
     
     /**
@@ -88,7 +88,7 @@ object CommandHistoryManager {
         return history.filter { entry ->
             entry.command.lowercase().contains(lowerQuery) ||
             entry.output?.lowercase()?.contains(lowerQuery) == true
-        }.takeLast(limit)
+        }.toList().takeLast(limit)
     }
     
     /**

@@ -825,7 +825,11 @@ class CodeQualityMetricsTool(
             "metrics" to PropertySchema(
                 type = "array",
                 description = "Specific metrics to calculate: 'complexity', 'smells', 'standards', or 'all'",
-                items = PropertySchema(type = "string", enum = listOf("complexity", "smells", "standards", "all"))
+                items = PropertySchema(
+                    type = "string",
+                    description = "Metric name to calculate",
+                    enum = listOf("complexity", "smells", "standards", "all")
+                )
             ),
             "language" to PropertySchema(
                 type = "string",

@@ -2276,9 +2276,11 @@ class PpeExecutionEngine(
                     updatedChatHistory,
                     script
                 )
-                
-                val fileCode = fileCodeResult.getOrElse { error ->
-                    onChunk("✗ Failed to generate code for ${file.path}: ${error.message}\n")
+
+                // Avoid using 'continue' inside inline lambda (requires newer language version)
+                val fileCode = fileCodeResult.getOrNull()
+                if (fileCode == null) {
+                    onChunk("✗ Failed to generate code for ${file.path}: ${fileCodeResult.exceptionOrNull()?.message}\n")
                     continue
                 }
                 
@@ -3343,24 +3345,45 @@ Plan:
         private val windowMs: Long
     ) {
         private val requests = mutableListOf<Long>()
-        
+
+        /**
+         * Acquire a rate-limit slot.
+         *
+         * Note: We must not call suspend functions (like delay) while holding a lock,
+         * so we compute the required wait time inside the synchronized block and
+         * perform the actual delay outside.
+         */
         suspend fun acquire() {
-            val now = System.currentTimeMillis()
-            synchronized(requests) {
-                // Remove old requests outside the window
-                requests.removeAll { it < now - windowMs }
-                
-                // Wait if we're at the limit
-                while (requests.size >= maxRequests) {
-                    val oldestRequest = requests.minOrNull() ?: break
-                    val waitTime = (oldestRequest + windowMs) - now
-                    if (waitTime > 0) {
-                        delay(waitTime)
+            while (true) {
+                val now = System.currentTimeMillis()
+                var waitTimeMs: Long = 0L
+
+                val canProceed = synchronized(requests) {
+                    // Remove old requests outside the window
+                    requests.removeAll { it < now - windowMs }
+
+                    if (requests.size < maxRequests) {
+                        // We can proceed immediately
+                        requests.add(now)
+                        true
+                    } else {
+                        // We need to wait until the oldest request expires
+                        val oldestRequest = requests.minOrNull() ?: now
+                        waitTimeMs = (oldestRequest + windowMs) - now
+                        false
                     }
-                    requests.removeAll { it < System.currentTimeMillis() - windowMs }
                 }
-                
-                requests.add(System.currentTimeMillis())
+
+                if (canProceed) {
+                    return
+                }
+
+                if (waitTimeMs > 0) {
+                    delay(waitTimeMs)
+                } else {
+                    // No need to wait, loop will try again
+                    yield()
+                }
             }
         }
     }

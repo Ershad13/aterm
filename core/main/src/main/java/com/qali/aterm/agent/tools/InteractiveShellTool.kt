@@ -589,8 +589,10 @@ class InteractiveShellToolInvocation(
                 appendLine()
                 appendLine("| # | Command |")
                 appendLine("|---|---------|")
-                session.commandHistory.takeLast(20).forEachIndexed { index, cmd ->
-                    appendLine("| ${session.commandHistory.size - session.commandHistory.takeLast(20).size + index + 1} | `${cmd.take(60)}` |")
+                val recentCommands = session.commandHistory.toList().takeLast(20)
+                recentCommands.forEachIndexed { index, cmd ->
+                    val startIndex = session.commandHistory.size - recentCommands.size + index + 1
+                    appendLine("| $startIndex | `${cmd.take(60)}` |")
                 }
             }
             appendLine()
@@ -598,11 +600,12 @@ class InteractiveShellToolInvocation(
                 appendLine("## Last Command")
                 appendLine()
                 appendLine("**Command:** `${session.lastCommand}`")
-                if (session.lastOutput.isNotEmpty()) {
+                val lastOutput = session.lastOutput ?: ""
+                if (lastOutput.isNotEmpty()) {
                     appendLine("**Output Preview:**")
                     appendLine("```")
-                    appendLine(session.lastOutput.take(200))
-                    if (session.lastOutput.length > 200) {
+                    appendLine(lastOutput.take(200))
+                    if (lastOutput.length > 200) {
                         appendLine("...")
                     }
                     appendLine("```")

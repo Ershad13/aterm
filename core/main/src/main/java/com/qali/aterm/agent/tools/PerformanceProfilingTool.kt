@@ -223,22 +223,23 @@ class PerformanceProfilingToolInvocation(
                 val duration = System.currentTimeMillis() - state.startTime
                 operationTimes.add(OperationTime(
                     operationId = operationId,
-                    operationType = state.operationType,
+                    operationType = "unknown",
                     duration = duration,
                     timestamp = state.startTime
                 ))
             }
         } else {
-            // Get all operations from Observability
-            // Note: Observability doesn't expose all operations directly, so we use ExecutionStateTracker
-            allOperations.forEach { (id, state) ->
+            // Get all operations from ExecutionStateTracker
+            ExecutionStateTracker.getAllActiveExecutions().forEach { state ->
                 val duration = System.currentTimeMillis() - state.startTime
-                operationTimes.add(OperationTime(
-                    operationId = id,
-                    operationType = state.operationType,
-                    duration = duration,
-                    timestamp = state.startTime
-                ))
+                operationTimes.add(
+                    OperationTime(
+                        operationId = state.operationId,
+                        operationType = "unknown",
+                        duration = duration,
+                        timestamp = state.startTime
+                    )
+                )
             }
         }
         
@@ -320,20 +321,22 @@ class PerformanceProfilingToolInvocation(
         val allOperations = ExecutionStateTracker.getAllActiveExecutions()
         val toolCalls = mutableListOf<ToolCallTime>()
         val toolUsage = mutableMapOf<String, Int>()
-        
-        allOperations.forEach { (operationId, state) ->
+
+        allOperations.forEach { state ->
             state.toolCalls.forEach { toolCall ->
-                val toolName = toolCall.toolName
+                val toolName = toolCall.name
                 toolUsage[toolName] = toolUsage.getOrDefault(toolName, 0) + 1
-                
+
                 // Estimate duration (would need actual timing data)
                 val duration = 100L // placeholder
-                toolCalls.add(ToolCallTime(
-                    toolName = toolName,
-                    operationId = operationId,
-                    duration = duration,
-                    timestamp = System.currentTimeMillis()
-                ))
+                toolCalls.add(
+                    ToolCallTime(
+                        toolName = toolName,
+                        operationId = state.operationId,
+                        duration = duration,
+                        timestamp = System.currentTimeMillis()
+                    )
+                )
             }
         }
         

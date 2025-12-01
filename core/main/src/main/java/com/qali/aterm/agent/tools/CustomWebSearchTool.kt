@@ -807,7 +807,10 @@ class CustomWebSearchTool(
             "engines" to PropertySchema(
                 type = "array",
                 description = "Optional list of search engines to use (e.g., ['duckduckgo','bing','google']). Defaults to a sensible order.",
-                items = PropertySchema(type = "string")
+                items = PropertySchema(
+                    type = "string",
+                    description = "Search engine identifier (e.g., 'duckduckgo')"
+                )
             ),
             "maxResults" to PropertySchema(
                 type = "integer",

@@ -118,12 +118,13 @@ class ExecutionTraceToolInvocation(
         try {
             updateOutput?.invoke("📊 Collecting trace data...")
             
-            val traces = if (params.operationId != null) {
-                listOf(generateTrace(params.operationId))
+            val traces = mutableListOf<ExecutionTrace>()
+            if (params.operationId != null) {
+                traces.add(generateTrace(params.operationId))
             } else {
                 // Generate traces for all active operations
-                ExecutionStateTracker.getAllActiveExecutions().keys.map { opId ->
-                    generateTrace(opId)
+                ExecutionStateTracker.getAllActiveExecutions().forEach { state ->
+                    traces.add(generateTrace(state.operationId))
                 }
             }
             

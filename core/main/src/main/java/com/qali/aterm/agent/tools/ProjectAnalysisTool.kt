@@ -576,6 +576,7 @@ class ProjectAnalysisToolInvocation(
             .filter { it.isFile && it.extension in listOf("js", "ts", "py", "java", "kt") }
             .filter { it.length() > 100 * 1024 } // > 100KB
             .map { it.relativeTo(projectPath).path }
+            .toList()
         
         if (largeFiles.isNotEmpty()) {
             issues.add(ProjectIssue(
