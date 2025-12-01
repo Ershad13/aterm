@@ -2270,21 +2270,33 @@ class PpeExecutionEngine(
             // Parse blueprint JSON exactly as returned by the model
             val blueprint = parseBlueprintJson(blueprintJson)
             if (blueprint == null) {
-                Log.w("PpeExecutionEngine", "Failed to parse blueprint JSON")
-                return PpeExecutionResult(
-                    success = false,
-                    finalResult = "Failed to parse project blueprint",
-                    variables = emptyMap(),
-                    chatHistory = chatHistory,
-                    error = "Blueprint parsing failed"
-                )
-            }
-            
-            // Validate blueprint
-            val validation = validateBlueprint(blueprint)
-            if (!validation.isValid) {
-                val errorMsg = "Blueprint validation failed:\n${validation.errors.joinToString("\n")}"
+                val errorMsg = "Failed to parse project blueprint. The model may not have returned valid JSON."
                 Log.e("PpeExecutionEngine", errorMsg)
+                Log.e("PpeExecutionEngine", "Blueprint JSON that failed to parse: ${blueprintJson.take(1000)}")
+                onChunk("❌ $errorMsg\n")
+                onChunk("Attempting to retry blueprint generation...\n")
+                
+                // Retry blueprint generation once
+                val retryResult = generateBlueprintJson(userMessage, chatHistory, script, projectType, suggestedTemplate)
+                val retryBlueprintJson = retryResult.getOrNull()
+                if (retryBlueprintJson != null) {
+                    val retryBlueprint = parseBlueprintJson(retryBlueprintJson)
+                    if (retryBlueprint != null && retryBlueprint.files.isNotEmpty()) {
+                        onChunk("✅ Blueprint generated successfully on retry.\n")
+                        // Continue with retry blueprint - recursively call the main function
+                        return executeTwoPhaseProjectStartup(
+                            userMessage,
+                            chatHistory,
+                            script,
+                            onChunk,
+                            onToolCall,
+                            onToolResult,
+                            projectType,
+                            suggestedTemplate
+                        )
+                    }
+                }
+                
                 return PpeExecutionResult(
                     success = false,
                     finalResult = errorMsg,
@@ -2294,15 +2306,73 @@ class PpeExecutionEngine(
                 )
             }
             
-            if (validation.warnings.isNotEmpty()) {
-                onChunk("Warnings: ${validation.warnings.joinToString("; ")}\n")
+            // Validate blueprint
+            val validation = validateBlueprint(blueprint)
+            
+            // Log validation results
+            if (validation.errors.isNotEmpty()) {
+                val errorMsg = "Blueprint validation errors:\n${validation.errors.joinToString("\n")}"
+                Log.e("PpeExecutionEngine", errorMsg)
+                onChunk("⚠️ Blueprint validation errors:\n${validation.errors.joinToString("\n")}\n")
             }
             
-            onChunk("Phase 2: Generating code for ${blueprint.files.size} files...\n\n")
+            if (validation.warnings.isNotEmpty()) {
+                Log.w("PpeExecutionEngine", "Blueprint validation warnings: ${validation.warnings.joinToString("; ")}")
+                onChunk("⚠️ Warnings: ${validation.warnings.joinToString("; ")}\n")
+            }
+            
+            // Only fail if there are no files to generate (critical error)
+            if (blueprint.files.isEmpty()) {
+                val errorMsg = "Blueprint validation failed: No files to generate. ${validation.errors.joinToString("\n")}"
+                Log.e("PpeExecutionEngine", errorMsg)
+                onChunk("❌ $errorMsg\n")
+                return PpeExecutionResult(
+                    success = false,
+                    finalResult = errorMsg,
+                    variables = emptyMap(),
+                    chatHistory = chatHistory,
+                    error = errorMsg
+                )
+            }
+            
+            // Filter out files with invalid paths and continue
+            val validFiles = blueprint.files.filter { file ->
+                val isValid = validateFilePath(file.path, workspaceRoot)
+                if (!isValid) {
+                    Log.w("PpeExecutionEngine", "Skipping file with invalid path: ${file.path}")
+                    onChunk("⚠️ Skipping invalid file path: ${file.path}\n")
+                }
+                isValid
+            }
+            
+            if (validFiles.isEmpty()) {
+                val errorMsg = "Blueprint validation failed: All file paths are invalid. ${validation.errors.joinToString("\n")}"
+                Log.e("PpeExecutionEngine", errorMsg)
+                onChunk("❌ $errorMsg\n")
+                return PpeExecutionResult(
+                    success = false,
+                    finalResult = errorMsg,
+                    variables = emptyMap(),
+                    chatHistory = chatHistory,
+                    error = errorMsg
+                )
+            }
+            
+            // Use filtered valid files
+            val filteredBlueprint = blueprint.copy(files = validFiles)
+            
+            // Log if files were filtered
+            if (validFiles.size < blueprint.files.size) {
+                val filteredCount = blueprint.files.size - validFiles.size
+                Log.w("PpeExecutionEngine", "Filtered out $filteredCount invalid file(s), proceeding with ${validFiles.size} valid file(s)")
+                onChunk("⚠️ Filtered out $filteredCount invalid file(s), proceeding with ${validFiles.size} valid file(s)\n")
+            }
+            
+            onChunk("Phase 2: Generating code for ${filteredBlueprint.files.size} files...\n\n")
             
             // Phase 2: Generate code for each file using topological sort
             val generatedFiles = mutableListOf<String>()
-            val sortedFiles = topologicalSort(blueprint.files)
+            val sortedFiles = topologicalSort(filteredBlueprint.files)
             
             for ((index, file) in sortedFiles.withIndex()) {
                 Log.d("PpeExecutionEngine", "Generating code for file ${index + 1}/${sortedFiles.size}: ${file.path}")
@@ -2316,7 +2386,7 @@ class PpeExecutionEngine(
                 
                 val fileCodeResult = generateFileCode(
                     file,
-                    blueprint,
+                    filteredBlueprint,
                     userMessage,
                     updatedChatHistory,
                     script
@@ -2340,7 +2410,7 @@ class PpeExecutionEngine(
                         )
                         val retryResult = generateFileCode(
                             simplifiedFile,
-                            blueprint,
+                            filteredBlueprint,
                             userMessage,
                             updatedChatHistory,
                             script
@@ -2610,13 +2680,13 @@ JSON Blueprint:
             jsonText = jsonText.substring(jsonStart, jsonEnd)
         }
         
-        Log.d("PpeExecutionEngine", "Extracted blueprint JSON (length: ${jsonText.length})")
+        Log.d("PpeExecutionEngine", "Extracted blueprint JSON (length: ${jsonText.length}): ${jsonText.take(500)}")
         
         // Validate JSON is not empty and looks like an object
         if (jsonText.isEmpty() || !jsonText.trim().startsWith("{")) {
             Log.w(
                 "PpeExecutionEngine",
-                "Invalid blueprint JSON from API (empty or not an object). Model must return a valid JSON blueprint."
+                "Invalid blueprint JSON from API (empty or not an object). Response: ${response.text.take(500)}"
             )
             throw Exception(
                 "Invalid blueprint JSON from model. Please retry or switch to a model that can return pure JSON (no markdown)."
@@ -2656,9 +2726,13 @@ JSON Blueprint:
             }
             
             Log.d("PpeExecutionEngine", "Parsed blueprint: projectType=$projectType, files=${files.size}")
+            if (files.isEmpty()) {
+                Log.w("PpeExecutionEngine", "Blueprint parsed but has no files. JSON: ${jsonText.take(500)}")
+            }
             ProjectBlueprint(projectType, files)
         } catch (e: Exception) {
             Log.e("PpeExecutionEngine", "Failed to parse blueprint JSON: ${e.message}", e)
+            Log.e("PpeExecutionEngine", "JSON text that failed to parse: ${jsonText.take(1000)}")
             null
         }
     }
@@ -3648,32 +3722,31 @@ Plan:
         val errors = mutableListOf<String>()
         val warnings = mutableListOf<String>()
         
-        // Check for empty files
+        // Check for empty files (critical error)
         if (blueprint.files.isEmpty()) {
             errors.add("Blueprint has no files")
         }
         
-        // Check for duplicate paths
+        // Check for duplicate paths (warning, not error - we can deduplicate)
         val paths = blueprint.files.map { it.path }
         val duplicates = paths.groupingBy { it }.eachCount().filter { it.value > 1 }.keys
         if (duplicates.isNotEmpty()) {
-            errors.add("Duplicate file paths: ${duplicates.joinToString(", ")}")
+            warnings.add("Duplicate file paths detected: ${duplicates.joinToString(", ")} (will use first occurrence)")
         }
         
-        // Check for invalid paths
-        blueprint.files.forEach { file ->
-            if (!validateFilePath(file.path, workspaceRoot)) {
-                errors.add("Invalid file path: ${file.path}")
-            }
+        // Check for invalid paths (warning, not error - we'll filter them out)
+        val invalidPaths = blueprint.files.filter { !validateFilePath(it.path, workspaceRoot) }
+        if (invalidPaths.isNotEmpty()) {
+            warnings.add("Invalid file paths detected: ${invalidPaths.map { it.path }.joinToString(", ")} (will be filtered out)")
         }
         
-        // Check for circular dependencies
+        // Check for circular dependencies (warning, not error - we'll handle in topological sort)
         val circularDeps = detectCircularDependencies(blueprint.files)
         if (circularDeps.isNotEmpty()) {
-            errors.add("Circular dependencies detected: ${circularDeps.joinToString(", ")}")
+            warnings.add("Circular dependencies detected: ${circularDeps.joinToString(", ")} (may affect generation order)")
         }
         
-        // Check for missing dependencies
+        // Check for missing dependencies (warning only)
         val allPaths = paths.toSet()
         blueprint.files.forEach { file ->
             file.dependencies.forEach { dep ->
@@ -3683,8 +3756,10 @@ Plan:
             }
         }
         
+        // Only mark as invalid if there are no files (critical error)
+        // All other issues are warnings that won't stop execution
         return ValidationResult(
-            isValid = errors.isEmpty(),
+            isValid = blueprint.files.isNotEmpty(), // Only invalid if no files
             errors = errors,
             warnings = warnings
         )
