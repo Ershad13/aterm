@@ -2835,31 +2835,6 @@ fun AgentScreen(
                         )
                         }
                         else -> {
-                            // CLI agent doesn't support continuation - just send a new message
-                            // Parse memory and system context for continuation
-                            val previousMessagesForContinue = messages.filter { it.isUser || it.text != "Thinking..." }
-                            val memoryForContinue = if (previousMessagesForContinue.isNotEmpty()) {
-                                val parsedMemory = AgentMemory.parseMemoryFromHistory(previousMessagesForContinue, workspaceRoot)
-                                AgentMemory.formatMemoryForPrompt(parsedMemory)
-                            } else {
-                                null
-                            }
-                            val systemContextForContinue = try {
-                                SystemInfoService.generateSystemContext(workspaceRoot)
-                            } catch (e: Exception) {
-                                null
-                            }
-                            
-                            (aiClient as CliBasedAgentClient).sendMessage(
-                                userMessage = "Continue from previous conversation",
-                                onChunk = { },
-                                onToolCall = { },
-                                onToolResult = { _, _ -> },
-                                memory = memoryForContinue,
-                                systemContext = systemContextForContinue
-                            )
-                        }
-                        else -> {
                             // Fallback to AgentClient
                             (aiClient as AgentClient).sendMessage(
                                 userMessage = "__CONTINUE__",
