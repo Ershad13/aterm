@@ -970,7 +970,9 @@ class PpeExecutionEngine(
         
         // Prune chat history if needed to fit context window
         val modelToUse = model ?: "default"
-        val prunedMessages = ContextWindowManager.pruneChatHistory(messages, modelToUse)
+        val prunedMessages = ContextWindowManager
+            .pruneChatHistory(messages, modelToUse)
+            .toMutableList()
         
         if (prunedMessages.size < messages.size) {
             Log.d("PpeExecutionEngine", "Pruned ${messages.size - prunedMessages.size} messages to fit context window")

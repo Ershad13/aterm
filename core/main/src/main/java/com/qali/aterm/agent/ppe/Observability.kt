@@ -3,8 +3,6 @@ package com.qali.aterm.agent.ppe
 import android.util.Log
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 
 /**
  * Observability and metrics tracking
@@ -25,7 +23,6 @@ object Observability {
     )
     
     private val metrics = ConcurrentHashMap<String, OperationMetrics>()
-    private val metricsMutex = Mutex()
     
     private val totalApiCalls = AtomicLong(0)
     private val totalToolCalls = AtomicLong(0)
@@ -50,10 +47,8 @@ object Observability {
     /**
      * End tracking an operation
      */
-    suspend fun endOperation(operationId: String) {
-        metricsMutex.withLock {
-            metrics[operationId]?.endTime = System.currentTimeMillis()
-        }
+    fun endOperation(operationId: String) {
+        metrics[operationId]?.endTime = System.currentTimeMillis()
     }
     
     /**
@@ -63,13 +58,11 @@ object Observability {
         totalApiCalls.incrementAndGet()
         totalTokens.addAndGet(tokens.toLong())
         totalCost.add(cost)
-        
-        metricsMutex.withLock {
-            metrics[operationId]?.let {
-                it.apiCalls++
-                it.tokensUsed += tokens
-                it.cost += cost
-            }
+
+        metrics[operationId]?.let {
+            it.apiCalls++
+            it.tokensUsed += tokens
+            it.cost += cost
         }
     }
     
@@ -78,9 +71,7 @@ object Observability {
      */
     fun recordToolCall(operationId: String) {
         totalToolCalls.incrementAndGet()
-        metricsMutex.withLock {
-            metrics[operationId]?.toolCalls++
-        }
+        metrics[operationId]?.toolCalls++
     }
     
     /**
@@ -88,18 +79,14 @@ object Observability {
      */
     fun recordError(operationId: String) {
         totalErrors.incrementAndGet()
-        metricsMutex.withLock {
-            metrics[operationId]?.errors++
-        }
+        metrics[operationId]?.errors++
     }
     
     /**
      * Get operation metrics
      */
-    suspend fun getOperationMetrics(operationId: String): OperationMetrics? {
-        return metricsMutex.withLock {
-            metrics[operationId]
-        }
+    fun getOperationMetrics(operationId: String): OperationMetrics? {
+        return metrics[operationId]
     }
     
     /**
