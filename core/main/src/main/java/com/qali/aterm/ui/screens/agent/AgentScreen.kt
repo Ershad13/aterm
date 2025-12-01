@@ -2081,14 +2081,15 @@ fun AgentScreen(
                                             val stream = when {
                                                 // Use CliBasedAgentClient for all providers (including Ollama) - non-streaming flow
                                                 aiClient is CliBasedAgentClient -> {
-                                                    (aiClient as CliBasedAgentClient).sendMessage(
-                                                        userMessage = prompt,
-                                                        onChunk = { },
-                                                        onToolCall = { },
-                                                        onToolResult = { _, _ -> },
-                                                        memory = memory,
-                                                        systemContext = systemContext
-                                                    )
+                                                (aiClient as CliBasedAgentClient).sendMessage(
+                                                    userMessage = prompt,
+                                                    onChunk = { },
+                                                    onToolCall = { },
+                                                    onToolResult = { _, _ -> },
+                                                    memory = memory,
+                                                    systemContext = systemContext,
+                                                    sessionId = sessionId
+                                                )
                                                 }
                                                 // Fallback to old OllamaClient only if CLI agent is disabled
                                                 useOllama && !AgentService.isUsingCliAgent() -> {
@@ -2807,7 +2808,8 @@ fun AgentScreen(
                                 onToolCall = { },
                                 onToolResult = { _, _ -> },
                                 memory = memoryForContinue,
-                                systemContext = systemContextForContinue
+                                systemContext = systemContextForContinue,
+                                sessionId = sessionId
                             )
                         }
                         // Fallback to old OllamaClient only if CLI agent is disabled

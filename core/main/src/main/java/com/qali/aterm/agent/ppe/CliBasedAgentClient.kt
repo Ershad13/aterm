@@ -20,6 +20,12 @@ class CliBasedAgentClient(
     private val ollamaModel: String? = null
 ) {
     private val executionEngine = PpeExecutionEngine(toolRegistry, workspaceRoot, ollamaUrl, ollamaModel)
+    private val apiClient = PpeApiClient(toolRegistry, ollamaUrl, ollamaModel)
+    private val processAnalyzer = ProcessDataAnalyzer(
+        workspaceRoot = workspaceRoot,
+        apiClient = apiClient,
+        tasksPerAnalysis = 7
+    )
     
     /**
      * Default script path - can be overridden
@@ -37,7 +43,8 @@ class CliBasedAgentClient(
         onToolResult: (String, Map<String, Any>) -> Unit,
         scriptPath: String? = null,
         memory: String? = null,  // Agent memory context from previous interactions
-        systemContext: String? = null  // System information (OS, package manager, etc.)
+        systemContext: String? = null,  // System information (OS, package manager, etc.)
+        sessionId: String = "main"  // Session ID for tracking and analysis
     ): Flow<AgentEvent> = flow {
         val startTime = System.currentTimeMillis()
         var eventCount = 0
@@ -170,6 +177,17 @@ class CliBasedAgentClient(
             }
             
             Log.d("CliBasedAgentClient", "Script execution completed successfully (total time: ${totalTime}ms)")
+            
+            // Track task for process analysis (every 7 tasks)
+            try {
+                processAnalyzer.trackTask(
+                    sessionId = sessionId,
+                    messages = null, // Will load from history
+                    onChunk = onChunk
+                )
+            } catch (e: Exception) {
+                Log.w("CliBasedAgentClient", "Failed to track task for analysis: ${e.message}")
+            }
             
         } catch (e: kotlinx.coroutines.CancellationException) {
             val totalTime = System.currentTimeMillis() - startTime

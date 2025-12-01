@@ -32,6 +32,22 @@ class PpeExecutionEngine(
     private val toolResultQueue = mutableListOf<Pair<String, com.qali.aterm.agent.tools.ToolResult>>()
     
     /**
+     * Get optimal temperature for API calls based on current model
+     */
+    private fun getOptimalTemperature(taskType: ModelTemperatureConfig.TaskType = ModelTemperatureConfig.TaskType.DEFAULT): Double {
+        val currentModel = try {
+            com.qali.aterm.api.ApiProviderManager.getCurrentModel()
+        } catch (e: Exception) {
+            null
+        }
+        return ModelTemperatureConfig.getOptimalTemperature(
+            model = currentModel,
+            taskType = taskType,
+            userTemperature = null
+        )
+    }
+    
+    /**
      * Execute a PPE script with given input parameters (non-streaming)
      * Returns the final execution result directly
      */
@@ -509,7 +525,7 @@ class PpeExecutionEngine(
                                         val fallbackResult = apiClient.callApi(
                                             messages = promptMessages,
                                             model = null,
-                                            temperature = null,
+                                            temperature = getOptimalTemperature(ModelTemperatureConfig.TaskType.CODE_GENERATION),
                                             topP = null,
                                             topK = null,
                                             tools = if (toolRegistry.getAllTools().isNotEmpty()) {
@@ -591,7 +607,7 @@ class PpeExecutionEngine(
                                     val finalContinueResult = apiClient.callApi(
                                         messages = promptMessages,
                                         model = null,
-                                        temperature = null,
+                                        temperature = getOptimalTemperature(ModelTemperatureConfig.TaskType.PROBLEM_SOLVING),
                                         topP = null,
                                         topK = null,
                                         tools = if (toolRegistry.getAllTools().isNotEmpty()) {
@@ -898,9 +914,17 @@ class PpeExecutionEngine(
         
         // Get model from placeholder params or script
         val model = message.aiPlaceholderParams?.get("model")?.toString()
-        val temperature = message.aiPlaceholderParams?.get("temperature")?.toString()?.toDoubleOrNull()
+        val userTemperature = message.aiPlaceholderParams?.get("temperature")?.toString()?.toDoubleOrNull()
         val topP = message.aiPlaceholderParams?.get("top_p")?.toString()?.toDoubleOrNull()
         val topK = message.aiPlaceholderParams?.get("top_k")?.toString()?.toIntOrNull()
+        
+        // Adjust temperature based on model capabilities
+        val temperature = ModelTemperatureConfig.getOptimalTemperatureWithTaskDetection(
+            model = model,
+            userMessage = messageWithoutPlaceholder,
+            context = if (messages.isNotEmpty()) messages.joinToString("\n") { it.parts.joinToString { p -> if (p is Part.TextPart) p.text else "" } } else "",
+            userTemperature = userTemperature
+        )
         
         // Handle constrained AI responses
         val constrainedOptions = message.constrainedOptions
@@ -1174,10 +1198,11 @@ class PpeExecutionEngine(
             null
         }
         
+        // Adjust temperature based on model capabilities for continuation
         val result = apiClient.callApi(
             messages = messages,
             model = null,
-            temperature = null,
+            temperature = getOptimalTemperature(ModelTemperatureConfig.TaskType.PROBLEM_SOLVING),
             topP = null,
             topK = null,
             tools = tools
@@ -1342,7 +1367,7 @@ class PpeExecutionEngine(
                 val retryResult = apiClient.callApi(
                     messages = retryMessages,
                     model = null,
-                    temperature = null,
+                    temperature = getOptimalTemperature(ModelTemperatureConfig.TaskType.PROBLEM_SOLVING),
                     topP = null,
                     topK = null,
                     tools = if (toolRegistry.getAllTools().isNotEmpty()) {
@@ -1436,7 +1461,7 @@ class PpeExecutionEngine(
                 val fallbackResult = apiClient.callApi(
                     messages = fallbackMessages,
                     model = null,
-                    temperature = null,
+                    temperature = getOptimalTemperature(ModelTemperatureConfig.TaskType.CODE_GENERATION),
                     topP = null,
                     topK = null,
                     tools = if (toolRegistry.getAllTools().isNotEmpty()) {
@@ -1559,7 +1584,7 @@ class PpeExecutionEngine(
                     val continueResult = apiClient.callApi(
                         messages = promptMessages,
                         model = null,
-                        temperature = null,
+                        temperature = getOptimalTemperature(ModelTemperatureConfig.TaskType.PROBLEM_SOLVING),
                         topP = null,
                         topK = null,
                         tools = if (toolRegistry.getAllTools().isNotEmpty()) {
@@ -1628,7 +1653,7 @@ class PpeExecutionEngine(
                                 val retryResult = apiClient.callApi(
                                     messages = retryPromptMessages,
                                     model = null,
-                                    temperature = null,
+                                    temperature = getOptimalTemperature(ModelTemperatureConfig.TaskType.PROBLEM_SOLVING),
                                     topP = null,
                                     topK = null,
                                     tools = if (toolRegistry.getAllTools().isNotEmpty()) {
@@ -1706,7 +1731,7 @@ class PpeExecutionEngine(
                             val finalRetryResult = apiClient.callApi(
                                 messages = finalRetryMessages,
                                 model = null,
-                                temperature = null,
+                                temperature = getOptimalTemperature(ModelTemperatureConfig.TaskType.CODE_GENERATION),
                                 topP = null,
                                 topK = null,
                                 tools = if (toolRegistry.getAllTools().isNotEmpty()) {
@@ -2558,6 +2583,9 @@ JSON Blueprint:
         val result = apiClient.callApi(
             messages = messages,
             model = null,
+            temperature = getOptimalTemperature(ModelTemperatureConfig.TaskType.DATA_ANALYSIS),
+            topP = null,
+            topK = null,
             tools = null // Don't use tools for blueprint generation
         )
         
@@ -2758,6 +2786,9 @@ JSON Blueprint:
         val result = apiClient.callApi(
             messages = messages,
             model = null,
+            temperature = getOptimalTemperature(ModelTemperatureConfig.TaskType.CODE_GENERATION),
+            topP = null,
+            topK = null,
             tools = null // Don't use tools for code generation
         )
         
@@ -2938,6 +2969,9 @@ JSON Response:
         val result = apiClient.callApi(
             messages = messages,
             model = null,
+            temperature = getOptimalTemperature(ModelTemperatureConfig.TaskType.CODE_ANALYSIS),
+            topP = null,
+            topK = null,
             tools = null
         )
         
@@ -3093,6 +3127,9 @@ Updated Blueprint JSON:
         val result = apiClient.callApi(
             messages = messages,
             model = null,
+            temperature = getOptimalTemperature(ModelTemperatureConfig.TaskType.DATA_ANALYSIS),
+            topP = null,
+            topK = null,
             tools = null
         )
         
@@ -3215,6 +3252,9 @@ Plan:
                 val planResult = apiClient.callApi(
                     messages = updatedChatHistory,
                     model = null,
+                    temperature = getOptimalTemperature(ModelTemperatureConfig.TaskType.PROBLEM_SOLVING),
+                    topP = null,
+                    topK = null,
                     tools = tools
                 )
                 
