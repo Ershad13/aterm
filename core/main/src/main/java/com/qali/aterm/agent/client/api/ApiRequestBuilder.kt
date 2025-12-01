@@ -78,6 +78,8 @@ class ApiRequestBuilder(
         })
         
         // Add tools only if includeTools is true
+        // For Gemini API, when includeTools is false, we simply don't include the tools field
+        // This prevents the model from making any tool calls
         if (includeTools) {
             val tools = JSONArray()
             val toolObj = JSONObject()
@@ -92,12 +94,9 @@ class ApiRequestBuilder(
             toolObj.put("functionDeclarations", functionDeclarations)
             tools.put(toolObj)
             request.put("tools", tools)
-        } else {
-            // Explicitly set toolChoice to "none" for Gemini API to prevent tool calls
-            request.put("toolChoice", JSONObject().apply {
-                put("none", JSONObject())
-            })
         }
+        // When includeTools is false, we don't add the tools field at all
+        // This ensures the model cannot make tool calls
         
         // Add system instruction to guide planning behavior
         // This matches the comprehensive system prompt from the original gemini-cli TypeScript implementation
