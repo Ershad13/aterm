@@ -3760,7 +3760,7 @@ Now fix the specific issue using the 'edit' tool:
                     val finalResult = redirectResponse.text
                     onChunk("\n✅ Fix/upgrade completed. ${redirectResponse.functionCalls.size} actions executed.\n")
                     
-                    Observability.endOperation(operationId, success = true)
+                    Observability.endOperation(operationId)
                     return PpeExecutionResult(
                         success = true,
                         finalResult = finalResult,
