@@ -742,6 +742,19 @@ class PpeExecutionEngine(
             // If response is empty and no function calls, the AI might have stopped
             // This shouldn't happen often, but log it for debugging
             android.util.Log.d("PpeExecutionEngine", "Continuation response is empty with no function calls")
+            
+            // Check if we need fallback when response is empty
+            val writeFileCount = messages.takeLast(20).flatMap { content ->
+                content.parts.filterIsInstance<Part.FunctionResponsePart>().map { it.functionResponse.name }
+            }.count { it == "write_file" }
+            
+            val needsFallbackForEmptyResponse = functionCall.name == "write_file" && 
+                writeFileCount < 5
+            
+            if (needsFallbackForEmptyResponse) {
+                android.util.Log.d("PpeExecutionEngine", "Empty continuation response detected - writeFileCount: $writeFileCount, triggering fallback")
+                // Will continue to fallback logic below
+            }
         }
         
         // Handle function calls from continuation response
@@ -789,8 +802,54 @@ class PpeExecutionEngine(
                 
                 // If there's another continuation, use it instead
                 if (nextContinuation != null) {
-                    return nextContinuation
+                    // Check if we need fallback after recursive continuation
+                    val allMessagesAfterRecursion = updatedMessages
+                    val writeFileCountAfterRecursion = allMessagesAfterRecursion.takeLast(20).flatMap { content ->
+                        content.parts.filterIsInstance<Part.FunctionResponsePart>().map { it.functionResponse.name }
+                    }.count { it == "write_file" }
+                    
+                    val hasMinimalTextAfterRecursion = nextContinuation.text.trim().isEmpty() || 
+                        nextContinuation.text.trim().lowercase().let { text ->
+                            text == "done" || text == "complete" || text == "finished" || 
+                            text.length < 20
+                        }
+                    
+                    val needsFallbackAfterRecursion = nextFunctionCall.name == "write_file" && 
+                        writeFileCountAfterRecursion < 5 && 
+                        nextContinuation.functionCalls.isEmpty() &&
+                        hasMinimalTextAfterRecursion
+                    
+                    if (needsFallbackAfterRecursion) {
+                        android.util.Log.d("PpeExecutionEngine", "Fallback needed after recursive continuation - writeFileCount: $writeFileCountAfterRecursion, hasMinimalText: $hasMinimalTextAfterRecursion")
+                        // Don't return the minimal continuation - trigger fallback instead
+                        // Fallback will be handled below
+                    } else {
+                        return nextContinuation
+                    }
                 }
+            }
+            
+            // Check if we need fallback after processing all function calls
+            // This handles the case where continuation had function calls, they were executed, but the final response is minimal
+            val allMessagesAfterCalls = messages
+            val writeFileCountAfterCalls = allMessagesAfterCalls.takeLast(20).flatMap { content ->
+                content.parts.filterIsInstance<Part.FunctionResponsePart>().map { it.functionResponse.name }
+            }.count { it == "write_file" }
+            
+            val hasMinimalTextAfterCalls = continuationResponse.text.trim().isEmpty() || 
+                continuationResponse.text.trim().lowercase().let { text ->
+                    text == "done" || text == "complete" || text == "finished" || 
+                    text.length < 20
+                }
+            
+            val needsFallbackAfterCalls = functionCall.name == "write_file" && 
+                writeFileCountAfterCalls < 5 && 
+                continuationResponse.functionCalls.isEmpty() &&
+                hasMinimalTextAfterCalls
+            
+            if (needsFallbackAfterCalls) {
+                android.util.Log.d("PpeExecutionEngine", "Fallback needed after processing function calls - writeFileCount: $writeFileCountAfterCalls, hasMinimalText: $hasMinimalTextAfterCalls")
+                // Will fall through to fallback logic below
             }
             
             // If all function calls were skipped, make another API call to get a different response
@@ -867,6 +926,90 @@ class PpeExecutionEngine(
             // No function calls in continuation response - check if we should continue
             val textPreview = if (continuationResponse.text.length > 50) continuationResponse.text.take(50) + "..." else continuationResponse.text
             android.util.Log.d("PpeExecutionEngine", "Continuation response has no function calls (text length: ${continuationResponse.text.length}, text: '$textPreview') - checking if should continue for tool: ${functionCall.name}")
+            
+            // Check if we need fallback when response has no function calls
+            val writeFileCount = messages.takeLast(20).flatMap { content ->
+                content.parts.filterIsInstance<Part.FunctionResponsePart>().map { it.functionResponse.name }
+            }.count { it == "write_file" }
+            
+            val hasMinimalText = continuationResponse.text.trim().isEmpty() || 
+                continuationResponse.text.trim().lowercase().let { text ->
+                    text == "done" || text == "complete" || text == "finished" || 
+                    text.length < 20
+                }
+            
+            val needsFallbackForNoCalls = functionCall.name == "write_file" && 
+                writeFileCount < 5 && 
+                hasMinimalText
+            
+            if (needsFallbackForNoCalls) {
+                android.util.Log.d("PpeExecutionEngine", "Fallback needed - no function calls, writeFileCount: $writeFileCount, hasMinimalText: $hasMinimalText")
+                // Trigger fallback API call
+                val fallbackMessages = messages + listOf(
+                    Content(
+                        role = "model",
+                        parts = listOf(Part.TextPart(text = continuationResponse.text.ifEmpty { "Tool execution completed." }))
+                    ),
+                    Content(
+                        role = "user",
+                        parts = listOf(Part.TextPart(text = "You must continue creating files. The project needs more files: index.html, style.css (or styles.css), and the JavaScript game logic file (app.js, script.js, or client.js). The game logic file is REQUIRED. Use write_file to create each file. IMPORTANT: Check the code relativeness information from previous write_file results. Only use imports/exports that exist in related files."))
+                    )
+                )
+                
+                val fallbackResult = apiClient.callApi(
+                    messages = fallbackMessages,
+                    model = null,
+                    temperature = null,
+                    topP = null,
+                    topK = null,
+                    tools = if (toolRegistry.getAllTools().isNotEmpty()) {
+                        listOf(Tool(functionDeclarations = toolRegistry.getFunctionDeclarations()))
+                    } else {
+                        null
+                    }
+                )
+                
+                val fallbackResponse = fallbackResult.getOrNull()
+                if (fallbackResponse != null) {
+                    if (fallbackResponse.text.isNotEmpty()) {
+                        onChunk(fallbackResponse.text)
+                    }
+                    
+                    if (fallbackResponse.functionCalls.isNotEmpty()) {
+                        for (fallbackFunctionCall in fallbackResponse.functionCalls) {
+                            if (fallbackFunctionCall.name == "write_todos") {
+                                android.util.Log.w("PpeExecutionEngine", "Skipping write_todos in fallback")
+                                continue
+                            }
+                            
+                            onToolCall(fallbackFunctionCall)
+                            val fallbackToolResult = executeTool(fallbackFunctionCall, onToolResult)
+                            
+                            val fallbackContinuation = continueWithToolResult(
+                                fallbackMessages + listOf(
+                                    Content(
+                                        role = "model",
+                                        parts = listOf(Part.TextPart(text = fallbackResponse.text))
+                                    )
+                                ),
+                                fallbackFunctionCall,
+                                fallbackToolResult,
+                                script,
+                                onChunk,
+                                onToolCall,
+                                onToolResult,
+                                recursionDepth + 1
+                            )
+                            
+                            if (fallbackContinuation != null) {
+                                return fallbackContinuation
+                            }
+                        }
+                    }
+                    
+                    return fallbackResponse
+                }
+            }
             // Continue if: response is empty OR (response has text but we should prompt for next steps)
             val recentToolCalls = messages.takeLast(10).flatMap { content ->
                 content.parts.filterIsInstance<Part.FunctionResponsePart>().map { it.functionResponse.name }
