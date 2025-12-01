@@ -3583,21 +3583,28 @@ Updated Blueprint JSON:
                 // Step 4: Get plan from AI
                 onChunk("Step 4: Analyzing and creating plan...\n")
                 val planPrompt = """
-Based on the user's request and the files I've read, create a plan for what needs to be done.
+IMPORTANT: This is a FIX/UPGRADE request for an EXISTING project. Do NOT regenerate the entire project or create blueprints.
 
 User Request: $userMessage
 
 Files Read:
 ${fileContents.keys.joinToString("\n") { "- $it" }}
 
-Analyze the situation and provide a plan. The plan should specify:
-1. Whether new files need to be created or existing files need to be modified
-2. For new files: provide the file path, type, dependencies, and what imports/functions/classes it needs
-3. For existing files: specify what changes are needed and where (line numbers if possible)
+CRITICAL INSTRUCTIONS:
+1. This is a targeted fix/upgrade - only modify what's necessary
+2. For EXISTING files: Use the 'edit' tool to make specific changes, NOT 'write_file'
+3. For NEW files: Use 'write_file' only if a file truly doesn't exist
+4. Do NOT generate blueprints, dependency matrices, or full project rewrites
+5. Do NOT suggest "Phase 1: Generate Blueprint" or similar full regeneration approaches
+6. Focus on the specific issue mentioned in the user's request
+7. Make minimal, targeted changes to fix the problem
 
-Be specific and actionable. Use tools to implement the plan.
+Analyze the user's request and the files. Then:
+- If modifying existing files: Use 'edit' tool with specific changes
+- If creating new files: Use 'write_file' tool (only if file doesn't exist)
+- Be precise and minimal - fix only what's needed
 
-Plan:
+Now analyze and implement the fix directly using tools:
 """.trimIndent()
                 
                 updatedChatHistory.add(
@@ -3630,6 +3637,136 @@ Plan:
                         variables = emptyMap(),
                         chatHistory = updatedChatHistory,
                         error = it.message
+                    )
+                }
+                
+                // Check if AI is trying to generate blueprints or full rewrites
+                val responseText = planResponse.text.lowercase()
+                val blueprintKeywords = listOf(
+                    "phase 1", "generate blueprint", "blueprint generation", "dependency matrix",
+                    "code dependency matrix", "project blueprint", "full rewrite", "regenerate",
+                    "complete rewrite", "entire project", "all files"
+                )
+                val isTryingBlueprint = blueprintKeywords.any { responseText.contains(it) }
+                
+                if (isTryingBlueprint && planResponse.functionCalls.isEmpty()) {
+                    // AI is trying to generate blueprints instead of fixing
+                    Log.w("PpeExecutionEngine", "AI attempted blueprint generation in fix/upgrade flow. Redirecting...")
+                    onChunk("⚠️ Detected blueprint generation attempt. Redirecting to targeted fix...\n\n")
+                    
+                    // Add redirect prompt
+                    val redirectPrompt = """
+STOP. You are trying to generate a blueprint or full rewrite, but this is a FIX/UPGRADE request.
+
+The user wants you to FIX a specific issue: $userMessage
+
+You have already read these files:
+${fileContents.keys.joinToString("\n") { "- $it" }}
+
+DO NOT generate blueprints or rewrite everything. Instead:
+1. Identify the SPECIFIC issue from the user's request
+2. Use the 'edit' tool to modify ONLY the relevant parts of existing files
+3. Make minimal, targeted changes
+
+For example, if the user says "the grid should be 3x3 but it's 1x9":
+- Find the HTML/CSS/JS that creates the grid
+- Use 'edit' tool to change the grid layout from 1x9 to 3x3
+- Do NOT regenerate the entire project
+
+Now fix the specific issue using the 'edit' tool:
+""".trimIndent()
+                    
+                    updatedChatHistory.add(
+                        Content(
+                            role = "model",
+                            parts = listOf(Part.TextPart(text = planResponse.text))
+                        )
+                    )
+                    updatedChatHistory.add(
+                        Content(
+                            role = "user",
+                            parts = listOf(Part.TextPart(text = redirectPrompt))
+                        )
+                    )
+                    
+                    // Retry with redirect prompt
+                    val redirectResult = callApiWithRetryOnExhaustion(
+                        messages = updatedChatHistory,
+                        model = null,
+                        temperature = getOptimalTemperature(ModelTemperatureConfig.TaskType.PROBLEM_SOLVING),
+                        topP = null,
+                        topK = null,
+                        tools = tools,
+                        onChunk = onChunk
+                    )
+                    
+                    val redirectResponse = redirectResult.getOrElse {
+                        return PpeExecutionResult(
+                            success = false,
+                            finalResult = "Failed to get fix plan: ${it.message}",
+                            variables = emptyMap(),
+                            chatHistory = updatedChatHistory,
+                            error = it.message
+                        )
+                    }
+                    
+                    onChunk("Fix plan created. Executing...\n\n")
+                    
+                    // Use the redirected response
+                    val finalChatHistory = updatedChatHistory.toMutableList()
+                    finalChatHistory.add(
+                        Content(
+                            role = "model",
+                            parts = listOf(Part.TextPart(text = redirectResponse.text))
+                        )
+                    )
+                    
+                    if (redirectResponse.functionCalls.isNotEmpty()) {
+                        for (functionCall in redirectResponse.functionCalls) {
+                            onToolCall(functionCall)
+                            val toolResult = executeTool(functionCall, onToolResult)
+                            
+                            // Add tool result to chat history
+                            finalChatHistory.add(
+                                Content(
+                                    role = "user",
+                                    parts = listOf(
+                                        Part.FunctionResponsePart(
+                                            functionResponse = FunctionResponse(
+                                                name = functionCall.name,
+                                                response = when {
+                                                    toolResult.error != null -> mapOf("error" to toolResult.error.message)
+                                                    toolResult.llmContent is String -> mapOf("output" to toolResult.llmContent)
+                                                    else -> mapOf("output" to "Tool execution succeeded.")
+                                                },
+                                                id = functionCall.id ?: ""
+                                            )
+                                        )
+                                    )
+                                )
+                            )
+                            
+                            // Track created files for blueprint update later
+                            if (functionCall.name == "write_file" && toolResult.error == null) {
+                                val filePath = functionCall.args["file_path"] as? String
+                                if (filePath != null) {
+                                    Log.d("PpeExecutionEngine", "File created in upgrade flow: $filePath")
+                                }
+                            }
+                        }
+                    }
+                    
+                    // Get final response
+                    val finalResult = redirectResponse.text
+                    onChunk("\n✅ Fix/upgrade completed. ${redirectResponse.functionCalls.size} actions executed.\n")
+                    
+                    Observability.endOperation(operationId, success = true)
+                    return PpeExecutionResult(
+                        success = true,
+                        finalResult = finalResult,
+                        variables = emptyMap(),
+                        chatHistory = finalChatHistory,
+                        error = null
                     )
                 }
                 
