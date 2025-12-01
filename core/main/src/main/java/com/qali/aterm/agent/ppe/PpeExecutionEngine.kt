@@ -415,7 +415,7 @@ class PpeExecutionEngine(
                         
                         // Execute chained script recursively
                         var chainedFinalResult = ""
-                        executeScript(
+                        val result = executeScript(
                             chainedScript,
                             chainInput,
                             onChunk,
