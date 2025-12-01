@@ -421,10 +421,9 @@ class PpeExecutionEngine(
                             onChunk,
                             onToolCall,
                             onToolResult
-                        ).collect { result ->
-                            if (result.success) {
-                                chainedFinalResult = result.finalResult
-                            }
+                        )
+                        if (result.success) {
+                            chainedFinalResult = result.finalResult
                         }
                         
                         // Update variables with chained result
@@ -1488,7 +1487,8 @@ class PpeExecutionEngine(
                                 onChunk = onChunk,
                                 onToolCall = onToolCall,
                                 onToolResult = onToolResult
-                            ).collect { }
+                            )
+                            // Result is ignored for nested script execution
                         }
                     }
                 }
