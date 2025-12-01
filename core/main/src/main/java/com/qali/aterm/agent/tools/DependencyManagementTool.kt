@@ -9,6 +9,7 @@ import java.io.BufferedReader
 import java.io.InputStreamReader
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.launch
 import org.json.JSONObject
 import org.json.JSONArray
 
@@ -772,7 +773,7 @@ class DependencyManagementToolInvocation(
                 val errorReader = BufferedReader(InputStreamReader(process.errorStream))
                 
                 // Read output and error streams
-                val outputJob = kotlinx.coroutines.launch(Dispatchers.IO) {
+                val outputJob = launch(Dispatchers.IO) {
                     outputReader.useLines { lines ->
                         lines.forEach { line ->
                             output.appendLine(line)
@@ -781,7 +782,7 @@ class DependencyManagementToolInvocation(
                     }
                 }
                 
-                val errorJob = kotlinx.coroutines.launch(Dispatchers.IO) {
+                val errorJob = launch(Dispatchers.IO) {
                     errorReader.useLines { lines ->
                         lines.forEach { line ->
                             error.appendLine(line)

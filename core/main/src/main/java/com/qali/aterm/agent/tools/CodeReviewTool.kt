@@ -167,11 +167,17 @@ class CodeReviewToolInvocation(
                     )
                 }
                 
-                val relativePath = file.relativeTo(if (params.projectPath != null) {
-                    if (File(params.projectPath).isAbsolute) File(params.projectPath) else File(workspaceRoot, params.projectPath)
-                } else {
-                    workspaceRoot
-                }).path
+                val relativePath = file.relativeTo(
+                    if (params.projectPath != null) {
+                        if (File(params.projectPath).isAbsolute) {
+                            File(params.projectPath)
+                        } else {
+                            File(workspaceRoot, params.projectPath)
+                        }
+                    } else {
+                        File(workspaceRoot)
+                    }
+                ).path
                 
                 updateOutput?.invoke("Reviewing: $relativePath")
                 
