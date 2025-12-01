@@ -20,6 +20,15 @@ import java.io.IOException
 import java.util.concurrent.TimeUnit
 
 /**
+ * Extended exception that includes retry delay information for rate-limited exhausted keys
+ */
+class KeysExhaustedExceptionWithRetry(
+    message: String,
+    cause: Throwable?,
+    val retryDelayMs: Long
+) : KeysExhaustedException(message, cause)
+
+/**
  * API client for PPE scripts - non-streaming only
  * Uses existing ApiProviderManager for API cycling with reprompt fallback
  * Supports Ollama when configured (bypasses ApiProviderManager)
