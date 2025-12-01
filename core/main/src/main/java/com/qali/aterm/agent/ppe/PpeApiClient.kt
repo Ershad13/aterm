@@ -21,12 +21,12 @@ import java.util.concurrent.TimeUnit
 
 /**
  * Extended exception that includes retry delay information for rate-limited exhausted keys
+ * Uses composition instead of inheritance since KeysExhaustedException is final
  */
 class KeysExhaustedExceptionWithRetry(
-    message: String,
-    cause: Throwable?,
+    val originalException: KeysExhaustedException,
     val retryDelayMs: Long
-) : KeysExhaustedException(message, cause)
+) : Exception(originalException.message, originalException.cause)
 
 /**
  * API client for PPE scripts - non-streaming only
@@ -267,8 +267,7 @@ class PpeApiClient(
                     val finalError = if (error is KeysExhaustedException && classification.category == ErrorRecoveryManager.ErrorCategory.RATE_LIMIT && classification.isRetryable) {
                         // Create a new exception that includes retry delay information
                         KeysExhaustedExceptionWithRetry(
-                            error.message ?: "All API keys exhausted",
-                            error.cause,
+                            error,
                             classification.retryDelay
                         )
                     } else {
