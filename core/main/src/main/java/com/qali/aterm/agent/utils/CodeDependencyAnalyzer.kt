@@ -300,4 +300,101 @@ object CodeDependencyAnalyzer {
         
         return null
     }
+    
+    /**
+     * Generate a code coherence blueprint - file names, locations, functions, imports, exports
+     * This is used to enforce code coherence when writing files
+     */
+    fun generateCoherenceBlueprint(workspaceRoot: String): String {
+        val matrix = getDependencyMatrix(workspaceRoot)
+        if (matrix.files.isEmpty()) {
+            return ""
+        }
+        
+        return buildString {
+            appendLine("## Code Dependency Matrix Blueprint")
+            appendLine()
+            appendLine("**IMPORTANT:** When writing code, you MUST use ONLY the imports, exports, functions, and classes listed below. Do NOT add new imports or use names that don't exist in this matrix.")
+            appendLine()
+            
+            matrix.files.forEach { (filePath, metadata) ->
+                appendLine("### File: $filePath")
+                if (metadata.imports.isNotEmpty()) {
+                    appendLine("  - **Imports:** ${metadata.imports.joinToString(", ")}")
+                }
+                if (metadata.exports.isNotEmpty()) {
+                    appendLine("  - **Exports:** ${metadata.exports.joinToString(", ")}")
+                }
+                if (metadata.functions.isNotEmpty()) {
+                    appendLine("  - **Functions:** ${metadata.functions.joinToString(", ")}")
+                }
+                if (metadata.classes.isNotEmpty()) {
+                    appendLine("  - **Classes:** ${metadata.classes.joinToString(", ")}")
+                }
+                appendLine()
+            }
+            
+            appendLine("**Rules:**")
+            appendLine("- Only use imports that exist in the files listed above")
+            appendLine("- Only use function/class names that are exported from related files")
+            appendLine("- Do NOT create new imports or exports unless absolutely necessary")
+            appendLine("- Check the relativeness information to see which files are related")
+        }
+    }
+    
+    /**
+     * Generate a coherence constraint prompt for a specific file being written
+     * This enforces using only names/imports from the dependency matrix
+     */
+    fun generateCoherenceConstraintForFile(filePath: String, workspaceRoot: String): String {
+        val matrix = getDependencyMatrix(workspaceRoot)
+        val normalizedPath = normalizePath(filePath, workspaceRoot)
+        
+        // Get related files (dependencies and dependents)
+        val relatedFiles = mutableSetOf<String>()
+        matrix.dependencies[normalizedPath]?.forEach { relatedFiles.add(it) }
+        matrix.dependencies.forEach { (depFile, deps) ->
+            if (deps.contains(normalizedPath)) {
+                relatedFiles.add(depFile)
+            }
+        }
+        
+        if (relatedFiles.isEmpty() && matrix.files.isEmpty()) {
+            return ""
+        }
+        
+        return buildString {
+            appendLine("## Code Coherence Constraints for: $normalizedPath")
+            appendLine()
+            
+            if (relatedFiles.isNotEmpty()) {
+                appendLine("**Related Files:** ${relatedFiles.joinToString(", ")}")
+                appendLine()
+                appendLine("**Available Imports/Exports from Related Files:**")
+                relatedFiles.forEach { relatedFile ->
+                    val metadata = matrix.files[relatedFile]
+                    if (metadata != null) {
+                        appendLine("  - **$relatedFile:**")
+                        if (metadata.exports.isNotEmpty()) {
+                            appendLine("    - Exports: ${metadata.exports.joinToString(", ")}")
+                        }
+                        if (metadata.functions.isNotEmpty()) {
+                            appendLine("    - Functions: ${metadata.functions.joinToString(", ")}")
+                        }
+                        if (metadata.classes.isNotEmpty()) {
+                            appendLine("    - Classes: ${metadata.classes.joinToString(", ")}")
+                        }
+                    }
+                }
+                appendLine()
+            }
+            
+            appendLine("**CRITICAL RULES:**")
+            appendLine("- Use ONLY the imports/exports/functions/classes listed above")
+            appendLine("- Do NOT add new imports that don't exist in related files")
+            appendLine("- Do NOT use function/class names that aren't exported from related files")
+            appendLine("- If you need something that doesn't exist, create it first, then use it")
+            appendLine("- Maintain code coherence by following the dependency matrix")
+        }
+    }
 }

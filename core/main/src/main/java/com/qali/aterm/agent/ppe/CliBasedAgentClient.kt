@@ -91,6 +91,9 @@ class CliBasedAgentClient(
             
             Log.d("CliBasedAgentClient", "Starting script execution (non-streaming)")
             
+            // Collect events during execution (non-streaming) - callbacks are called synchronously
+            val events = mutableListOf<AgentEvent>()
+            
             // Execute script directly (non-streaming) - callbacks are called synchronously
             val result = executionEngine.executeScript(
                 script = script,
@@ -102,8 +105,8 @@ class CliBasedAgentClient(
                     eventCount++
                     Log.d("CliBasedAgentClient", "Chunk received (count: $chunkCount, size: ${chunk.length}, time since start: ${now - startTime}ms)")
                     onChunk(chunk)
-                    // Emit chunk event
-                    emit(AgentEvent.Chunk(chunk))
+                    // Collect chunk event
+                    events.add(AgentEvent.Chunk(chunk))
                 },
                 onToolCall = { functionCall ->
                     val now = System.currentTimeMillis()
@@ -112,8 +115,8 @@ class CliBasedAgentClient(
                     eventCount++
                     Log.d("CliBasedAgentClient", "Tool call received (count: $toolCallCount, tool: ${functionCall.name}, time since start: ${now - startTime}ms)")
                     onToolCall(functionCall)
-                    // Emit tool call event
-                    emit(AgentEvent.ToolCall(functionCall))
+                    // Collect tool call event
+                    events.add(AgentEvent.ToolCall(functionCall))
                 },
                 onToolResult = { toolName, args ->
                     val now = System.currentTimeMillis()
@@ -127,13 +130,18 @@ class CliBasedAgentClient(
                     val toolResult: com.qali.aterm.agent.tools.ToolResult? = executionEngine.getNextToolResult(toolName)
                     if (toolResult != null) {
                         Log.d("CliBasedAgentClient", "Sending tool result event for: $toolName")
-                        // Emit tool result event - AgentScreen will extract file diffs from this
-                        emit(AgentEvent.ToolResult(toolName, toolResult))
+                        // Collect tool result event - AgentScreen will extract file diffs from this
+                        events.add(AgentEvent.ToolResult(toolName, toolResult))
                     } else {
                         Log.w("CliBasedAgentClient", "Tool result not found in queue for: $toolName")
                     }
                 }
             )
+            
+            // Emit all collected events
+            events.forEach { event ->
+                emit(event)
+            }
             
             val now = System.currentTimeMillis()
             val totalTime = now - startTime

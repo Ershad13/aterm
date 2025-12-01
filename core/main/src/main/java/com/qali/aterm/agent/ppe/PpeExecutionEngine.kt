@@ -3,6 +3,7 @@ package com.qali.aterm.agent.ppe
 import com.qali.aterm.agent.core.*
 import com.qali.aterm.agent.ppe.models.*
 import com.qali.aterm.agent.tools.ToolRegistry
+import com.qali.aterm.agent.utils.CodeDependencyAnalyzer
 import android.util.Log
 
 /**
@@ -569,6 +570,15 @@ class PpeExecutionEngine(
         val constrainedCount = message.constrainedCount
         val constrainedRandom = message.constrainedRandom
         
+        // Add code coherence blueprint if dependency matrix exists
+        // This ensures AI uses only existing imports/exports/functions from the matrix
+        val coherenceBlueprint = try {
+            CodeDependencyAnalyzer.generateCoherenceBlueprint(workspaceRoot)
+        } catch (e: Exception) {
+            android.util.Log.w("PpeExecutionEngine", "Failed to generate coherence blueprint: ${e.message}")
+            ""
+        }
+        
         // If constrained options are specified, modify the message to include them
         var finalMessageContent = messageWithoutPlaceholder
         if (constrainedOptions != null && constrainedOptions.isNotEmpty()) {
@@ -577,6 +587,11 @@ class PpeExecutionEngine(
             val countText = if (constrainedCount != null) ":$constrainedCount" else ""
             val randomText = if (constrainedRandom) ":random" else ""
             finalMessageContent += "\n\nYou must choose from these options only: $optionsText$countText$randomText"
+        }
+        
+        // Add coherence blueprint to message if available
+        if (coherenceBlueprint.isNotEmpty()) {
+            finalMessageContent += "\n\n$coherenceBlueprint"
         }
         
         // Update message content if modified
@@ -693,6 +708,23 @@ class PpeExecutionEngine(
             else -> mapOf("output" to "Tool execution succeeded.")
         }
         
+        // Add code coherence constraint for write_file operations
+        val coherenceConstraint = if (functionCall.name == "write_file") {
+            val filePath = functionCall.args["file_path"] as? String
+            if (filePath != null) {
+                try {
+                    CodeDependencyAnalyzer.generateCoherenceConstraintForFile(filePath, workspaceRoot)
+                } catch (e: Exception) {
+                    android.util.Log.w("PpeExecutionEngine", "Failed to generate coherence constraint: ${e.message}")
+                    ""
+                }
+            } else {
+                ""
+            }
+        } else {
+            ""
+        }
+        
         messages.add(
             Content(
                 role = "user",
@@ -707,6 +739,16 @@ class PpeExecutionEngine(
                 )
             )
         )
+        
+        // Add coherence constraint as a separate user message if available
+        if (coherenceConstraint.isNotEmpty()) {
+            messages.add(
+                Content(
+                    role = "user",
+                    parts = listOf(Part.TextPart(text = coherenceConstraint))
+                )
+            )
+        }
         
         // Make continuation API call
         val tools = if (toolRegistry.getAllTools().isNotEmpty()) {

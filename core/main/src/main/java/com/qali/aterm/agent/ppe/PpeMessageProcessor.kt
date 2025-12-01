@@ -83,21 +83,20 @@ object PpeMessageProcessor {
                     putAll(replacement.params)
                 }
                 
-                // Execute script and get result
-                var result = ""
-                executionEngine.executeScript(
+                // Execute script and get result (non-streaming)
+                val execResult = executionEngine.executeScript(
                     script = script,
                     inputParams = scriptParams,
-                    onChunk = { chunk -> result += chunk },
+                    onChunk = { },
                     onToolCall = { },
                     onToolResult = { _, _ -> }
-                ).collect { execResult ->
-                    if (execResult.success) {
-                        result = execResult.finalResult
-                    }
-                }
+                )
                 
-                result
+                if (execResult.success) {
+                    execResult.finalResult
+                } else {
+                    "Script execution failed: ${execResult.error}"
+                }
             } else {
                 "Script not found: ${replacement.scriptName}"
             }
