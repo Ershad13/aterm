@@ -2776,6 +2776,21 @@ fun AgentScreen(
                     
                     // Use continuation message to resume from chat history
                     currentResponseText = ""
+                    
+                    // Parse memory and system context for continuation
+                    val previousMessagesForContinue = messages.filter { it.isUser || it.text != "Thinking..." }
+                    val memoryForContinue = if (previousMessagesForContinue.isNotEmpty()) {
+                        val parsedMemory = AgentMemory.parseMemoryFromHistory(previousMessagesForContinue, workspaceRoot)
+                        AgentMemory.formatMemoryForPrompt(parsedMemory)
+                    } else {
+                        null
+                    }
+                    val systemContextForContinue = try {
+                        SystemInfoService.generateSystemContext(workspaceRoot)
+                    } catch (e: Exception) {
+                        null
+                    }
+                    
                     val stream = when {
                         // Use CliBasedAgentClient for all providers (including Ollama) - non-streaming flow
                         aiClient is CliBasedAgentClient -> {
@@ -2784,8 +2799,8 @@ fun AgentScreen(
                                 onChunk = { },
                                 onToolCall = { },
                                 onToolResult = { _, _ -> },
-                                memory = memory,
-                                systemContext = systemContext
+                                memory = memoryForContinue,
+                                systemContext = systemContextForContinue
                             )
                         }
                         // Fallback to old OllamaClient only if CLI agent is disabled
@@ -2819,7 +2834,7 @@ fun AgentScreen(
                             }
                         )
                         }
-                        aiClient is CliBasedAgentClient -> {
+                        else -> {
                             // CLI agent doesn't support continuation - just send a new message
                             // Parse memory and system context for continuation
                             val previousMessagesForContinue = messages.filter { it.isUser || it.text != "Thinking..." }
