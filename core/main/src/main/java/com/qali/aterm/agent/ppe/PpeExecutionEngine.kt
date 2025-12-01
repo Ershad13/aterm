@@ -3,8 +3,6 @@ package com.qali.aterm.agent.ppe
 import com.qali.aterm.agent.core.*
 import com.qali.aterm.agent.ppe.models.*
 import com.qali.aterm.agent.tools.ToolRegistry
-import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.flow
 import android.util.Log
 
 /**
@@ -22,7 +20,8 @@ class PpeExecutionEngine(
     private val toolResultQueue = mutableListOf<Pair<String, com.qali.aterm.agent.tools.ToolResult>>()
     
     /**
-     * Execute a PPE script with given input parameters
+     * Execute a PPE script with given input parameters (non-streaming)
+     * Returns the final execution result directly
      */
     suspend fun executeScript(
         script: PpeScript,
@@ -30,7 +29,7 @@ class PpeExecutionEngine(
         onChunk: (String) -> Unit = {},
         onToolCall: (FunctionCall) -> Unit = {},
         onToolResult: (String, Map<String, Any>) -> Unit = { _, _ -> }
-    ): Flow<PpeExecutionResult> = flow {
+    ): PpeExecutionResult {
         val executionStartTime = System.currentTimeMillis()
         var lastActivityTime = executionStartTime
         var turnCount = 0
@@ -492,12 +491,12 @@ class PpeExecutionEngine(
             Log.d("PpeExecutionEngine", "Execution stats - Turns: $turnCount, AI calls: $aiCallCount, Tool executions: $toolExecutionCount")
             Log.d("PpeExecutionEngine", "Final result length: ${finalResult.length}")
             
-            emit(PpeExecutionResult(
+            return PpeExecutionResult(
                 success = true,
                 finalResult = finalResult,
                 variables = currentVariables,
                 chatHistory = chatHistory
-            ))
+            )
             
         } catch (e: Exception) {
             val totalExecutionTime = System.currentTimeMillis() - executionStartTime
@@ -507,13 +506,13 @@ class PpeExecutionEngine(
             Log.e("PpeExecutionEngine", "Error stats - Turns: $turnCount, AI calls: $aiCallCount, Tool executions: $toolExecutionCount")
             Log.e("PpeExecutionEngine", "Exception type: ${e.javaClass.simpleName}, message: ${e.message}")
             e.printStackTrace()
-            emit(PpeExecutionResult(
+            return PpeExecutionResult(
                 success = false,
                 finalResult = "",
                 variables = emptyMap(),
                 chatHistory = emptyList(),
                 error = e.message
-            ))
+            )
         }
     }
     

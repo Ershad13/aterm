@@ -5,11 +5,7 @@ import com.qali.aterm.agent.core.FunctionCall
 import com.qali.aterm.agent.tools.ToolRegistry
 import com.qali.aterm.agent.ppe.models.PpeScript
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.channelFlow
-import kotlinx.coroutines.channels.Channel
-import kotlinx.coroutines.channels.consumeEach
-import kotlinx.coroutines.coroutineScope
-import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.flow
 import android.util.Log
 import java.io.File
 
@@ -29,7 +25,7 @@ class CliBasedAgentClient(
     var defaultScriptPath: String? = null
     
     /**
-     * Send a message and get response using PPE script
+     * Send a message and get response using PPE script (non-streaming)
      * Maintains same interface as old AgentClient for UI compatibility
      */
     suspend fun sendMessage(
@@ -40,17 +36,13 @@ class CliBasedAgentClient(
         scriptPath: String? = null,
         memory: String? = null,  // Agent memory context from previous interactions
         systemContext: String? = null  // System information (OS, package manager, etc.)
-    ): Flow<AgentEvent> = channelFlow {
+    ): Flow<AgentEvent> = flow {
         val startTime = System.currentTimeMillis()
         var eventCount = 0
         var lastEventTime = startTime
         var toolCallCount = 0
         var toolResultCount = 0
         var chunkCount = 0
-        
-        // Use a channel to collect events from callbacks (which are not suspend functions)
-        // Declare outside try block so it's accessible in catch blocks
-        val eventChannel = Channel<AgentEvent>(Channel.UNLIMITED)
         
         try {
             Log.d("CliBasedAgentClient", "Starting sendMessage for: ${userMessage.take(50)}...")
@@ -97,22 +89,10 @@ class CliBasedAgentClient(
                 "content" to userMessage
             )
             
-            Log.d("CliBasedAgentClient", "Starting script execution")
+            Log.d("CliBasedAgentClient", "Starting script execution (non-streaming)")
             
-            // Launch a coroutine to emit events from the channel
-            // Using channelFlow allows emissions from multiple coroutines
-            launch {
-                try {
-                    eventChannel.consumeEach { event ->
-                        send(event) // Use send() in channelFlow instead of emit()
-                    }
-                } catch (e: Exception) {
-                    Log.e("CliBasedAgentClient", "Error emitting events from channel", e)
-                }
-            }
-            
-            // Execute script and send events to channel in real-time
-            executionEngine.executeScript(
+            // Execute script directly (non-streaming) - callbacks are called synchronously
+            val result = executionEngine.executeScript(
                 script = script,
                 inputParams = inputParams,
                 onChunk = { chunk ->
@@ -122,12 +102,8 @@ class CliBasedAgentClient(
                     eventCount++
                     Log.d("CliBasedAgentClient", "Chunk received (count: $chunkCount, size: ${chunk.length}, time since start: ${now - startTime}ms)")
                     onChunk(chunk)
-                    // Send to channel (non-blocking, can be called from non-suspend context)
-                    try {
-                        eventChannel.trySend(AgentEvent.Chunk(chunk))
-                    } catch (e: Exception) {
-                        Log.e("CliBasedAgentClient", "Error sending chunk to channel", e)
-                    }
+                    // Emit chunk event
+                    emit(AgentEvent.Chunk(chunk))
                 },
                 onToolCall = { functionCall ->
                     val now = System.currentTimeMillis()
@@ -136,12 +112,8 @@ class CliBasedAgentClient(
                     eventCount++
                     Log.d("CliBasedAgentClient", "Tool call received (count: $toolCallCount, tool: ${functionCall.name}, time since start: ${now - startTime}ms)")
                     onToolCall(functionCall)
-                    // Send to channel
-                    try {
-                        eventChannel.trySend(AgentEvent.ToolCall(functionCall))
-                    } catch (e: Exception) {
-                        Log.e("CliBasedAgentClient", "Error sending tool call to channel", e)
-                    }
+                    // Emit tool call event
+                    emit(AgentEvent.ToolCall(functionCall))
                 },
                 onToolResult = { toolName, args ->
                     val now = System.currentTimeMillis()
@@ -154,65 +126,46 @@ class CliBasedAgentClient(
                     // Get tool result from execution engine (FIFO queue)
                     val toolResult: com.qali.aterm.agent.tools.ToolResult? = executionEngine.getNextToolResult(toolName)
                     if (toolResult != null) {
-                        Log.d("CliBasedAgentClient", "Sending tool result to channel for: $toolName")
-                        // Send to channel - AgentScreen will extract file diffs from this
-                        try {
-                            eventChannel.trySend(AgentEvent.ToolResult(toolName, toolResult))
-                        } catch (e: Exception) {
-                            Log.e("CliBasedAgentClient", "Error sending tool result to channel", e)
-                        }
+                        Log.d("CliBasedAgentClient", "Sending tool result event for: $toolName")
+                        // Emit tool result event - AgentScreen will extract file diffs from this
+                        emit(AgentEvent.ToolResult(toolName, toolResult))
                     } else {
                         Log.w("CliBasedAgentClient", "Tool result not found in queue for: $toolName")
                     }
                 }
-            ).collect { result ->
-                val now = System.currentTimeMillis()
-                val totalTime = now - startTime
-                val timeSinceLastEvent = now - lastEventTime
-                
-                Log.d("CliBasedAgentClient", "Execution result received (success: ${result.success}, total time: ${totalTime}ms, time since last event: ${timeSinceLastEvent}ms)")
-                Log.d("CliBasedAgentClient", "Event summary - Total: $eventCount, Chunks: $chunkCount, ToolCalls: $toolCallCount, ToolResults: $toolResultCount")
-                
-                if (result.success) {
-                    // Emit final result if any
-                    if (result.finalResult.isNotEmpty()) {
-                        Log.d("CliBasedAgentClient", "Sending final result to channel (length: ${result.finalResult.length})")
-                        eventChannel.trySend(AgentEvent.Chunk(result.finalResult))
-                        onChunk(result.finalResult)
-                    } else {
-                        Log.d("CliBasedAgentClient", "No final result to send")
-                    }
-                    Log.d("CliBasedAgentClient", "Sending Done event to channel")
-                    eventChannel.trySend(AgentEvent.Done)
+            )
+            
+            val now = System.currentTimeMillis()
+            val totalTime = now - startTime
+            val timeSinceLastEvent = now - lastEventTime
+            
+            Log.d("CliBasedAgentClient", "Execution result received (success: ${result.success}, total time: ${totalTime}ms, time since last event: ${timeSinceLastEvent}ms)")
+            Log.d("CliBasedAgentClient", "Event summary - Total: $eventCount, Chunks: $chunkCount, ToolCalls: $toolCallCount, ToolResults: $toolResultCount")
+            
+            if (result.success) {
+                // Emit final result if any
+                if (result.finalResult.isNotEmpty()) {
+                    Log.d("CliBasedAgentClient", "Sending final result (length: ${result.finalResult.length})")
+                    emit(AgentEvent.Chunk(result.finalResult))
+                    onChunk(result.finalResult)
                 } else {
-                    val errorMsg = result.error ?: "Script execution failed"
-                    Log.e("CliBasedAgentClient", "Script execution failed: $errorMsg")
-                    eventChannel.trySend(AgentEvent.Error(errorMsg))
+                    Log.d("CliBasedAgentClient", "No final result to send")
                 }
-                
-                Log.d("CliBasedAgentClient", "Script execution completed successfully (total time: ${totalTime}ms)")
-                
-                // Wait for any pending events (like continuation responses) to be sent to the channel
-                // Continuation responses can arrive asynchronously after execution completes
-                // Give enough time for these to be captured (continuation API calls can take time)
-                kotlinx.coroutines.delay(500)
-                
-                Log.d("CliBasedAgentClient", "Closing channel after delay")
-                // Close the channel to signal completion
-                eventChannel.close()
-                
-                // Give the channel consumer time to process remaining events and the close signal
-                kotlinx.coroutines.delay(200)
-                Log.d("CliBasedAgentClient", "Channel consumer should have finished processing")
+                Log.d("CliBasedAgentClient", "Sending Done event")
+                emit(AgentEvent.Done)
+            } else {
+                val errorMsg = result.error ?: "Script execution failed"
+                Log.e("CliBasedAgentClient", "Script execution failed: $errorMsg")
+                emit(AgentEvent.Error(errorMsg))
             }
+            
+            Log.d("CliBasedAgentClient", "Script execution completed successfully (total time: ${totalTime}ms)")
             
         } catch (e: kotlinx.coroutines.CancellationException) {
             val totalTime = System.currentTimeMillis() - startTime
             val timeSinceLastEvent = System.currentTimeMillis() - lastEventTime
             Log.w("CliBasedAgentClient", "Script execution cancelled (total time: ${totalTime}ms, time since last event: ${timeSinceLastEvent}ms, events: $eventCount)")
             Log.w("CliBasedAgentClient", "Cancellation details - Chunks: $chunkCount, ToolCalls: $toolCallCount, ToolResults: $toolResultCount")
-            // Close channel on cancellation
-            eventChannel.close()
             throw e // Re-throw cancellation
         } catch (e: Exception) {
             val totalTime = System.currentTimeMillis() - startTime
@@ -221,9 +174,8 @@ class CliBasedAgentClient(
             Log.e("CliBasedAgentClient", "Error details - Events: $eventCount, Chunks: $chunkCount, ToolCalls: $toolCallCount, ToolResults: $toolResultCount")
             Log.e("CliBasedAgentClient", "Exception type: ${e.javaClass.simpleName}, message: ${e.message}")
             e.printStackTrace()
-            // Send error to channel and close
-            eventChannel.trySend(AgentEvent.Error(e.message ?: "Unknown error: ${e.javaClass.simpleName}"))
-            eventChannel.close()
+            // Emit error event
+            emit(AgentEvent.Error(e.message ?: "Unknown error: ${e.javaClass.simpleName}"))
         }
     }
     
