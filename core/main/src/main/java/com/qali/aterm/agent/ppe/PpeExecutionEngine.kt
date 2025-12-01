@@ -2987,15 +2987,44 @@ JSON Blueprint:
             appendLine("This applies to ALL files including JSON files like package.json or config files.")
             appendLine("Return ONLY plain text code content - no tool wrappers, no function calls, no JSON tool invocations.")
             appendLine("")
-            appendLine("EXAMPLE FORMAT:")
-            when {
-                file.path.endsWith(".json") -> appendLine("If this were package.json, you would return: {\"name\": \"my-app\", \"version\": \"1.0.0\"}")
-                file.path.endsWith(".html") -> appendLine("If this were index.html, you would return: <!DOCTYPE html><html><head>...</head><body>...</body></html>")
-                file.path.endsWith(".js") -> appendLine("If this were app.js, you would return: const express = require('express'); const app = express(); ...")
-                else -> appendLine("Return the raw code content directly, starting with the first character of the actual code.")
+            // Special handling for JSON files
+            if (file.path.endsWith(".json")) {
+                appendLine("")
+                appendLine("⚠️ CRITICAL JSON FILE RULES:")
+                appendLine("1. Return ONLY valid JSON - nothing else")
+                appendLine("2. NO explanations, NO comments, NO instructions inside or outside the JSON")
+                appendLine("3. NO text before or after the JSON")
+                appendLine("4. Start with '{' and end with '}' - that's it")
+                appendLine("5. The entire response must be parseable as JSON")
+                if (file.path == "package.json" || file.path.endsWith("/package.json")) {
+                    appendLine("")
+                    appendLine("For package.json specifically, you MUST include these fields:")
+                    appendLine("  - \"name\": string (package name)")
+                    appendLine("  - \"version\": string (semver format like \"1.0.0\")")
+                    appendLine("  - \"description\": string (optional but recommended)")
+                    appendLine("  - \"main\": string (entry point file, e.g., \"server.js\" or \"index.js\")")
+                    appendLine("  - \"scripts\": object (npm scripts, e.g., {\"start\": \"node server.js\"})")
+                    appendLine("  - \"dependencies\": object (npm packages, can be empty {})")
+                    appendLine("")
+                    appendLine("Example valid package.json output (this is what you should return, nothing else):")
+                    appendLine("{\"name\":\"my-app\",\"version\":\"1.0.0\",\"description\":\"\",\"main\":\"server.js\",\"scripts\":{\"start\":\"node server.js\"},\"dependencies\":{}}")
+                } else {
+                    appendLine("")
+                    appendLine("Example valid JSON output (this is what you should return, nothing else):")
+                    appendLine("{\"key\":\"value\"}")
+                }
+                appendLine("")
+                appendLine("REMEMBER: Your ENTIRE response must be ONLY the JSON object. No other text.")
+            } else {
+                appendLine("EXAMPLE FORMAT:")
+                when {
+                    file.path.endsWith(".html") -> appendLine("If this were index.html, you would return: <!DOCTYPE html><html><head>...</head><body>...</body></html>")
+                    file.path.endsWith(".js") -> appendLine("If this were app.js, you would return: const express = require('express'); const app = express(); ...")
+                    else -> appendLine("Return the raw code content directly, starting with the first character of the actual code.")
+                }
+                appendLine("")
+                appendLine("Now generate the code for ${file.path} (raw code only, no markdown, no explanations):")
             }
-            appendLine("")
-            appendLine("Now generate the code for ${file.path} (raw code only, no markdown, no explanations):")
         }
         
         val messages = chatHistory.toMutableList()
@@ -3169,6 +3198,51 @@ JSON Blueprint:
         }
         
         Log.d("PpeExecutionEngine", "Final extracted code for ${file.path} (length: ${code.length}): ${code.take(200)}")
+        
+        // Special validation and extraction for JSON files
+        if (file.path.endsWith(".json")) {
+            // Extract JSON object from response (find first { and last })
+            val jsonStart = code.indexOf('{')
+            val jsonEnd = code.lastIndexOf('}')
+            
+            if (jsonStart < 0 || jsonEnd < jsonStart) {
+                Log.e("PpeExecutionEngine", "No valid JSON object found in response for ${file.path}. Response: ${code.take(500)}")
+                throw Exception("No valid JSON object found in response for ${file.path}. Response must contain a JSON object starting with '{' and ending with '}'.")
+            }
+            
+            // Extract only the JSON part
+            code = code.substring(jsonStart, jsonEnd + 1).trim()
+            
+            // Validate JSON is parseable
+            try {
+                val jsonObj = JSONObject(code)
+                
+                // For package.json, validate required fields
+                if (file.path == "package.json" || file.path.endsWith("/package.json")) {
+                    val requiredFields = listOf("name", "version", "main", "scripts", "dependencies")
+                    val missingFields = requiredFields.filter { !jsonObj.has(it) }
+                    
+                    if (missingFields.isNotEmpty()) {
+                        Log.w("PpeExecutionEngine", "package.json missing required fields: ${missingFields.joinToString(", ")}")
+                        // Add missing fields with defaults
+                        if (!jsonObj.has("name")) jsonObj.put("name", "my-app")
+                        if (!jsonObj.has("version")) jsonObj.put("version", "1.0.0")
+                        if (!jsonObj.has("main")) jsonObj.put("main", "server.js")
+                        if (!jsonObj.has("scripts")) jsonObj.put("scripts", JSONObject().apply { put("start", "node server.js") })
+                        if (!jsonObj.has("dependencies")) jsonObj.put("dependencies", JSONObject())
+                        
+                        code = jsonObj.toString()
+                        Log.d("PpeExecutionEngine", "Added missing fields to package.json")
+                    }
+                }
+                
+                Log.d("PpeExecutionEngine", "Validated JSON for ${file.path} (length: ${code.length})")
+            } catch (e: Exception) {
+                Log.e("PpeExecutionEngine", "Invalid JSON in response for ${file.path}: ${e.message}")
+                Log.e("PpeExecutionEngine", "JSON content: ${code.take(500)}")
+                throw Exception("Invalid JSON in response for ${file.path}. The response must be valid JSON only, with no extra text. Error: ${e.message}")
+            }
+        }
         
         // Validate code is not empty
         if (code.isEmpty()) {
