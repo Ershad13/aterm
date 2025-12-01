@@ -2626,7 +2626,7 @@ JSON Blueprint:
         script: PpeScript
     ): Result<String> {
         return retryWithBackoff(
-            maxRetries = 3,
+            maxRetries = 10,
             isRetryable = ::isRetryableException
         ) {
             generateFileCodeInternal(file, blueprint, sanitizeForPrompt(userMessage), chatHistory, script)

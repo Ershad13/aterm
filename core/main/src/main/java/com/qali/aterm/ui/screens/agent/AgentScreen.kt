@@ -87,7 +87,8 @@ data class AgentMessage(
     val isUser: Boolean,
     val timestamp: Long,
     val fileDiff: FileDiff? = null, // Optional file diff for code changes
-    val pendingToolCall: PendingToolCall? = null // Optional pending tool call requiring approval
+    val pendingToolCall: PendingToolCall? = null, // Optional pending tool call requiring approval
+    val viewed: Boolean = false // Whether the message has been viewed (for file diff cards)
 )
 
 data class PendingToolCall(
@@ -2271,7 +2272,8 @@ fun AgentScreen(
                                                                         text = "✅ Tool '${event.toolName}' completed: ${event.result.returnDisplay}",
                                                                         isUser = false,
                                                                         timestamp = System.currentTimeMillis(),
-                                                                        fileDiff = fileDiff
+                                                                        fileDiff = fileDiff,
+                                                                        viewed = fileDiff != null // Mark as viewed if it has a file diff (file generation completed)
                                                                     )
                                                                     messages = messages + resultMessage
                                                                 }

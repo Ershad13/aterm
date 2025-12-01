@@ -28,13 +28,15 @@ data class SerializableAgentMessage(
     val text: String,
     val isUser: Boolean,
     val timestamp: Long,
-    val fileDiff: SerializableFileDiff? = null
+    val fileDiff: SerializableFileDiff? = null,
+    val viewed: Boolean = false
 ) {
     fun toAgentMessage(): AgentMessage = AgentMessage(
         text = text,
         isUser = isUser,
         timestamp = timestamp,
-        fileDiff = fileDiff?.toFileDiff()
+        fileDiff = fileDiff?.toFileDiff(),
+        viewed = viewed
     )
     
     companion object {
@@ -43,7 +45,8 @@ data class SerializableAgentMessage(
                 text = msg.text,
                 isUser = msg.isUser,
                 timestamp = msg.timestamp,
-                fileDiff = SerializableFileDiff.fromFileDiff(msg.fileDiff)
+                fileDiff = SerializableFileDiff.fromFileDiff(msg.fileDiff),
+                viewed = msg.viewed
             )
         }
     }

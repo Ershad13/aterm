@@ -28,7 +28,8 @@ data class AgentMessage(
     val isUser: Boolean,
     val timestamp: Long,
     val fileDiff: FileDiff? = null, // Optional file diff for code changes
-    val pendingToolCall: PendingToolCall? = null // Optional pending tool call requiring approval
+    val pendingToolCall: PendingToolCall? = null, // Optional pending tool call requiring approval
+    val viewed: Boolean = false // Whether the message has been viewed (for file diff cards)
 )
 
 data class PendingToolCall(
