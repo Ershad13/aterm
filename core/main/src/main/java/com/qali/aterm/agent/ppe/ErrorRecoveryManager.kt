@@ -291,10 +291,29 @@ object ErrorRecoveryManager {
             return retryAfter.toLong() * 1000 // Convert to milliseconds
         }
         
-        // Look for retry-after in error message
+        // Look for Gemini API format: "Please retry in 54.810590433s" or "retryDelay": "54s"
+        val geminiRetryMatch = Regex("(?:Please retry in|retry in|retryDelay[\\s\":]+)([\\d.]+)\\s*s", RegexOption.IGNORE_CASE).find(errorMessage)
+        if (geminiRetryMatch != null) {
+            val seconds = geminiRetryMatch.groupValues[1].toDoubleOrNull()
+            if (seconds != null) {
+                // Add 1 second buffer and convert to milliseconds
+                return ((seconds + 1) * 1000).toLong()
+            }
+        }
+        
+        // Look for retry-after in error message (standard format)
         val retryAfterMatch = Regex("retry[_-]?after[\\s:=]+(\\d+)", RegexOption.IGNORE_CASE).find(errorMessage)
         if (retryAfterMatch != null) {
             return retryAfterMatch.groupValues[1].toLongOrNull()?.times(1000) ?: 60000
+        }
+        
+        // Look for RetryInfo with retryDelay in JSON format
+        val retryInfoMatch = Regex("\"retryDelay\"[\\s:]*\"([\\d.]+)s\"", RegexOption.IGNORE_CASE).find(errorMessage)
+        if (retryInfoMatch != null) {
+            val seconds = retryInfoMatch.groupValues[1].toDoubleOrNull()
+            if (seconds != null) {
+                return ((seconds + 1) * 1000).toLong()
+            }
         }
         
         // Default rate limit delay

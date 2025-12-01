@@ -28,6 +28,60 @@ class PpeExecutionEngine(
     private val apiClient = PpeApiClient(toolRegistry, ollamaUrl, ollamaModel)
     private val scriptCache = mutableMapOf<String, PpeScript>()
     
+    /**
+     * Helper function to call API with automatic retry on rate limit exhaustion
+     * Handles KeysExhaustedExceptionWithRetry by waiting and retrying
+     */
+    private suspend fun callApiWithRetryOnExhaustion(
+        messages: List<Content>,
+        model: String? = null,
+        temperature: Double? = null,
+        topP: Double? = null,
+        topK: Int? = null,
+        tools: List<Tool>? = null,
+        disableTools: Boolean = false,
+        onChunk: ((String) -> Unit)? = null
+    ): Result<PpeApiResponse> {
+        val result = apiClient.callApi(
+            messages = messages,
+            model = model,
+            temperature = temperature,
+            topP = topP,
+            topK = topK,
+            tools = tools,
+            disableTools = disableTools
+        )
+        
+        // If it's a KeysExhaustedExceptionWithRetry, wait and retry
+        if (result.isFailure) {
+            val error = result.exceptionOrNull()
+            if (error is PpeApiClient.KeysExhaustedExceptionWithRetry) {
+                val retryDelayMs = error.retryDelayMs
+                Log.w("PpeExecutionEngine", "All API keys exhausted with rate limit. Waiting ${retryDelayMs}ms before retry...")
+                onChunk?.invoke("⏳ All API keys hit rate limit. Waiting ${retryDelayMs / 1000}s before retrying...\n")
+                
+                // Wait for the retry delay
+                delay(retryDelayMs)
+                
+                // Retry the API call
+                Log.d("PpeExecutionEngine", "Retrying API call after ${retryDelayMs}ms delay")
+                onChunk?.invoke("🔄 Retrying API call...\n")
+                
+                return apiClient.callApi(
+                    messages = messages,
+                    model = model,
+                    temperature = temperature,
+                    topP = topP,
+                    topK = topK,
+                    tools = tools,
+                    disableTools = disableTools
+                )
+            }
+        }
+        
+        return result
+    }
+    
     // Track tool results for file diff extraction (queue-based to handle multiple calls)
     private val toolResultQueue = mutableListOf<Pair<String, com.qali.aterm.agent.tools.ToolResult>>()
     
@@ -1199,13 +1253,14 @@ class PpeExecutionEngine(
         }
         
         // Adjust temperature based on model capabilities for continuation
-        val result = apiClient.callApi(
+        val result = callApiWithRetryOnExhaustion(
             messages = messages,
             model = null,
             temperature = getOptimalTemperature(ModelTemperatureConfig.TaskType.PROBLEM_SOLVING),
             topP = null,
             topK = null,
-            tools = tools
+            tools = tools,
+            onChunk = onChunk
         )
         
         val continuationResponse = result.getOrNull()
@@ -2735,13 +2790,15 @@ JSON Blueprint:
         // Apply rate limiting
         rateLimiter.acquire()
         
-        val result = apiClient.callApi(
+        val result = callApiWithRetryOnExhaustion(
             messages = messages,
             model = null,
             temperature = getOptimalTemperature(ModelTemperatureConfig.TaskType.DATA_ANALYSIS),
             topP = null,
             topK = null,
-            tools = null // Don't use tools for blueprint generation
+            tools = null, // Don't use tools for blueprint generation
+            disableTools = false,
+            onChunk = null
         )
         
         val response = result.getOrElse {
@@ -2959,14 +3016,15 @@ JSON Blueprint:
         // Apply rate limiting
         rateLimiter.acquire()
         
-        val result = apiClient.callApi(
+        val result = callApiWithRetryOnExhaustion(
             messages = messages,
             model = null,
             temperature = getOptimalTemperature(ModelTemperatureConfig.TaskType.CODE_GENERATION),
             topP = null,
             topK = null,
             tools = null, // Don't use tools for code generation
-            disableTools = true // Force disable tools to prevent any tool calls
+            disableTools = true, // Force disable tools to prevent any tool calls
+            onChunk = null
         )
         
         val response = result.getOrElse {
@@ -3271,13 +3329,15 @@ JSON Response:
         // Apply rate limiting
         rateLimiter.acquire()
         
-        val result = apiClient.callApi(
+        val result = callApiWithRetryOnExhaustion(
             messages = messages,
             model = null,
             temperature = getOptimalTemperature(ModelTemperatureConfig.TaskType.CODE_ANALYSIS),
             topP = null,
             topK = null,
-            tools = null
+            tools = null,
+            disableTools = false,
+            onChunk = null
         )
         
         val response = result.getOrElse {

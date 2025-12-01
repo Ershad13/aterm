@@ -250,10 +250,23 @@ class PpeApiClient(
                         "category" to classification.category.name,
                         "severity" to classification.severity,
                         "retryable" to classification.isRetryable,
+                        "retry_delay_ms" to classification.retryDelay,
                         "recovery_suggestion" to (classification.recoverySuggestion ?: "none")
                     ), error)
                     
-                    Result.failure(error ?: Exception(errorMessage))
+                    // If it's a KeysExhaustedException with rate limit errors, wrap it with retry info
+                    val finalError = if (error is KeysExhaustedException && classification.category == ErrorRecoveryManager.ErrorCategory.RATE_LIMIT && classification.isRetryable) {
+                        // Create a new exception that includes retry delay information
+                        KeysExhaustedExceptionWithRetry(
+                            error.message ?: "All API keys exhausted",
+                            error.cause,
+                            classification.retryDelay
+                        )
+                    } else {
+                        error ?: Exception(errorMessage)
+                    }
+                    
+                    Result.failure(finalError)
                 }
                 
                 return@withContext finalResult
