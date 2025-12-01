@@ -2222,8 +2222,8 @@ class PpeExecutionEngine(
             
             onChunk("Blueprint generated successfully.\n\n")
             
-            // Parse blueprint JSON
-            var blueprint = parseBlueprintJson(blueprintJson)
+            // Parse blueprint JSON exactly as returned by the model
+            val blueprint = parseBlueprintJson(blueprintJson)
             if (blueprint == null) {
                 Log.w("PpeExecutionEngine", "Failed to parse blueprint JSON")
                 return PpeExecutionResult(
@@ -2234,8 +2234,6 @@ class PpeExecutionEngine(
                     error = "Blueprint parsing failed"
                 )
             }
-            // Ensure required files are present for certain project types (e.g. package.json for Node.js)
-            blueprint = ensureRequiredFiles(blueprint)
             
             // Validate blueprint
             val validation = validateBlueprint(blueprint)
@@ -2446,16 +2444,20 @@ class PpeExecutionEngine(
         }
         
         val blueprintPrompt = """
-You are a project architect. Based on the user's request, generate a JSON blueprint for the project structure.
+You are a senior software project architect.
+Your task is to understand the user's request, briefly restate their goals, and then design a JSON blueprint for the project structure.
 
-User Request: $userMessage
+User Request (natural language from user):
+$userMessage
 
 $projectTypeContext
 
-Generate a JSON blueprint in this EXACT format (no markdown, no code blocks, just pure JSON):
+First, think carefully about what the user is asking for.
+Then, return a SINGLE JSON object in this EXACT format (no markdown, no code blocks, just pure JSON):
 
 {
   "projectType": "nodejs",
+  "projectDescription": "Short summary of the user's request and the intended app behaviour (2-4 sentences, plain text).",
   "files": [
     {
       "path": "package.json",
@@ -2535,86 +2537,18 @@ JSON Blueprint:
         
         Log.d("PpeExecutionEngine", "Extracted blueprint JSON (length: ${jsonText.length})")
         
-        // Validate JSON is not empty
+        // Validate JSON is not empty and looks like an object
         if (jsonText.isEmpty() || !jsonText.trim().startsWith("{")) {
-            Log.w("PpeExecutionEngine", "Invalid blueprint JSON from API (empty or not an object). Falling back to default blueprint.")
-            return createDefaultBlueprintJson(userMessage, projectType)
+            Log.w(
+                "PpeExecutionEngine",
+                "Invalid blueprint JSON from API (empty or not an object). Model must return a valid JSON blueprint."
+            )
+            throw Exception(
+                "Invalid blueprint JSON from model. Please retry or switch to a model that can return pure JSON (no markdown)."
+            )
         }
         
         return jsonText
-    }
-
-    /**
-     * Fallback blueprint when the model returns invalid or empty JSON.
-     * Keeps things simple and lets later phases generate actual code.
-     */
-    private fun createDefaultBlueprintJson(
-        userMessage: String,
-        projectType: ProjectStartupDetector.ProjectType?
-    ): String {
-        val type = projectType?.name?.lowercase() ?: "unknown"
-
-        // For now we special‑case nodejs since it's common for web apps
-        return if (type == "nodejs") {
-            """
-            {
-              "projectType": "nodejs",
-              "files": [
-                {
-                  "path": "package.json",
-                  "type": "config",
-                  "dependencies": [],
-                  "description": "Node.js project configuration for: ${userMessage.take(80)}"
-                },
-                {
-                  "path": "src/server.js",
-                  "type": "code",
-                  "dependencies": ["package.json"],
-                  "description": "Express server entry point"
-                },
-                {
-                  "path": "public/index.html",
-                  "type": "code",
-                  "dependencies": ["package.json"],
-                  "description": "Main HTML page"
-                },
-                {
-                  "path": "public/styles.css",
-                  "type": "style",
-                  "dependencies": ["public/index.html"],
-                  "description": "Styles for the web UI"
-                },
-                {
-                  "path": "public/app.js",
-                  "type": "code",
-                  "dependencies": ["public/index.html"],
-                  "description": "Frontend logic (e.g. tic tac toe game)"
-                }
-              ]
-            }
-            """.trimIndent()
-        } else {
-            // Generic minimal blueprint for other project types
-            """
-            {
-              "projectType": "$type",
-              "files": [
-                {
-                  "path": "README.md",
-                  "type": "docs",
-                  "dependencies": [],
-                  "description": "Project overview and setup instructions for: ${userMessage.take(80)}"
-                },
-                {
-                  "path": "main.${if (type == "python") "py" else "txt"}",
-                  "type": "code",
-                  "dependencies": [],
-                  "description": "Main entry point file"
-                }
-              ]
-            }
-            """.trimIndent()
-        }
     }
     
     /**
@@ -2652,33 +2586,6 @@ JSON Blueprint:
             Log.e("PpeExecutionEngine", "Failed to parse blueprint JSON: ${e.message}", e)
             null
         }
-    }
-    
-    /**
-     * Ensure required files exist in the blueprint for specific project types.
-     * For example, Node.js projects should always have a package.json.
-     */
-    private fun ensureRequiredFiles(blueprint: ProjectBlueprint): ProjectBlueprint {
-        val files = blueprint.files.toMutableList()
-        val lowerType = blueprint.projectType.lowercase()
-        
-        if (lowerType == "nodejs") {
-            val hasPackageJson = files.any { it.path.equals("package.json", ignoreCase = true) }
-            if (!hasPackageJson) {
-                Log.w("PpeExecutionEngine", "Node.js blueprint missing package.json – adding a minimal stub.")
-                files.add(
-                    0,
-                    BlueprintFile(
-                        path = "package.json",
-                        type = "config",
-                        dependencies = emptyList(),
-                        description = "Package configuration file (auto-added fallback)"
-                    )
-                )
-            }
-        }
-        
-        return if (files === blueprint.files) blueprint else ProjectBlueprint(blueprint.projectType, files)
     }
     
     /**

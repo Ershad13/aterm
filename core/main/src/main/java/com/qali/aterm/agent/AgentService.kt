@@ -27,14 +27,13 @@ object AgentService {
     private var currentOllamaModel: String? = null
     
     fun initialize(workspaceRoot: String = alpineDir().absolutePath, useOllama: Boolean = false, ollamaUrl: String = "http://localhost:11434", ollamaModel: String = "llama3.2", sessionId: String? = null, mainActivity: MainActivity? = null): Any {
-        // Initialize debug logger if not already initialized
-        val logDir = File(workspaceRoot, ".aterm/logs")
+        // Initialize debug logger (console-only; disable file logging to avoid .aterm files)
         DebugLogger.initialize(
             logLevel = DebugLogger.LogLevel.INFO,
-            enableFileLogging = true,
-            logDir = logDir,
-            maxFileSize = 10 * 1024 * 1024, // 10 MB
-            maxFiles = 5
+            enableFileLogging = false,
+            logDir = null,
+            maxFileSize = 10 * 1024 * 1024, // Unused when file logging is disabled
+            maxFiles = 0
         )
         
         val workspaceChanged = currentWorkspaceRoot != workspaceRoot
