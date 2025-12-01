@@ -30,19 +30,38 @@ object AgentService {
         this.useOllama = useOllama
         
         if (useOllama) {
-            // Recreate client if workspace changed, useOllama changed, or client doesn't exist
-            if (ollamaClient == null || workspaceChanged || useOllamaChanged) {
-                val toolRegistry = ToolRegistry()
-                registerAllTools(toolRegistry, workspaceRoot, sessionId, mainActivity)
-                
-                // For Ollama, we need an AgentClient for custom search (it uses API for AI analysis)
-                // Create a temporary client just for custom search tool
-                val tempAgentClient = AgentClient(toolRegistry, workspaceRoot)
-                toolRegistry.registerTool(CustomWebSearchTool(tempAgentClient, workspaceRoot))
-                
-                ollamaClient = OllamaClient(toolRegistry, workspaceRoot, ollamaUrl, ollamaModel)
+            // Use CLI-based agent for Ollama too (non-streaming flow)
+            if (useCliAgent) {
+                // Recreate CLI client if workspace changed, useOllama changed, or client doesn't exist
+                if (cliClient == null || workspaceChanged || useOllamaChanged) {
+                    val toolRegistry = ToolRegistry()
+                    registerAllTools(toolRegistry, workspaceRoot, sessionId, mainActivity)
+                    
+                    // Create CLI-based client (works with Ollama via ProviderAdapter)
+                    val newCliClient = CliBasedAgentClient(toolRegistry, workspaceRoot)
+                    cliClient = newCliClient
+                    
+                    // Register web search tools (need AgentClient for these, so create a temporary one)
+                    val tempAgentClient = AgentClient(toolRegistry, workspaceRoot)
+                    toolRegistry.registerTool(WebSearchTool(tempAgentClient, workspaceRoot))
+                    toolRegistry.registerTool(CustomWebSearchTool(tempAgentClient, workspaceRoot))
+                }
+                return cliClient!!
+            } else {
+                // Fallback to old OllamaClient if CLI agent is disabled
+                if (ollamaClient == null || workspaceChanged || useOllamaChanged) {
+                    val toolRegistry = ToolRegistry()
+                    registerAllTools(toolRegistry, workspaceRoot, sessionId, mainActivity)
+                    
+                    // For Ollama, we need an AgentClient for custom search (it uses API for AI analysis)
+                    // Create a temporary client just for custom search tool
+                    val tempAgentClient = AgentClient(toolRegistry, workspaceRoot)
+                    toolRegistry.registerTool(CustomWebSearchTool(tempAgentClient, workspaceRoot))
+                    
+                    ollamaClient = OllamaClient(toolRegistry, workspaceRoot, ollamaUrl, ollamaModel)
+                }
+                return ollamaClient!!
             }
-            return ollamaClient!!
         } else {
             // Use CLI-based agent by default
             if (useCliAgent) {

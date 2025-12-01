@@ -2101,7 +2101,19 @@ fun AgentScreen(
                                         try {
                                             android.util.Log.d("AgentScreen", "Creating stream, useOllama: $useOllama, useCliAgent: ${AgentService.isUsingCliAgent()}")
                                             val stream = when {
-                                                useOllama -> {
+                                                // Use CliBasedAgentClient for all providers (including Ollama) - non-streaming flow
+                                                aiClient is CliBasedAgentClient -> {
+                                                    (aiClient as CliBasedAgentClient).sendMessage(
+                                                        userMessage = prompt,
+                                                        onChunk = { },
+                                                        onToolCall = { },
+                                                        onToolResult = { _, _ -> },
+                                                        memory = memory,
+                                                        systemContext = systemContext
+                                                    )
+                                                }
+                                                // Fallback to old OllamaClient only if CLI agent is disabled
+                                                useOllama && !AgentService.isUsingCliAgent() -> {
                                                     (aiClient as OllamaClient).sendMessage(
                                                     userMessage = prompt,
                                                     onChunk = { chunk ->
@@ -2775,6 +2787,18 @@ fun AgentScreen(
                     // Use continuation message to resume from chat history
                     currentResponseText = ""
                     val stream = when {
+                        // Use CliBasedAgentClient for all providers (including Ollama) - non-streaming flow
+                        aiClient is CliBasedAgentClient -> {
+                            (aiClient as CliBasedAgentClient).sendMessage(
+                                userMessage = "__CONTINUE__",
+                                onChunk = { },
+                                onToolCall = { },
+                                onToolResult = { _, _ -> },
+                                memory = memory,
+                                systemContext = systemContext
+                            )
+                        }
+                        // Fallback to old OllamaClient only if CLI agent is disabled
                         aiClient is OllamaClient -> {
                             (aiClient as OllamaClient).sendMessage(
                                 userMessage = "__CONTINUE__", // Special message to continue from chat history

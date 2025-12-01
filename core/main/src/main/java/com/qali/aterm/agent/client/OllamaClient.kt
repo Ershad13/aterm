@@ -100,12 +100,9 @@ class OllamaClient(
                             if (content.isNotEmpty()) {
                                 buffer += content
                                 // Emit event immediately (flow collection handles threading)
+                                // NOTE: Don't call onChunk callback here to avoid duplication
+                                // The flow collector in AgentScreen will handle UI updates
                                 emit(AgentEvent.Chunk(content))
-                                // Dispatch callback to main thread for immediate UI updates
-                                // Note: This is called from IO thread, so we dispatch to Main
-                                withContext(Dispatchers.Main) {
-                                    onChunk(content)
-                                }
                             }
                             
                             if (json.optBoolean("done", false)) {
