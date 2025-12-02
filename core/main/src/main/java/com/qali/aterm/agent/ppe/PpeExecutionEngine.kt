@@ -2223,9 +2223,22 @@ class PpeExecutionEngine(
         val upgradeDebugKeywords = listOf(
             "fix", "debug", "upgrade", "update", "improve", "refactor",
             "modify", "change", "edit", "add feature", "enhance",
-            "error", "bug", "issue", "problem", "broken"
+            "error", "bug", "issue", "problem", "broken", "not working",
+            "doesn't work", "failed", "failure", "exception", "crash"
         )
         val hasUpgradeKeyword = upgradeDebugKeywords.any { message.contains(it) }
+        
+        // Check for error patterns (stack traces, error messages, etc.)
+        val errorPatterns = listOf(
+            Regex("""error\s*:""", RegexOption.IGNORE_CASE),
+            Regex("""exception\s*:""", RegexOption.IGNORE_CASE),
+            Regex("""at\s+\w+.*\(.*:\d+\)"""), // Stack trace pattern
+            Regex("""ReferenceError|TypeError|SyntaxError|EvalError"""),
+            Regex("""npm\s+(?:start|run|test).*error""", RegexOption.IGNORE_CASE),
+            Regex("""\d+\s+error""", RegexOption.IGNORE_CASE),
+            Regex("""failed\s+to""", RegexOption.IGNORE_CASE)
+        )
+        val hasErrorPattern = errorPatterns.any { it.find(userMessage) != null }
         
         // Check workspace state - should have existing code files
         val workspaceDir = File(workspaceRoot)
@@ -2244,11 +2257,11 @@ class PpeExecutionEngine(
             .count()
         
         // Consider it an upgrade/debug request if:
-        // 1. Has upgrade/debug keywords AND
+        // 1. (Has upgrade/debug keywords OR has error patterns) AND
         // 2. Has existing code files (more than 2)
-        val isUpgradeDebug = hasUpgradeKeyword && codeFileCount > 2
+        val isUpgradeDebug = (hasUpgradeKeyword || hasErrorPattern) && codeFileCount > 2
         
-        Log.d("PpeExecutionEngine", "Upgrade/debug check - keywords: $hasUpgradeKeyword, codeFiles: $codeFileCount, isUpgrade: $isUpgradeDebug")
+        Log.d("PpeExecutionEngine", "Upgrade/debug check - keywords: $hasUpgradeKeyword, errorPatterns: $hasErrorPattern, codeFiles: $codeFileCount, isUpgrade: $isUpgradeDebug")
         return isUpgradeDebug
     }
     
@@ -3614,6 +3627,47 @@ Updated Blueprint JSON:
             val operationId = "upgrade-debug-${System.currentTimeMillis()}"
             Observability.startOperation(operationId, "upgrade-debug-flow")
             
+            // Step 0: Use intelligent error analysis tool if error is detected
+            val errorAnalysisTool = toolRegistry.getTool("intelligent_error_analysis")
+            val hasError = userMessage.lowercase().let { msg ->
+                msg.contains("error") || msg.contains("exception") || msg.contains("failed") ||
+                msg.contains("bug") || msg.contains("issue") || msg.contains("problem") ||
+                msg.contains("broken") || msg.contains("not working") || 
+                Regex("""at\s+\w+.*\(.*:\d+\)""").find(userMessage) != null ||
+                Regex("""ReferenceError|TypeError|SyntaxError""").find(userMessage) != null
+            }
+            if (errorAnalysisTool != null && hasError) {
+                onChunk("Step 0: Analyzing error with intelligent error analysis...\n")
+                try {
+                    val analysisParams = mapOf(
+                        "errorMessage" to userMessage
+                    )
+                    val analysisInvocation = errorAnalysisTool.createInvocation(
+                        errorAnalysisTool.validateAndConvertParams(analysisParams),
+                        "intelligent_error_analysis",
+                        "Intelligent Error Analysis"
+                    )
+                    onToolCall(FunctionCall(
+                        name = "intelligent_error_analysis",
+                        args = analysisParams
+                    ))
+                    val analysisResult = analysisInvocation.execute(null, onChunk)
+                    onToolResult("intelligent_error_analysis", analysisParams)
+                    
+                    // Add analysis result to chat history
+                    updatedChatHistory.add(
+                        Content(
+                            role = "user",
+                            parts = listOf(Part.TextPart(text = "Error Analysis Result:\n${analysisResult.llmContent}"))
+                        )
+                    )
+                    onChunk("Error analysis completed.\n\n")
+                } catch (e: Exception) {
+                    Log.w("PpeExecutionEngine", "Error analysis tool failed, continuing with normal flow", e)
+                    onChunk("Error analysis unavailable, continuing with standard flow...\n\n")
+                }
+            }
+            
             // Step 1: Get file structure (respecting .gitignore) with caching
             onChunk("Step 1: Analyzing project structure...\n")
             val fileStructure = IntelligentCache.getFileStructure(workspaceRoot) {
@@ -3624,7 +3678,7 @@ Updated Blueprint JSON:
             // Step 2: Determine which files to read (with rate limiting)
             onChunk("Step 2: Determining which files to read...\n")
             rateLimiter.acquire()
-            val readPlan = determineFilesToRead(userMessage, fileStructure, chatHistory, script)
+            val readPlan = determineFilesToRead(userMessage, fileStructure, updatedChatHistory, script)
             
             if (readPlan == null || readPlan.files.isEmpty()) {
                 Log.w("PpeExecutionEngine", "No files determined for reading")

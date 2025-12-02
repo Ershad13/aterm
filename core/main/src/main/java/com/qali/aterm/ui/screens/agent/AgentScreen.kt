@@ -276,6 +276,33 @@ fun DirectoryPickerDialog(
  * Extracts file path and content from edit and write_file tool results.
  * Uses the current workspaceRoot so diffs work correctly for per-session workspaces.
  */
+/**
+ * Extract file path from tool result for better matching
+ */
+private fun extractFilePathFromToolResult(toolResult: ToolResult): String? {
+    // Try multiple patterns to extract file path
+    val patterns = listOf(
+        Regex("""(?:file|File|path|Path|written|created)[:\s]+([^\s,\n]+)""", RegexOption.IGNORE_CASE),
+        Regex("""(?:to|at)\s+([^\s,\n]+\.(?:js|ts|jsx|tsx|py|java|kt|go|rs|cpp|h|json|yaml|yml|md|txt|xml|html|css|ejs))""", RegexOption.IGNORE_CASE),
+        Regex("""([^\s,\n]+\.(?:js|ts|jsx|tsx|py|java|kt|go|rs|cpp|h|json|yaml|yml|md|txt|xml|html|css|ejs))""")
+    )
+    
+    val llmContent = toolResult.llmContent
+    val returnDisplay = toolResult.returnDisplay
+    
+    // Try llmContent first
+    patterns.forEach { pattern ->
+        pattern.find(llmContent)?.groupValues?.get(1)?.let { return it }
+    }
+    
+    // Try returnDisplay
+    patterns.forEach { pattern ->
+        pattern.find(returnDisplay)?.groupValues?.get(1)?.let { return it }
+    }
+    
+    return null
+}
+
 fun parseFileDiffFromToolResult(
     toolName: String,
     toolResult: ToolResult,
@@ -1627,7 +1654,9 @@ fun AgentScreen(
     var showNewSessionDialog by remember { mutableStateOf(false) }
     var showSessionSwitcher by remember { mutableStateOf(false) }
     // Track tool calls to extract file diffs (queue-based to handle multiple calls)
-    val toolCallQueue = remember { mutableListOf<Pair<String, Map<String, Any>>>() }
+    // Store as Pair(toolName, args) with a counter to help match results
+    val toolCallQueue = remember { mutableListOf<Triple<String, Map<String, Any>, Int>>() }
+    var toolCallCounter by remember { mutableStateOf(0) }
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
     // Track current agent job for cancellation
@@ -2075,6 +2104,13 @@ fun AgentScreen(
                                         
                                         android.util.Log.d("AgentScreen", "Starting message send for: ${prompt.take(50)}...")
                                         
+                                        // Clear tool call queue for new message to prevent stale entries
+                                        withContext(Dispatchers.Main) {
+                                            toolCallQueue.clear()
+                                            toolCallCounter = 0
+                                            android.util.Log.d("AgentScreen", "Cleared tool call queue for new message")
+                                        }
+                                        
                                         // Parse memory from previous messages (for subsequent prompts)
                                         val previousMessages = withContext(Dispatchers.Main) { messages.filter { it.timestamp < userMessage.timestamp } }
                                         val memory = if (previousMessages.isNotEmpty()) {
@@ -2265,7 +2301,10 @@ fun AgentScreen(
                                                                 
                                                                 // Store tool call args in queue for file diff extraction
                                                                 if (event.functionCall.name == "edit" || event.functionCall.name == "write_file") {
-                                                                    toolCallQueue.add(Pair(event.functionCall.name, event.functionCall.args))
+                                                                    toolCallCounter++
+                                                                    val filePath = event.functionCall.args["file_path"] as? String ?: ""
+                                                                    toolCallQueue.add(Triple(event.functionCall.name, event.functionCall.args, toolCallCounter))
+                                                                    android.util.Log.d("AgentScreen", "Added tool call to queue: ${event.functionCall.name} for file: $filePath (counter: $toolCallCounter, queue size: ${toolCallQueue.size})")
                                                                 }
                                                                 
                                                                 withContext(Dispatchers.Main) {
@@ -2298,12 +2337,29 @@ fun AgentScreen(
                                                                 execState.toolResultCount++
                                                                 android.util.Log.d("AgentScreen", "Processing ToolResult event (count: ${execState.toolResultCount}, tool: ${event.toolName})")
                                                                 // Try to extract file diff from tool result
-                                                                // Find matching tool call from queue - use FIFO order (first in, first out)
-                                                                val toolCallIndex = toolCallQueue.indexOfFirst { it.first == event.toolName }
-                                                                val toolArgs = if (toolCallIndex >= 0) {
-                                                                    val args = toolCallQueue[toolCallIndex].second
+                                                                // Find matching tool call from queue - try to match by file path first, then FIFO
+                                                                val toolArgs: Map<String, Any>?
+                                                                val toolCallIndex = if (event.toolName == "write_file" || event.toolName == "edit") {
+                                                                    // Try to extract file path from tool result to match more accurately
+                                                                    val resultFilePath = extractFilePathFromToolResult(event.result)
+                                                                    if (resultFilePath != null) {
+                                                                        // Try to match by file path first
+                                                                        toolCallQueue.indexOfFirst { (name, args, _) ->
+                                                                            name == event.toolName && (args["file_path"] as? String) == resultFilePath
+                                                                        }.takeIf { it >= 0 }
+                                                                            ?: toolCallQueue.indexOfFirst { it.first == event.toolName }
+                                                                    } else {
+                                                                        // Fallback to FIFO matching
+                                                                        toolCallQueue.indexOfFirst { it.first == event.toolName }
+                                                                    }
+                                                                } else {
+                                                                    -1
+                                                                }
+                                                                
+                                                                toolArgs = if (toolCallIndex >= 0) {
+                                                                    val (_, args, counter) = toolCallQueue[toolCallIndex]
                                                                     toolCallQueue.removeAt(toolCallIndex) // Remove after use
-                                                                    android.util.Log.d("AgentScreen", "Matched tool result with tool call args: ${args.keys}")
+                                                                    android.util.Log.d("AgentScreen", "Matched tool result with tool call (counter: $counter) - args keys: ${args.keys}")
                                                                     args
                                                                 } else {
                                                                     android.util.Log.w("AgentScreen", "No matching tool call found in queue for ${event.toolName} (queue size: ${toolCallQueue.size})")
