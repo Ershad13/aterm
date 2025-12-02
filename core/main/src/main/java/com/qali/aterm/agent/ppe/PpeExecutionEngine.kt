@@ -3642,11 +3642,9 @@ Updated Blueprint JSON:
                     val analysisParams = mapOf(
                         "errorMessage" to userMessage
                     )
-                    val analysisInvocation = errorAnalysisTool.createInvocation(
-                        errorAnalysisTool.validateAndConvertParams(analysisParams),
-                        "intelligent_error_analysis",
-                        "Intelligent Error Analysis"
-                    )
+                    // Create invocation using the same pattern as other tools
+                    @Suppress("UNCHECKED_CAST")
+                    val analysisInvocation = (errorAnalysisTool as com.qali.aterm.agent.tools.DeclarativeTool<Any, com.qali.aterm.agent.tools.ToolResult>).createInvocation(analysisParams)
                     onToolCall(FunctionCall(
                         name = "intelligent_error_analysis",
                         args = analysisParams
