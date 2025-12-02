@@ -1790,22 +1790,15 @@ fun AgentScreen(
         }
     }
     
-    // Save history and metadata whenever they change (debounced to avoid too frequent saves)
-    // Also save immediately when sessionId changes to preserve work when switching tabs
+    // Save history and metadata immediately whenever they change (auto-save)
+    // Save immediately to preserve work when switching sessions or app closes
     LaunchedEffect(messages, sessionId, workspaceRoot, currentResponseText) {
         if (messages.isNotEmpty()) {
-            // Save immediately (no debounce) when session changes to preserve work
-            val shouldDebounce = true // Can be made configurable
-            if (!shouldDebounce) {
+            // Save immediately - no debounce for better persistence
+            scope.launch(Dispatchers.IO) {
                 HistoryPersistenceService.saveHistory(sessionId, messages)
                 messageHistory = messages
-                android.util.Log.d("AgentScreen", "Saved ${messages.size} messages for session $sessionId (immediate)")
-            } else {
-                // Debounce saves to avoid too frequent disk writes
-                kotlinx.coroutines.delay(500)
-                HistoryPersistenceService.saveHistory(sessionId, messages)
-                messageHistory = messages
-                android.util.Log.d("AgentScreen", "Saved ${messages.size} messages for session $sessionId")
+                android.util.Log.d("AgentScreen", "Auto-saved ${messages.size} messages for session $sessionId")
             }
         }
         
@@ -2000,6 +1993,22 @@ fun AgentScreen(
             messages.mapNotNull { it.fileDiff }.distinctBy { it.filePath }
         }
         val hasFileChanges = remember(fileDiffs) { fileDiffs.isNotEmpty() }
+        
+        // Auto-scroll to show new file diff boxes when they're added
+        val lastFileDiffIndex = remember(messages) {
+            messages.indexOfLast { it.fileDiff != null }
+        }
+        LaunchedEffect(lastFileDiffIndex) {
+            if (lastFileDiffIndex >= 0 && lastFileDiffIndex < messages.size) {
+                kotlinx.coroutines.delay(200) // Small delay to ensure UI is updated
+                try {
+                    listState.animateScrollToItem(lastFileDiffIndex)
+                    android.util.Log.d("AgentScreen", "Auto-scrolled to file diff at index $lastFileDiffIndex")
+                } catch (e: Exception) {
+                    android.util.Log.w("AgentScreen", "Failed to auto-scroll to file diff", e)
+                }
+            }
+        }
         
         LazyColumn(
             state = listState,
@@ -2379,14 +2388,47 @@ fun AgentScreen(
                                                                 }
                                                                 
                                                                 withContext(Dispatchers.Main) {
+                                                                    // For write_file operations, show immediate feedback with file diff
+                                                                    val resultText = if (event.toolName == "write_file" && fileDiff != null) {
+                                                                        if (fileDiff.isNewFile) {
+                                                                            "✅ New file created: ${fileDiff.filePath}"
+                                                                        } else {
+                                                                            "✅ File updated: ${fileDiff.filePath}"
+                                                                        }
+                                                                    } else {
+                                                                        "✅ Tool '${event.toolName}' completed: ${event.result.returnDisplay}"
+                                                                    }
+                                                                    
                                                                     val resultMessage = AgentMessage(
-                                                                        text = "✅ Tool '${event.toolName}' completed: ${event.result.returnDisplay}",
+                                                                        text = resultText,
                                                                         isUser = false,
                                                                         timestamp = System.currentTimeMillis(),
                                                                         fileDiff = fileDiff,
-                                                                        viewed = fileDiff != null // Mark as viewed if it has a file diff (file generation completed)
+                                                                        viewed = false // Don't mark as viewed so diff box is visible
                                                                     )
                                                                     messages = messages + resultMessage
+                                                                    
+                                                                    // Auto-save immediately when file is written
+                                                                    if (fileDiff != null) {
+                                                                        scope.launch(Dispatchers.IO) {
+                                                                            HistoryPersistenceService.saveHistory(sessionId, messages)
+                                                                            android.util.Log.d("AgentScreen", "Auto-saved ${messages.size} messages after file write: ${fileDiff.filePath}")
+                                                                        }
+                                                                        
+                                                                        // Auto-scroll to show the new file diff box
+                                                                        scope.launch(Dispatchers.Main) {
+                                                                            kotlinx.coroutines.delay(100) // Small delay to ensure UI is updated
+                                                                            try {
+                                                                                val lastIndex = messages.size - 1
+                                                                                if (lastIndex >= 0) {
+                                                                                    listState.animateScrollToItem(lastIndex)
+                                                                                    android.util.Log.d("AgentScreen", "Auto-scrolled to show file diff for: ${fileDiff.filePath}")
+                                                                                }
+                                                                            } catch (e: Exception) {
+                                                                                android.util.Log.w("AgentScreen", "Failed to auto-scroll to file diff", e)
+                                                                            }
+                                                                        }
+                                                                    }
                                                                 }
                                                             }
                                                             is AgentEvent.Error -> {
@@ -2704,61 +2746,180 @@ fun AgentScreen(
     }
     
     
-    // New Session Dialog
+    // New Session Dialog - allows switching to existing session or creating new one
     if (showNewSessionDialog) {
+        var allSessionIds by remember { mutableStateOf<List<String>>(emptyList()) }
+        var sessionMetadataMap by remember { mutableStateOf<Map<String, SessionMetadata>>(emptyMap()) }
+        var showSessionList by remember { mutableStateOf(false) }
+        
+        LaunchedEffect(Unit) {
+            allSessionIds = HistoryPersistenceService.getAllSessionIds()
+            sessionMetadataMap = allSessionIds.associateWith { sid ->
+                HistoryPersistenceService.loadSessionMetadata(sid) ?: SessionMetadata(
+                    workspaceRoot = com.rk.libcommons.alpineDir().absolutePath,
+                    isPaused = false
+                )
+            }
+        }
+        
         AlertDialog(
             onDismissRequest = { showNewSessionDialog = false },
-            title = { Text("Create New Session") },
+            title = { Text("New Session") },
             text = {
-                Column {
-                    Text(
-                        "Start a new agent session? This will clear the current conversation and start fresh.",
-                        style = MaterialTheme.typography.bodyMedium
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-                    if (messages.isNotEmpty()) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 500.dp)
+                ) {
+                    if (showSessionList) {
+                        // Show list of existing sessions to switch to
                         Text(
-                            "⚠️ Current session has ${messages.size} message(s) that will be cleared.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.error
+                            "Switch to an existing session:",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.padding(bottom = 8.dp)
                         )
-                        Spacer(modifier = Modifier.height(4.dp))
+                        if (allSessionIds.isEmpty()) {
+                            Text(
+                                "No saved sessions found.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        } else {
+                            LazyColumn(
+                                modifier = Modifier.heightIn(max = 300.dp)
+                            ) {
+                                items(allSessionIds.size) { index ->
+                                    val savedSessionId = allSessionIds[index]
+                                    val metadata = sessionMetadataMap[savedSessionId]
+                                    val messageCount = HistoryPersistenceService.loadHistory(savedSessionId).size
+                                    
+                                    Card(
+                                        onClick = {
+                                            showNewSessionDialog = false
+                                            // Switch to this session
+                                            scope.launch {
+                                                try {
+                                                    changeSession(mainActivity, savedSessionId)
+                                                    android.util.Log.d("AgentScreen", "Switched to session: $savedSessionId")
+                                                } catch (e: Exception) {
+                                                    android.util.Log.e("AgentScreen", "Error switching session", e)
+                                                }
+                                            }
+                                        },
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(vertical = 4.dp),
+                                        colors = CardDefaults.cardColors(
+                                            containerColor = if (savedSessionId == sessionId) {
+                                                MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.3f)
+                                            } else {
+                                                MaterialTheme.colorScheme.surfaceContainerHigh
+                                            }
+                                        )
+                                    ) {
+                                        Column(
+                                            modifier = Modifier.padding(12.dp)
+                                        ) {
+                                            Text(
+                                                text = savedSessionId,
+                                                style = MaterialTheme.typography.bodyMedium,
+                                                fontWeight = FontWeight.Bold
+                                            )
+                                            if (messageCount > 0) {
+                                                Text(
+                                                    text = "$messageCount message(s)",
+                                                    style = MaterialTheme.typography.bodySmall,
+                                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                                )
+                                            }
+                                            metadata?.lastPrompt?.takeIf { it.isNotEmpty() }?.let { lastPrompt ->
+                                                Text(
+                                                    text = "Last: ${lastPrompt.take(50)}...",
+                                                    style = MaterialTheme.typography.bodySmall,
+                                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        Spacer(modifier = Modifier.height(8.dp))
+                        TextButton(
+                            onClick = { showSessionList = false },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text("Create New Session Instead")
+                        }
+                    } else {
+                        // Show create new session option
+                        Text(
+                            "Choose an option:",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.padding(bottom = 8.dp)
+                        )
+                        Text(
+                            "• Switch to an existing session (keeps all history)",
+                            style = MaterialTheme.typography.bodyMedium,
+                            modifier = Modifier.padding(bottom = 4.dp)
+                        )
+                        Text(
+                            "• Create a new session (starts fresh, current session history is preserved)",
+                            style = MaterialTheme.typography.bodyMedium,
+                            modifier = Modifier.padding(bottom = 8.dp)
+                        )
+                        if (messages.isNotEmpty()) {
+                            Text(
+                                "Current session: $sessionId (${messages.size} message(s))",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
                     }
-                    Text(
-                        "Current session: $sessionId",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
                 }
             },
             confirmButton = {
-                Button(
-                    onClick = {
-                        showNewSessionDialog = false
-                        // Create new session by clearing current state
-                        scope.launch {
-                            // Save current session history before clearing (optional - user might want to keep it)
-                            // For now, we'll clear it to start fresh
-                            
-                            // DO NOT clear history when creating new session - history should persist
-                            // Only terminate should clear history
-                            // Just clear current UI state for new session
-                            inputText = ""
-                            currentResponseText = ""
-                            
-                            // Note: messages and messageHistory will be loaded from persistence for the session
-                            // If user wants a truly fresh start, they should terminate the session first
-                            
-                            android.util.Log.d("AgentScreen", "New session opened - history preserved for session $sessionId")
+                if (showSessionList) {
+                    TextButton(onClick = { showNewSessionDialog = false }) {
+                        Text("Cancel")
+                    }
+                } else {
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        if (allSessionIds.isNotEmpty()) {
+                            OutlinedButton(
+                                onClick = { showSessionList = true }
+                            ) {
+                                Text("Switch Session")
+                            }
+                        }
+                        Button(
+                            onClick = {
+                                showNewSessionDialog = false
+                                // Create new session - generate new session ID
+                                scope.launch {
+                                    val newSessionId = "session_${System.currentTimeMillis()}"
+                                    android.util.Log.d("AgentScreen", "Creating new session: $newSessionId")
+                                    // Switch to new session (will create it)
+                                    try {
+                                        changeSession(mainActivity, newSessionId)
+                                    } catch (e: Exception) {
+                                        android.util.Log.e("AgentScreen", "Error creating new session", e)
+                                    }
+                                }
+                            }
+                        ) {
+                            Text("Create New")
                         }
                     }
-                ) {
-                    Text("Create New")
                 }
             },
             dismissButton = {
-                TextButton(onClick = { showNewSessionDialog = false }) {
-                    Text("Cancel")
+                if (!showSessionList) {
+                    TextButton(onClick = { showNewSessionDialog = false }) {
+                        Text("Cancel")
+                    }
                 }
             }
         )
@@ -2811,22 +2972,25 @@ fun AgentScreen(
                         currentAgentJob?.cancel()
                         currentAgentJob = null
                         
-                        // Terminate session: clear history and reset
+                        // Terminate session: clear history, metadata, and reset
                         scope.launch {
-                            // Clear history from persistence
+                            // Clear history and metadata from persistence
                             HistoryPersistenceService.deleteHistory(sessionId)
-                            android.util.Log.d("AgentScreen", "Terminated session $sessionId - history cleared")
+                            HistoryPersistenceService.deleteSessionMetadata(sessionId)
+                            android.util.Log.d("AgentScreen", "Terminated session $sessionId - history and metadata cleared")
                             
                             // Clear messages
-                            messages = emptyList()
-                            messageHistory = emptyList()
-                            
-                            // Clear client history
-                            if (aiClient is AgentClient) {
-                                aiClient.resetChat()
+                            withContext(Dispatchers.Main) {
+                                messages = emptyList()
+                                messageHistory = emptyList()
+                                
+                                // Clear client history
+                                if (aiClient is AgentClient) {
+                                    aiClient.resetChat()
+                                }
+                                
+                                showTerminateDialog = false
                             }
-                            
-                            showTerminateDialog = false
                         }
                     },
                     colors = ButtonDefaults.buttonColors(
