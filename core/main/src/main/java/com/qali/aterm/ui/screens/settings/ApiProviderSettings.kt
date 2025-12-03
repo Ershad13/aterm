@@ -58,21 +58,41 @@ fun ApiProviderSettings() {
         
         // Model Selection
         PreferenceGroup(heading = "Model Configuration") {
-                var currentModel by remember { mutableStateOf(ApiProviderManager.getCurrentModel()) }
-                var currentBaseUrl by remember { mutableStateOf(ApiProviderManager.getCurrentBaseUrl()) }
-                var currentTemperature by remember { mutableStateOf(ApiProviderManager.getCurrentTemperature()) }
-                var currentMaxTokens by remember { mutableStateOf(ApiProviderManager.getCurrentMaxTokens()) }
-                var currentTopP by remember { mutableStateOf(ApiProviderManager.getCurrentTopP()) }
+                // Initialize with safe defaults to prevent crashes on first load
+                var currentModel by remember { 
+                    mutableStateOf(ApiProviderManager.getCurrentModel().takeIf { it.isNotBlank() } ?: "gemini-2.5-flash-lite")
+                }
+                var currentBaseUrl by remember { 
+                    mutableStateOf(ApiProviderManager.getCurrentBaseUrl().takeIf { it.isNotBlank() } ?: "")
+                }
+                var currentTemperature by remember { 
+                    mutableStateOf(ApiProviderManager.getCurrentTemperature().coerceIn(0.1f, 1.2f))
+                }
+                var currentMaxTokens by remember { 
+                    mutableStateOf(ApiProviderManager.getCurrentMaxTokens().coerceIn(1, 8192))
+                }
+                var currentTopP by remember { 
+                    mutableStateOf(ApiProviderManager.getCurrentTopP().coerceIn(0.0f, 1.0f))
+                }
                 var showModelDialog by remember { mutableStateOf(false) }
                 var showConfigDialog by remember { mutableStateOf(false) }
                 
-                // Update values when provider changes
+                // Update values when provider changes - with safe fallbacks
                 LaunchedEffect(selectedProvider) {
-                    currentModel = ApiProviderManager.getCurrentModel()
-                    currentBaseUrl = ApiProviderManager.getCurrentBaseUrl()
-                    currentTemperature = ApiProviderManager.getCurrentTemperature()
-                    currentMaxTokens = ApiProviderManager.getCurrentMaxTokens()
-                    currentTopP = ApiProviderManager.getCurrentTopP()
+                    try {
+                        currentModel = ApiProviderManager.getCurrentModel().takeIf { it.isNotBlank() } ?: "gemini-2.5-flash-lite"
+                        currentBaseUrl = ApiProviderManager.getCurrentBaseUrl().takeIf { it.isNotBlank() } ?: ""
+                        currentTemperature = ApiProviderManager.getCurrentTemperature().coerceIn(0.1f, 1.2f)
+                        currentMaxTokens = ApiProviderManager.getCurrentMaxTokens().coerceIn(1, 8192)
+                        currentTopP = ApiProviderManager.getCurrentTopP().coerceIn(0.0f, 1.0f)
+                    } catch (e: Exception) {
+                        // Fallback to safe defaults if anything fails
+                        currentModel = "gemini-2.5-flash-lite"
+                        currentBaseUrl = ""
+                        currentTemperature = 0.7f
+                        currentMaxTokens = 2048
+                        currentTopP = 1.0f
+                    }
                 }
                 
                 SettingsCard(

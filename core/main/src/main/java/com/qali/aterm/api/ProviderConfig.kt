@@ -49,13 +49,16 @@ data class ProviderConfig(
          * Returns adjusted config if user hasn't overridden, otherwise returns original
          */
         fun adjustForPromptLength(
-            config: ProviderConfig,
+            config: ProviderConfig?,
             promptLength: Int,
             isCreative: Boolean = false
         ): ProviderConfig {
+            // If config is null, create default config
+            val safeConfig = config ?: ProviderConfig()
+            
             // If user manually overrode, don't auto-adjust
-            if (config.userOverridden) {
-                return config
+            if (safeConfig.userOverridden) {
+                return safeConfig
             }
             
             // Determine temperature based on prompt type and length
@@ -76,7 +79,7 @@ data class ProviderConfig(
                 else -> 4096
             }
             
-            return config.copy(
+            return safeConfig.copy(
                 temperature = temp,
                 maxTokens = tokens
             )

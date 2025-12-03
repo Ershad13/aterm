@@ -25,10 +25,15 @@ data class ApiProvider(
     val apiKeys: MutableList<ApiKey> = mutableListOf(),
     val model: String = "",
     val baseUrl: String = "", // Base URL for custom provider
-    val config: ProviderConfig = ProviderConfig(), // LLM parameters with safe defaults
+    val config: ProviderConfig? = null, // LLM parameters - null-safe with default fallback
     val isActive: Boolean = true
 ) {
     fun getActiveKeys(): List<ApiKey> = apiKeys.filter { it.isActive }
+    
+    // Get config with safe default
+    fun getSafeConfig(model: String = ""): ProviderConfig {
+        return config ?: ProviderConfig.getModelDefaults(model.ifBlank { "gemini-2.5-flash-lite" })
+    }
 }
 
 object ApiProviderManager {
@@ -67,15 +72,21 @@ object ApiProviderManager {
         Preference.setString("api_providers", json)
     }
     
-    // Get current provider with keys
+    // Get current provider with keys - always returns provider with non-null config
     fun getCurrentProvider(): ApiProvider {
         val providers = getProviders()
         val defaultModel = getDefaultModel(selectedProvider)
-        return providers[selectedProvider] ?: ApiProvider(
+        val provider = providers[selectedProvider] ?: ApiProvider(
             selectedProvider, 
             model = defaultModel,
             config = ProviderConfig.getModelDefaults(defaultModel)
         )
+        // Ensure config is never null
+        return if (provider.config == null) {
+            provider.copy(config = ProviderConfig.getModelDefaults(provider.model.ifBlank { defaultModel }))
+        } else {
+            provider
+        }
     }
     
     // Get model for current provider - always returns non-null string
@@ -89,81 +100,90 @@ object ApiProviderManager {
         }
     }
     
-    // Get current config with safe defaults
+    // Get current config with safe defaults - always returns non-null ProviderConfig
     fun getCurrentConfig(): ProviderConfig {
         val provider = getCurrentProvider()
         val model = getCurrentModel()
-        return provider.config.takeIf { it != ProviderConfig() } 
-            ?: ProviderConfig.getModelDefaults(model)
+        // Use safe config getter with fallback
+        return provider.getSafeConfig(model)
     }
     
-    // Set config for current provider
-    fun setCurrentConfig(config: ProviderConfig) {
+    // Set config for current provider - never accepts null
+    fun setCurrentConfig(config: ProviderConfig?) {
+        val safeConfig = config ?: ProviderConfig.getModelDefaults(getCurrentModel())
         val providers = getProviders().toMutableMap()
         val provider = providers.getOrPut(selectedProvider) { 
             ApiProvider(selectedProvider, model = getDefaultModel(selectedProvider))
         }
-        providers[selectedProvider] = provider.copy(config = config)
+        providers[selectedProvider] = provider.copy(config = safeConfig)
         saveProviders(providers)
     }
     
-    // Get temperature with safe default
+    // Get temperature with safe default - always returns valid float
     fun getCurrentTemperature(): Float {
-        return getCurrentConfig().temperature
+        val config = getCurrentConfig()
+        return config.temperature
     }
     
-    // Set temperature
-    fun setCurrentTemperature(temperature: Float) {
+    // Set temperature - never accepts null
+    fun setCurrentTemperature(temperature: Float?) {
+        val safeTemp = ProviderConfig.clampTemperature(temperature ?: 0.7f)
         val config = getCurrentConfig().copy(
-            temperature = ProviderConfig.clampTemperature(temperature),
+            temperature = safeTemp,
             userOverridden = true
         )
         setCurrentConfig(config)
     }
     
-    // Get maxTokens with safe default
+    // Get maxTokens with safe default - always returns valid int
     fun getCurrentMaxTokens(): Int {
         val model = getCurrentModel()
         val config = getCurrentConfig()
         return ProviderConfig.clampMaxTokens(model, config.maxTokens)
     }
     
-    // Set maxTokens
-    fun setCurrentMaxTokens(maxTokens: Int) {
+    // Set maxTokens - never accepts null
+    fun setCurrentMaxTokens(maxTokens: Int?) {
         val model = getCurrentModel()
+        val safeTokens = maxTokens ?: 2048
         val config = getCurrentConfig().copy(
-            maxTokens = ProviderConfig.clampMaxTokens(model, maxTokens),
+            maxTokens = ProviderConfig.clampMaxTokens(model, safeTokens),
             userOverridden = true
         )
         setCurrentConfig(config)
     }
     
-    // Get topP with safe default
+    // Get topP with safe default - always returns valid float
     fun getCurrentTopP(): Float {
-        return getCurrentConfig().topP
+        val config = getCurrentConfig()
+        return config.topP
     }
     
-    // Set topP
-    fun setCurrentTopP(topP: Float) {
+    // Set topP - never accepts null
+    fun setCurrentTopP(topP: Float?) {
+        val safeTopP = (topP ?: 1.0f).coerceIn(0.0f, 1.0f)
         val config = getCurrentConfig().copy(
-            topP = topP.coerceIn(0.0f, 1.0f),
+            topP = safeTopP,
             userOverridden = true
         )
         setCurrentConfig(config)
     }
     
-    // Set model for current provider
+    // Set model for current provider - never accepts null
     // Automatically updates config with model-specific defaults unless user overrode
-    fun setCurrentModel(model: String) {
+    fun setCurrentModel(model: String?) {
         val safeModel = model ?: ""
         val providers = getProviders().toMutableMap()
         val provider = providers.getOrPut(selectedProvider) { ApiProvider(selectedProvider) }
         
+        // Get current config safely (handle null case)
+        val currentConfig = provider.getSafeConfig(safeModel)
+        
         // If user hasn't overridden config, apply model defaults
-        val newConfig = if (!provider.config.userOverridden) {
+        val newConfig = if (!currentConfig.userOverridden) {
             ProviderConfig.getModelDefaults(safeModel)
         } else {
-            provider.config // Keep user's settings
+            currentConfig // Keep user's settings
         }
         
         providers[selectedProvider] = provider.copy(
