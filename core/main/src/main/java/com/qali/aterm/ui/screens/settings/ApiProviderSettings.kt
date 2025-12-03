@@ -14,6 +14,7 @@ import com.qali.aterm.api.ApiKey
 import com.qali.aterm.api.ApiProvider
 import com.qali.aterm.api.ApiProviderManager
 import com.qali.aterm.api.ApiProviderType
+import com.qali.aterm.api.ProviderConfig
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -59,11 +60,24 @@ fun ApiProviderSettings() {
         PreferenceGroup(heading = "Model Configuration") {
                 var currentModel by remember { mutableStateOf(ApiProviderManager.getCurrentModel()) }
                 var currentBaseUrl by remember { mutableStateOf(ApiProviderManager.getCurrentBaseUrl()) }
+                var currentTemperature by remember { mutableStateOf(ApiProviderManager.getCurrentTemperature()) }
+                var currentMaxTokens by remember { mutableStateOf(ApiProviderManager.getCurrentMaxTokens()) }
+                var currentTopP by remember { mutableStateOf(ApiProviderManager.getCurrentTopP()) }
                 var showModelDialog by remember { mutableStateOf(false) }
+                var showConfigDialog by remember { mutableStateOf(false) }
+                
+                // Update values when provider changes
+                LaunchedEffect(selectedProvider) {
+                    currentModel = ApiProviderManager.getCurrentModel()
+                    currentBaseUrl = ApiProviderManager.getCurrentBaseUrl()
+                    currentTemperature = ApiProviderManager.getCurrentTemperature()
+                    currentMaxTokens = ApiProviderManager.getCurrentMaxTokens()
+                    currentTopP = ApiProviderManager.getCurrentTopP()
+                }
                 
                 SettingsCard(
                     title = { Text("Model") },
-                    description = { Text(currentModel.ifEmpty { "Not set" }) },
+                    description = { Text((currentModel.takeIf { it.isNotBlank() } ?: "Not set")) },
                     endWidget = {
                         Icon(Icons.Default.Edit, contentDescription = "Edit Model")
                     },
@@ -74,13 +88,25 @@ fun ApiProviderSettings() {
                 if (selectedProvider == ApiProviderType.CUSTOM) {
                     SettingsCard(
                         title = { Text("Base URL") },
-                        description = { Text(currentBaseUrl.ifEmpty { "Not set" }) },
+                        description = { Text((currentBaseUrl.takeIf { it.isNotBlank() } ?: "Not set")) },
                         endWidget = {
                             Icon(Icons.Default.Edit, contentDescription = "Edit Base URL")
                         },
                         onClick = { showModelDialog = true }
                     )
                 }
+                
+                // LLM Parameters
+                SettingsCard(
+                    title = { Text("LLM Parameters") },
+                    description = { 
+                        Text("Temp: ${String.format("%.1f", currentTemperature)}, MaxTokens: $currentMaxTokens, TopP: ${String.format("%.2f", currentTopP)}")
+                    },
+                    endWidget = {
+                        Icon(Icons.Default.Edit, contentDescription = "Edit Parameters")
+                    },
+                    onClick = { showConfigDialog = true }
+                )
                 
                 if (showModelDialog) {
                     ModelSelectionDialog(
@@ -91,11 +117,33 @@ fun ApiProviderSettings() {
                         onSave = { model ->
                             ApiProviderManager.setCurrentModel(model)
                             currentModel = model
+                            // Update config with model defaults
+                            currentTemperature = ApiProviderManager.getCurrentTemperature()
+                            currentMaxTokens = ApiProviderManager.getCurrentMaxTokens()
+                            currentTopP = ApiProviderManager.getCurrentTopP()
                             showModelDialog = false
                         },
                         onBaseUrlSave = { baseUrl ->
                             ApiProviderManager.setCurrentBaseUrl(baseUrl)
                             currentBaseUrl = baseUrl
+                        }
+                    )
+                }
+                
+                if (showConfigDialog) {
+                    ProviderConfigDialog(
+                        temperature = currentTemperature,
+                        maxTokens = currentMaxTokens,
+                        topP = currentTopP,
+                        onDismiss = { showConfigDialog = false },
+                        onSave = { temp, tokens, topP ->
+                            ApiProviderManager.setCurrentTemperature(temp)
+                            ApiProviderManager.setCurrentMaxTokens(tokens)
+                            ApiProviderManager.setCurrentTopP(topP)
+                            currentTemperature = temp
+                            currentMaxTokens = tokens
+                            currentTopP = topP
+                            showConfigDialog = false
                         }
                     )
                 }
@@ -316,6 +364,84 @@ fun EditApiKeyDialog(
                     onSave(apiKey.copy(key = keyText, label = labelText, isActive = isActive))
                 },
                 enabled = keyText.isNotBlank()
+            ) {
+                Text("Save")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancel")
+            }
+        }
+    )
+}
+
+@Composable
+fun ProviderConfigDialog(
+    temperature: Float,
+    maxTokens: Int,
+    topP: Float,
+    onDismiss: () -> Unit,
+    onSave: (Float, Int, Float) -> Unit
+) {
+    var tempValue by remember { mutableStateOf(temperature.toString()) }
+    var tokensValue by remember { mutableStateOf(maxTokens.toString()) }
+    var topPValue by remember { mutableStateOf(topP.toString()) }
+    
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("LLM Parameters") },
+        text = {
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                OutlinedTextField(
+                    value = tempValue,
+                    onValueChange = { 
+                        val filtered = it.filter { char -> char.isDigit() || char == '.' }
+                        tempValue = filtered
+                    },
+                    label = { Text("Temperature (0.1 - 1.2)") },
+                    placeholder = { Text("0.7") },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    supportingText = { Text("Controls randomness. Lower = more focused, Higher = more creative") }
+                )
+                OutlinedTextField(
+                    value = tokensValue,
+                    onValueChange = { 
+                        val filtered = it.filter { char -> char.isDigit() }
+                        tokensValue = filtered
+                    },
+                    label = { Text("Max Tokens") },
+                    placeholder = { Text("2048") },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    supportingText = { Text("Maximum tokens in response") }
+                )
+                OutlinedTextField(
+                    value = topPValue,
+                    onValueChange = { 
+                        val filtered = it.filter { char -> char.isDigit() || char == '.' }
+                        topPValue = filtered
+                    },
+                    label = { Text("Top P (0.0 - 1.0)") },
+                    placeholder = { Text("1.0") },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    supportingText = { Text("Nucleus sampling threshold") }
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = {
+                    val temp = tempValue.toFloatOrNull()?.coerceIn(0.1f, 1.2f) ?: 0.7f
+                    val tokens = tokensValue.toIntOrNull()?.coerceIn(1, 8192) ?: 2048
+                    val topP = topPValue.toFloatOrNull()?.coerceIn(0.0f, 1.0f) ?: 1.0f
+                    onSave(temp, tokens, topP)
+                }
             ) {
                 Text("Save")
             }

@@ -2,6 +2,7 @@ package com.qali.aterm.agent.ppe
 
 import com.qali.aterm.api.ApiProviderManager
 import com.qali.aterm.api.ApiProviderManager.KeysExhaustedException
+import com.qali.aterm.api.ProviderConfig
 import com.qali.aterm.agent.core.*
 import com.qali.aterm.agent.client.api.ApiRequestBuilder
 import com.qali.aterm.agent.client.api.ProviderAdapter
@@ -70,12 +71,36 @@ class PpeApiClient(
             val callId = "api-call-${System.currentTimeMillis()}"
             
             try {
+                // Calculate prompt length for dynamic parameter adjustment
+                val promptLength = messages.sumOf { content ->
+                    content.parts.sumOf { part ->
+                        when (part) {
+                            is Part.TextPart -> (part.text ?: "").length
+                            else -> 0
+                        }
+                    }
+                }
+                
+                // Get current config and adjust based on prompt length
+                val currentConfig = ApiProviderManager.getCurrentConfig()
+                val adjustedConfig = ProviderConfig.adjustForPromptLength(currentConfig, promptLength)
+                
+                // Use provided parameters or fall back to adjusted config
+                val finalTemperature = (temperature?.toFloat() ?: adjustedConfig.temperature)
+                    .let { ProviderConfig.clampTemperature(it) }
+                val finalMaxTokens = adjustedConfig.maxTokens
+                val finalTopP = (topP?.toFloat() ?: adjustedConfig.topP)
+                    .coerceIn(0.0f, 1.0f)
+                
                 DebugLogger.d("PpeApiClient", "Starting API call", mapOf(
                     "call_id" to callId,
                     "model" to (model ?: "default"),
                     "messages_count" to messages.size,
                     "has_tools" to (tools != null && tools.isNotEmpty()),
-                    "temperature" to (temperature ?: "default"),
+                    "prompt_length" to promptLength,
+                    "temperature" to finalTemperature,
+                    "max_tokens" to finalMaxTokens,
+                    "top_p" to finalTopP,
                     "streaming" to false
                 ))
                 
@@ -97,20 +122,19 @@ class PpeApiClient(
                         includeTools = !disableTools // Don't include tools if disableTools is true
                     )
                     
-                    // Add generation config parameters (temperature, topP, topK) if provided
-                    if (temperature != null || topP != null || topK != null) {
-                        val generationConfig = JSONObject()
-                        temperature?.let { generationConfig.put("temperature", it) }
-                        topP?.let { generationConfig.put("topP", it) }
-                        topK?.let { generationConfig.put("topK", it) }
-                        requestBody.put("generationConfig", generationConfig)
-                    }
+                    // Always add generation config parameters (required for Gemini Lite models)
+                    val generationConfig = JSONObject()
+                    generationConfig.put("temperature", finalTemperature.toDouble())
+                    generationConfig.put("max_output_tokens", finalMaxTokens)
+                    generationConfig.put("topP", finalTopP.toDouble())
+                    topK?.let { generationConfig.put("topK", it) }
+                    requestBody.put("generationConfig", generationConfig)
                     
                     // Convert to Ollama format
                     val convertedBody = ProviderAdapter.convertRequestToOllama(requestBody, actualModel)
                     
                     // Make direct Ollama API call (non-streaming)
-                    val response = makeDirectOllamaCall(ollamaUrl, actualModel, convertedBody, temperature, topP, topK)
+                    val response = makeDirectOllamaCall(ollamaUrl, actualModel, convertedBody, finalTemperature.toDouble(), finalTopP.toDouble(), topK)
                     
                     val duration = System.currentTimeMillis() - startTime
                     
@@ -156,19 +180,18 @@ class PpeApiClient(
                     includeTools = !disableTools // Don't include tools if disableTools is true
                 )
                 
-                // Add generation config parameters (temperature, topP, topK) if provided
-                if (temperature != null || topP != null || topK != null) {
-                    val generationConfig = JSONObject()
-                    temperature?.let { generationConfig.put("temperature", it) }
-                    topP?.let { generationConfig.put("topP", it) }
-                    topK?.let { generationConfig.put("topK", it) }
-                    requestBody.put("generationConfig", generationConfig)
-                }
+                // Always add generation config parameters (required for Gemini Lite models)
+                val generationConfig = JSONObject()
+                generationConfig.put("temperature", finalTemperature.toDouble())
+                generationConfig.put("max_output_tokens", finalMaxTokens)
+                generationConfig.put("topP", finalTopP.toDouble())
+                topK?.let { generationConfig.put("topK", it) }
+                requestBody.put("generationConfig", generationConfig)
                 
                 // Make API call with retry (non-streaming) - uses existing API cycling
                 val result = ApiProviderManager.makeApiCallWithRetry { apiKey ->
                     try {
-                        val response = makeNonStreamingApiCall(apiKey, actualModel, requestBody, temperature, topP, topK)
+                        val response = makeNonStreamingApiCall(apiKey, actualModel, requestBody, finalTemperature.toDouble(), finalTopP.toDouble(), topK, finalMaxTokens)
                         Result.success(response)
                     } catch (e: KeysExhaustedException) {
                         Result.failure(e)
@@ -471,7 +494,8 @@ class PpeApiClient(
         requestBody: JSONObject,
         temperature: Double? = null,
         topP: Double? = null,
-        topK: Int? = null
+        topK: Int? = null,
+        maxTokens: Int? = null
     ): PpeApiResponse {
         val providerType = ApiProviderManager.selectedProvider
         
@@ -479,15 +503,17 @@ class PpeApiClient(
         val (url, convertedRequestBody, headers) = when (providerType) {
             com.qali.aterm.api.ApiProviderType.GOOGLE -> {
                 val url = "https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent?key=$apiKey"
+                // Generation config is already added to requestBody above
                 Triple(url, requestBody, emptyMap<String, String>())
             }
             com.qali.aterm.api.ApiProviderType.OPENAI -> {
                 val url = "https://api.openai.com/v1/chat/completions"
                 val headers = mapOf("Authorization" to "Bearer $apiKey")
                 val convertedBody = ProviderAdapter.convertRequestToOpenAI(requestBody, model)
-                // Add parameters to OpenAI request
-                temperature?.let { convertedBody.put("temperature", it) }
-                topP?.let { convertedBody.put("top_p", it) }
+                // Always add parameters to OpenAI request (never skip)
+                convertedBody.put("temperature", temperature ?: 0.7)
+                convertedBody.put("top_p", topP ?: 1.0)
+                convertedBody.put("max_tokens", maxTokens ?: 2048)
                 Triple(url, convertedBody, headers)
             }
             com.qali.aterm.api.ApiProviderType.ANTHROPIC -> {
@@ -497,9 +523,10 @@ class PpeApiClient(
                     "anthropic-version" to "2023-06-01"
                 )
                 val convertedBody = ProviderAdapter.convertRequestToAnthropic(requestBody, model)
-                // Add parameters to Anthropic request
-                temperature?.let { convertedBody.put("temperature", it) }
-                topP?.let { convertedBody.put("top_p", it) }
+                // Always add parameters to Anthropic request (never skip)
+                convertedBody.put("temperature", temperature ?: 0.7)
+                convertedBody.put("top_p", topP ?: 1.0)
+                convertedBody.put("max_tokens", maxTokens ?: 2048)
                 Triple(url, convertedBody, headers)
             }
             com.qali.aterm.api.ApiProviderType.CUSTOM -> {

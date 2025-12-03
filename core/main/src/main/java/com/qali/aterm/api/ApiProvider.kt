@@ -25,6 +25,7 @@ data class ApiProvider(
     val apiKeys: MutableList<ApiKey> = mutableListOf(),
     val model: String = "",
     val baseUrl: String = "", // Base URL for custom provider
+    val config: ProviderConfig = ProviderConfig(), // LLM parameters with safe defaults
     val isActive: Boolean = true
 ) {
     fun getActiveKeys(): List<ApiKey> = apiKeys.filter { it.isActive }
@@ -69,24 +70,100 @@ object ApiProviderManager {
     // Get current provider with keys
     fun getCurrentProvider(): ApiProvider {
         val providers = getProviders()
-        return providers[selectedProvider] ?: ApiProvider(selectedProvider, model = getDefaultModel(selectedProvider))
+        val defaultModel = getDefaultModel(selectedProvider)
+        return providers[selectedProvider] ?: ApiProvider(
+            selectedProvider, 
+            model = defaultModel,
+            config = ProviderConfig.getModelDefaults(defaultModel)
+        )
     }
     
     // Get model for current provider
     fun getCurrentModel(): String {
         val provider = getCurrentProvider()
-        return if (provider.model.isBlank()) {
-            getDefaultModel(selectedProvider)
-        } else {
-            provider.model
+        return (provider.model.takeIf { it.isNotBlank() } ?: getDefaultModel(selectedProvider))
+    }
+    
+    // Get current config with safe defaults
+    fun getCurrentConfig(): ProviderConfig {
+        val provider = getCurrentProvider()
+        val model = getCurrentModel()
+        return provider.config.takeIf { it != ProviderConfig() } 
+            ?: ProviderConfig.getModelDefaults(model)
+    }
+    
+    // Set config for current provider
+    fun setCurrentConfig(config: ProviderConfig) {
+        val providers = getProviders().toMutableMap()
+        val provider = providers.getOrPut(selectedProvider) { 
+            ApiProvider(selectedProvider, model = getDefaultModel(selectedProvider))
         }
+        providers[selectedProvider] = provider.copy(config = config)
+        saveProviders(providers)
+    }
+    
+    // Get temperature with safe default
+    fun getCurrentTemperature(): Float {
+        return getCurrentConfig().temperature
+    }
+    
+    // Set temperature
+    fun setCurrentTemperature(temperature: Float) {
+        val config = getCurrentConfig().copy(
+            temperature = ProviderConfig.clampTemperature(temperature),
+            userOverridden = true
+        )
+        setCurrentConfig(config)
+    }
+    
+    // Get maxTokens with safe default
+    fun getCurrentMaxTokens(): Int {
+        val model = getCurrentModel()
+        val config = getCurrentConfig()
+        return ProviderConfig.clampMaxTokens(model, config.maxTokens)
+    }
+    
+    // Set maxTokens
+    fun setCurrentMaxTokens(maxTokens: Int) {
+        val model = getCurrentModel()
+        val config = getCurrentConfig().copy(
+            maxTokens = ProviderConfig.clampMaxTokens(model, maxTokens),
+            userOverridden = true
+        )
+        setCurrentConfig(config)
+    }
+    
+    // Get topP with safe default
+    fun getCurrentTopP(): Float {
+        return getCurrentConfig().topP
+    }
+    
+    // Set topP
+    fun setCurrentTopP(topP: Float) {
+        val config = getCurrentConfig().copy(
+            topP = topP.coerceIn(0.0f, 1.0f),
+            userOverridden = true
+        )
+        setCurrentConfig(config)
     }
     
     // Set model for current provider
+    // Automatically updates config with model-specific defaults unless user overrode
     fun setCurrentModel(model: String) {
         val providers = getProviders().toMutableMap()
         val provider = providers.getOrPut(selectedProvider) { ApiProvider(selectedProvider) }
-        providers[selectedProvider] = provider.copy(model = model)
+        
+        // If user hasn't overridden config, apply model defaults
+        val newConfig = if (!provider.config.userOverridden) {
+            ProviderConfig.getModelDefaults(model)
+        } else {
+            provider.config // Keep user's settings
+        }
+        
+        providers[selectedProvider] = provider.copy(
+            model = model,
+            config = newConfig
+        )
         saveProviders(providers)
     }
     
