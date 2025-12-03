@@ -380,10 +380,30 @@ fun parseFileDiffFromToolResult(
             // If key doesn't exist, assume it's new (fallback)
             val isNewFile = hasOldContentKey && oldContent.isEmpty()
             
-            // Try to get new content from toolArgs first
+            // Try to get new content from toolArgs first (most reliable)
             var newContent = toolArgs?.get("content") as? String
             
-            // If not in args, try to read the file that was just written
+            // If not in args, try to extract from tool result content
+            if (newContent == null || newContent.isEmpty()) {
+                // Try to extract from llmContent or returnDisplay
+                val resultContent = toolResult.llmContent + " " + toolResult.returnDisplay
+                // Look for file content patterns in the result
+                val contentPatterns = listOf(
+                    Regex("""```(?:json|javascript|typescript|html|css|python|java|kotlin|go|rust)?\s*\n(.*?)\n```""", RegexOption.DOT_MATCHES_ALL),
+                    Regex("""\{[\s\S]*\}"""), // JSON object
+                    Regex("""<[\s\S]*>""") // HTML/XML
+                )
+                for (pattern in contentPatterns) {
+                    val match = pattern.find(resultContent)
+                    if (match != null && match.value.length > 10) {
+                        newContent = match.value.trim()
+                        android.util.Log.d("AgentScreen", "Extracted content from tool result for $filePath (${newContent.length} chars)")
+                        break
+                    }
+                }
+            }
+            
+            // If still not found, try to read the file that was just written
             if (newContent == null || newContent.isEmpty()) {
                 try {
                     val file = File(workspaceRoot, filePath)
@@ -391,8 +411,9 @@ fun parseFileDiffFromToolResult(
                         newContent = file.readText()
                         android.util.Log.d("AgentScreen", "Read new file content from disk for diff: ${filePath} (${newContent.length} chars)")
                     } else {
-                        newContent = ""
                         android.util.Log.w("AgentScreen", "File does not exist after write: ${filePath}")
+                        // Even if file doesn't exist, create diff with empty content to show the box
+                        newContent = ""
                     }
                 } catch (e: Exception) {
                     android.util.Log.w("AgentScreen", "Could not read new file for diff: ${filePath}", e)
@@ -400,12 +421,14 @@ fun parseFileDiffFromToolResult(
                 }
             }
             
-            // If still no content, use empty string
+            // If still no content, use empty string (but still create the diff to show the box)
             if (newContent == null) {
                 newContent = ""
             }
             
-            android.util.Log.d("AgentScreen", "Creating FileDiff for $filePath - isNewFile: $isNewFile, oldContent length: ${oldContent.length}, newContent length: ${newContent.length}")
+            // Always create a FileDiff for write_file operations, even if content is empty
+            // This ensures the diff box is always shown
+            android.util.Log.d("AgentScreen", "Creating FileDiff for $filePath - isNewFile: $isNewFile, oldContent length: ${oldContent.length}, newContent length: ${newContent.length}, toolArgs: ${toolArgs != null}")
             
             FileDiff(
                 filePath = filePath,

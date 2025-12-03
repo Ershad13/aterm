@@ -2763,8 +2763,11 @@ CRITICAL REQUIREMENTS FOR BLUEPRINT COHERENCE:
 1. **File Relationships**: Each file MUST explicitly list ALL files it depends on (imports from, references, etc.)
 2. **Import/Export Mapping**: For code files, specify what each file will export and what it needs to import
 3. **Dependency Order**: Files must be ordered so dependencies are created before dependents
-4. **Cross-File Coherence**: Ensure all imports/exports match between related files
-5. **Platform Dependencies**: Only include actual package manager dependencies (npm packages, pip packages, etc.)
+4. **Config Files Last**: package.json, requirements.txt, go.mod, Cargo.toml, etc. MUST be listed LAST in the files array
+   - This allows them to include ALL dependencies discovered from code files
+   - Code files should list package.json as a dependency, but package.json will be created after all code files
+5. **Cross-File Coherence**: Ensure all imports/exports match between related files
+6. **Platform Dependencies**: Only include actual package manager dependencies (npm packages, pip packages, etc.)
 
 Return a SINGLE JSON object in this EXACT format (no markdown, no code blocks, just pure JSON):
 
@@ -2823,11 +2826,15 @@ FIELD DESCRIPTIONS:
 IMPORTANT RULES:
 - Return ONLY valid JSON, no markdown, no code blocks, no explanations
 - Include ALL files needed for the project
+- **CRITICAL FILE ORDERING**: 
+  * Config files (package.json, requirements.txt, go.mod, Cargo.toml, etc.) MUST be listed LAST in the files array
+  * Code files should come first, in dependency order
+  * This allows config files to include ALL dependencies discovered from code files
 - For "packageDependencies": ONLY include actual dependencies that will be installed via package manager (npm install, pip install, etc.)
 - For "imports": Include BOTH package dependencies AND imports from related files
 - For "exports": List what this file will export so other files can import it
 - Ensure "relatedFiles" shows the import/export relationships between files
-- Files MUST be ordered so dependencies come before dependents
+- Files MUST be ordered so code file dependencies come before dependents, but config files come last
 - Ensure all imports/exports match between related files (if A exports X, B can import X from A)
 
 JSON Blueprint:
@@ -4552,18 +4559,36 @@ Now fix the specific issue using the 'edit' tool:
     
     /**
      * Topological sort for dependency resolution
+     * Config files (package.json, etc.) are placed LAST so they can include all dependencies
      */
     private fun topologicalSort(files: List<BlueprintFile>): List<BlueprintFile> {
-        val graph = files.associate { it.path to it.dependencies.toSet() }
-        val inDegree = mutableMapOf<String, Int>()
-        val fileMap = files.associateBy { it.path }
+        // Separate config files to be created LAST (so they can include all dependencies from code files)
+        val configFiles = files.filter { file ->
+            file.path.endsWith("package.json") || 
+            file.path.endsWith("requirements.txt") || 
+            file.path.endsWith("Pipfile") ||
+            file.path.endsWith("go.mod") ||
+            file.path.endsWith("Cargo.toml") ||
+            file.path.endsWith("pom.xml") ||
+            file.path.endsWith("build.gradle") ||
+            file.path.endsWith("build.gradle.kts") ||
+            file.type == "config"
+        }
+        val codeFiles = files.filter { !configFiles.contains(it) }
         
-        // Initialize in-degree
-        files.forEach { file ->
-            inDegree[file.path] = file.dependencies.size
+        // Topological sort only code files (excluding config files from dependency graph)
+        val inDegree = mutableMapOf<String, Int>()
+        val fileMap = codeFiles.associateBy { it.path }
+        
+        // Initialize in-degree (only count code file dependencies, not config files)
+        codeFiles.forEach { file ->
+            val codeDependencies = file.dependencies.filter { dep ->
+                !configFiles.any { it.path == dep }
+            }
+            inDegree[file.path] = codeDependencies.size
         }
         
-        // Find files with no dependencies
+        // Find code files with no code dependencies
         val queue = mutableListOf<String>()
         inDegree.forEach { (path, degree) ->
             if (degree == 0) {
@@ -4573,13 +4598,17 @@ Now fix the specific issue using the 'edit' tool:
         
         val result = mutableListOf<BlueprintFile>()
         
+        // Topological sort for code files
         while (queue.isNotEmpty()) {
             val current = queue.removeAt(0)
             fileMap[current]?.let { result.add(it) }
             
             // Reduce in-degree of dependents
-            files.forEach { file ->
-                if (file.dependencies.contains(current)) {
+            codeFiles.forEach { file ->
+                val codeDeps = file.dependencies.filter { dep ->
+                    !configFiles.any { it.path == dep }
+                }
+                if (codeDeps.contains(current)) {
                     val newDegree = (inDegree[file.path] ?: 0) - 1
                     inDegree[file.path] = newDegree
                     if (newDegree == 0) {
@@ -4589,12 +4618,17 @@ Now fix the specific issue using the 'edit' tool:
             }
         }
         
-        // If we couldn't process all files, there's a cycle
-        if (result.size != files.size) {
-            Log.w("PpeExecutionEngine", "Topological sort incomplete - possible cycle. Returning original order.")
-            return files.sortedBy { it.dependencies.size }
+        // Add any remaining code files (circular dependencies)
+        codeFiles.forEach { file ->
+            if (!result.any { it.path == file.path }) {
+                result.add(file)
+            }
         }
         
+        // Add config files LAST so they can include all dependencies discovered from code files
+        result.addAll(configFiles)
+        
+        Log.d("PpeExecutionEngine", "Topological sort: ${result.size} files (${codeFiles.size} code, ${configFiles.size} config). Config files at end: ${configFiles.map { it.path }}")
         return result
     }
     
