@@ -2442,14 +2442,48 @@ fun AgentScreen(
                                                                     null
                                                                 }
                                                                 
-                                                                val fileDiff = parseFileDiffFromToolResult(
+                                                                var fileDiff = parseFileDiffFromToolResult(
                                                                     toolName = event.toolName,
                                                                     toolResult = event.result,
                                                                     toolArgs = toolArgs,
                                                                     workspaceRoot = workspaceRoot
                                                                 )
+                                                                
+                                                                // Fallback: If file diff extraction failed but we have a write_file, try to create it from file system
+                                                                if (fileDiff == null && event.toolName == "write_file") {
+                                                                    android.util.Log.w("AgentScreen", "File diff extraction failed, trying fallback from file system")
+                                                                    // Try to extract file path from result
+                                                                    val fallbackFilePath = extractFilePathFromToolResult(event.result)
+                                                                        ?: toolArgs?.get("file_path") as? String
+                                                                        ?: run {
+                                                                            // Try to extract from llmContent
+                                                                            val patterns = listOf(
+                                                                                Regex("""(?:file|File|path|Path|written|created)[:\s]+([^\s,\n]+)""", RegexOption.IGNORE_CASE),
+                                                                                Regex("""([^\s,\n]+\.(?:js|ts|jsx|tsx|py|java|kt|go|rs|cpp|h|json|yaml|yml|md|txt|xml|html|css))""")
+                                                                            )
+                                                                            patterns.firstNotNullOfOrNull { it.find(event.result.llmContent)?.groupValues?.get(1) }
+                                                                        }
+                                                                    
+                                                                    if (fallbackFilePath != null) {
+                                                                        try {
+                                                                            val file = File(workspaceRoot, fallbackFilePath)
+                                                                            val newContent = if (file.exists()) file.readText() else ""
+                                                                            val oldContent = "" // Assume new file if we can't determine
+                                                                            fileDiff = FileDiff(
+                                                                                filePath = fallbackFilePath,
+                                                                                oldContent = oldContent,
+                                                                                newContent = newContent,
+                                                                                isNewFile = !file.exists() || oldContent.isEmpty()
+                                                                            )
+                                                                            android.util.Log.d("AgentScreen", "Created FileDiff via fallback for $fallbackFilePath")
+                                                                        } catch (e: Exception) {
+                                                                            android.util.Log.w("AgentScreen", "Fallback file diff creation failed", e)
+                                                                        }
+                                                                    }
+                                                                }
+                                                                
                                                                 if (fileDiff != null) {
-                                                                    android.util.Log.d("AgentScreen", "Successfully created FileDiff for ${fileDiff.filePath} - isNewFile: ${fileDiff.isNewFile}, newContent length: ${fileDiff.newContent.length}")
+                                                                    android.util.Log.d("AgentScreen", "Successfully created FileDiff for ${fileDiff.filePath} - isNewFile: ${fileDiff.isNewFile}, oldContent length: ${fileDiff.oldContent.length}, newContent length: ${fileDiff.newContent.length}")
                                                                 } else if (event.toolName == "write_file" || event.toolName == "edit") {
                                                                     android.util.Log.w("AgentScreen", "Failed to extract file diff for ${event.toolName} - toolArgs: ${toolArgs != null}, toolArgs keys: ${toolArgs?.keys}, llmContent: ${event.result.llmContent.take(200)}, returnDisplay: ${event.result.returnDisplay}")
                                                                 }
