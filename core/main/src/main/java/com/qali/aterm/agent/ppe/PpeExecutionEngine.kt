@@ -2195,13 +2195,25 @@ class PpeExecutionEngine(
     }
     
     /**
-     * Data class for blueprint file structure
+     * Data class for blueprint file structure with enhanced coherence information
      */
     private data class BlueprintFile(
         val path: String,
         val type: String, // "code", "config", "test", etc.
         val dependencies: List<String> = emptyList(),
-        val description: String = ""
+        val description: String = "",
+        val exports: List<String> = emptyList(),
+        val imports: List<String> = emptyList(),
+        val packageDependencies: List<String> = emptyList(),
+        val relatedFiles: RelatedFiles? = null
+    )
+    
+    /**
+     * Data class for file relationships
+     */
+    private data class RelatedFiles(
+        val importsFrom: List<String> = emptyList(),
+        val exportsTo: List<String> = emptyList()
     )
     
     /**
@@ -2739,16 +2751,22 @@ Return ONLY the raw code content. No markdown, no explanations, no code blocks. 
         }
         
         val blueprintPrompt = """
-You are a senior software project architect.
-Your task is to understand the user's request, briefly restate their goals, and then design a JSON blueprint for the project structure.
+You are a senior software project architect specializing in file coherence and dependency management.
+Your task is to understand the user's request and design a comprehensive JSON blueprint that ensures perfect file coherence and relativeness.
 
 User Request (natural language from user):
 $userMessage
 
 $projectTypeContext
 
-First, think carefully about what the user is asking for.
-Then, return a SINGLE JSON object in this EXACT format (no markdown, no code blocks, just pure JSON):
+CRITICAL REQUIREMENTS FOR BLUEPRINT COHERENCE:
+1. **File Relationships**: Each file MUST explicitly list ALL files it depends on (imports from, references, etc.)
+2. **Import/Export Mapping**: For code files, specify what each file will export and what it needs to import
+3. **Dependency Order**: Files must be ordered so dependencies are created before dependents
+4. **Cross-File Coherence**: Ensure all imports/exports match between related files
+5. **Platform Dependencies**: Only include actual package manager dependencies (npm packages, pip packages, etc.)
+
+Return a SINGLE JSON object in this EXACT format (no markdown, no code blocks, just pure JSON):
 
 {
   "projectType": "nodejs",
@@ -2758,29 +2776,59 @@ Then, return a SINGLE JSON object in this EXACT format (no markdown, no code blo
       "path": "package.json",
       "type": "config",
       "dependencies": [],
-      "description": "Package configuration file"
+      "description": "Package configuration file",
+      "exports": [],
+      "imports": [],
+      "packageDependencies": []
     },
     {
       "path": "server.js",
       "type": "code",
       "dependencies": ["package.json"],
-      "description": "Main server file"
+      "description": "Main server file",
+      "exports": ["app", "startServer"],
+      "imports": ["express", "path", "fs"],
+      "packageDependencies": ["express"],
+      "relatedFiles": {
+        "importsFrom": [],
+        "exportsTo": ["routes.js"]
+      }
     },
     {
-      "path": "public/index.html",
+      "path": "routes.js",
       "type": "code",
-      "dependencies": ["package.json"],
-      "description": "Main HTML file"
+      "dependencies": ["package.json", "server.js"],
+      "description": "Route handlers",
+      "exports": ["router", "setupRoutes"],
+      "imports": ["express", "app"],
+      "packageDependencies": [],
+      "relatedFiles": {
+        "importsFrom": ["server.js"],
+        "exportsTo": ["server.js"]
+      }
     }
   ]
 }
 
-IMPORTANT:
+FIELD DESCRIPTIONS:
+- "path": File path relative to project root
+- "type": "config", "code", "test", "style", "template", etc.
+- "dependencies": Array of file paths this file depends on (must be created first)
+- "description": What this file does
+- "exports": Array of function/class/variable names this file will export (for code files)
+- "imports": Array of function/class/variable names this file needs to import (from related files OR package dependencies)
+- "packageDependencies": Array of actual package manager dependencies (npm packages, pip packages, etc.) - ONLY real dependencies
+- "relatedFiles": Object with "importsFrom" (files this imports from) and "exportsTo" (files that import from this)
+
+IMPORTANT RULES:
 - Return ONLY valid JSON, no markdown, no code blocks, no explanations
 - Include ALL files needed for the project
-- Set dependencies array to show which files each file depends on
-- Use appropriate file types: "config", "code", "test", "style", etc.
-- Ensure the JSON is valid and can be parsed directly
+- For "packageDependencies": ONLY include actual dependencies that will be installed via package manager (npm install, pip install, etc.)
+- For "imports": Include BOTH package dependencies AND imports from related files
+- For "exports": List what this file will export so other files can import it
+- Ensure "relatedFiles" shows the import/export relationships between files
+- Files MUST be ordered so dependencies come before dependents
+- Ensure all imports/exports match between related files (if A exports X, B can import X from A)
 
 JSON Blueprint:
 """.trimIndent()
@@ -2875,8 +2923,55 @@ JSON Blueprint:
                     }
                 }
                 
+                val exports = mutableListOf<String>()
+                val exportsArray = fileObj.optJSONArray("exports")
+                if (exportsArray != null) {
+                    for (j in 0 until exportsArray.length()) {
+                        exports.add(exportsArray.getString(j))
+                    }
+                }
+                
+                val imports = mutableListOf<String>()
+                val importsArray = fileObj.optJSONArray("imports")
+                if (importsArray != null) {
+                    for (j in 0 until importsArray.length()) {
+                        imports.add(importsArray.getString(j))
+                    }
+                }
+                
+                val packageDependencies = mutableListOf<String>()
+                val packageDepsArray = fileObj.optJSONArray("packageDependencies")
+                if (packageDepsArray != null) {
+                    for (j in 0 until packageDepsArray.length()) {
+                        packageDependencies.add(packageDepsArray.getString(j))
+                    }
+                }
+                
+                val relatedFilesObj = fileObj.optJSONObject("relatedFiles")
+                val relatedFiles = if (relatedFilesObj != null) {
+                    val importsFrom = mutableListOf<String>()
+                    val importsFromArray = relatedFilesObj.optJSONArray("importsFrom")
+                    if (importsFromArray != null) {
+                        for (j in 0 until importsFromArray.length()) {
+                            importsFrom.add(importsFromArray.getString(j))
+                        }
+                    }
+                    
+                    val exportsTo = mutableListOf<String>()
+                    val exportsToArray = relatedFilesObj.optJSONArray("exportsTo")
+                    if (exportsToArray != null) {
+                        for (j in 0 until exportsToArray.length()) {
+                            exportsTo.add(exportsToArray.getString(j))
+                        }
+                    }
+                    
+                    RelatedFiles(importsFrom, exportsTo)
+                } else {
+                    null
+                }
+                
                 if (path.isNotEmpty()) {
-                    files.add(BlueprintFile(path, type, dependencies, description))
+                    files.add(BlueprintFile(path, type, dependencies, description, exports, imports, packageDependencies, relatedFiles))
                 }
             }
             
@@ -2950,30 +3045,95 @@ JSON Blueprint:
             emptyList()
         }
         
+        // Build comprehensive file relationship context from blueprint
+        val blueprintExports = blueprint.files.associate { it.path to it.exports }
+        val blueprintImports = blueprint.files.associate { it.path to it.imports }
+        val blueprintPackageDeps = blueprint.files.flatMap { it.packageDependencies }.distinct()
+        
         val filePrompt = buildString {
-            appendLine("Generate the complete code for this file:")
+            appendLine("Generate the complete code for this file using the parsed blueprint data:")
             appendLine("")
             appendLine("File: ${file.path}")
             appendLine("Type: ${file.type}")
             appendLine("Description: ${file.description}")
             appendLine("")
             
+            // Show what this file should export (from blueprint)
+            if (file.exports.isNotEmpty()) {
+                appendLine("This file MUST export the following (from blueprint):")
+                file.exports.forEach { export ->
+                    appendLine("  - $export")
+                }
+                appendLine("")
+            }
+            
+            // Show what this file should import (from blueprint)
+            if (file.imports.isNotEmpty()) {
+                appendLine("This file MUST import the following (from blueprint):")
+                file.imports.forEach { importItem ->
+                    // Check if it's a package dependency or from a related file
+                    val isPackageDep = file.packageDependencies.contains(importItem) || blueprintPackageDeps.contains(importItem)
+                    if (isPackageDep) {
+                        appendLine("  - $importItem (package dependency - use require/import)")
+                    } else {
+                        // Find which file exports this
+                        val sourceFile = blueprint.files.find { it.exports.contains(importItem) }
+                        if (sourceFile != null) {
+                            appendLine("  - $importItem (from ${sourceFile.path})")
+                        } else {
+                            appendLine("  - $importItem")
+                        }
+                    }
+                }
+                appendLine("")
+            }
+            
+            // Show package dependencies (only real dependencies)
+            if (file.packageDependencies.isNotEmpty()) {
+                appendLine("Package Dependencies (install via package manager):")
+                file.packageDependencies.forEach { pkg ->
+                    appendLine("  - $pkg")
+                }
+                appendLine("")
+            }
+            
+            // Show related files and their exports
             if (relatedFiles.isNotEmpty()) {
-                appendLine("This file depends on:")
+                appendLine("Related Files (from blueprint dependencies):")
                 relatedFiles.forEach { relatedFile ->
+                    val relatedExports = relatedFile.exports
                     appendLine("  - ${relatedFile.path} (${relatedFile.type})")
+                    if (relatedExports.isNotEmpty()) {
+                        appendLine("    Available exports: ${relatedExports.joinToString(", ")}")
+                    }
                 }
                 appendLine("")
                 
                 if (existingFilesMetadata.isNotEmpty()) {
-                    appendLine("Available imports/exports from related files:")
+                    appendLine("Available imports/exports from related files (already created):")
                     existingFilesMetadata.forEach { metadata ->
                         appendLine(metadata)
                     }
                     appendLine("")
-                    appendLine("IMPORTANT: Use ONLY the imports/exports/functions/classes listed above from related files.")
-                    appendLine("")
                 }
+            }
+            
+            // Show file relationships from blueprint
+            if (file.relatedFiles != null) {
+                appendLine("File Relationships (from blueprint):")
+                if (file.relatedFiles.importsFrom.isNotEmpty()) {
+                    appendLine("  Imports from: ${file.relatedFiles.importsFrom.joinToString(", ")}")
+                    file.relatedFiles.importsFrom.forEach { importFromPath ->
+                        val sourceFile = blueprint.files.find { it.path == importFromPath }
+                        if (sourceFile != null && sourceFile.exports.isNotEmpty()) {
+                            appendLine("    - $importFromPath exports: ${sourceFile.exports.joinToString(", ")}")
+                        }
+                    }
+                }
+                if (file.relatedFiles.exportsTo.isNotEmpty()) {
+                    appendLine("  Exports to: ${file.relatedFiles.exportsTo.joinToString(", ")}")
+                }
+                appendLine("")
             }
             
             appendLine("Project Context:")
@@ -2983,17 +3143,30 @@ JSON Blueprint:
             
             appendLine("Original User Request: $userMessage")
             appendLine("")
-            appendLine("CRITICAL INSTRUCTIONS:")
+            appendLine("CRITICAL INSTRUCTIONS FOR CODE GENERATION:")
             appendLine("1. You MUST generate COMPLETE, working code for this file")
             appendLine("2. Return ONLY the raw code content - NO explanations, NO markdown, NO code blocks")
             appendLine("3. Do NOT wrap the code in ``` or any markdown")
             appendLine("4. Do NOT add comments like 'Here is the code:' or 'Here's the file:'")
             appendLine("5. Start directly with the actual code (e.g., '{' for JSON, '<!DOCTYPE' for HTML, 'const' for JS)")
             appendLine("6. The response will be written directly to the file, so it must be valid code")
-            appendLine("7. Use appropriate imports/exports based on the project type")
-            appendLine("8. If importing from related files, use ONLY the names listed above")
+            appendLine("")
+            appendLine("IMPORT/EXPORT COHERENCE RULES (CRITICAL):")
+            appendLine("1. Use ONLY the imports/exports specified in the blueprint above")
+            appendLine("2. For package dependencies: Use ONLY packages listed in 'Package Dependencies' section")
+            appendLine("3. For file imports: Import ONLY from files listed in 'Related Files' and use ONLY their exports")
+            appendLine("4. Do NOT import anything that is NOT in the blueprint")
+            appendLine("5. Do NOT use any imports unless they are:")
+            appendLine("   a) Package dependencies (installed via npm/pip/etc.) - listed in 'Package Dependencies'")
+            appendLine("   b) Exports from related files - listed in 'Available exports' above")
+            appendLine("6. Ensure all exports match what's specified in the blueprint")
+            appendLine("7. Ensure all imports match what's available from related files or package dependencies")
+            appendLine("8. Maintain coherence: If file A exports X, and file B imports X, use the exact same name")
+            appendLine("")
+            appendLine("CODE QUALITY:")
             appendLine("9. Ensure the code is production-ready and follows best practices")
             appendLine("10. Include all necessary functionality")
+            appendLine("11. Use consistent style and structure across all files")
             appendLine("")
             appendLine("IMPORTANT: You MUST NOT return any function calls or tool calls.")
             appendLine("Any output starting with '{' or '[' must be treated as raw file content, not a tool invocation.")
