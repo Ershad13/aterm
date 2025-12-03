@@ -2056,13 +2056,17 @@ fun AgentScreen(
                         MessageBubble(
                             message = message
                         )
-                        // Show full diff card inline if message has a file diff
+                        // Show full diff card inline if message has a file diff - always visible like Cursor CLI
                         message.fileDiff?.let { diff ->
                             key("file-diff-${index}-${diff.filePath}") {
+                                Spacer(modifier = Modifier.height(4.dp))
                                 CodeDiffCard(
                                     fileDiff = diff,
-                                    modifier = Modifier.padding(horizontal = 8.dp)
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 4.dp)
                                 )
+                                Spacer(modifier = Modifier.height(4.dp))
                             }
                         }
                     }

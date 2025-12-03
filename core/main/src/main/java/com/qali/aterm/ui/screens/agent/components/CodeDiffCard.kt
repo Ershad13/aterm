@@ -2,7 +2,9 @@ package com.qali.aterm.ui.screens.agent.components
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.InsertDriveFile
@@ -66,28 +68,40 @@ fun CodeDiffCard(
     }
     
     Card(
-        modifier = modifier.fillMaxWidth(),
-        shape = MaterialTheme.shapes.medium,
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(vertical = 4.dp),
+        shape = MaterialTheme.shapes.large,
         colors = CardDefaults.cardColors(
             containerColor = MaterialTheme.colorScheme.surfaceContainerHigh
         ),
-        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+        elevation = CardDefaults.cardElevation(defaultElevation = 4.dp),
+        border = androidx.compose.foundation.BorderStroke(
+            width = 1.dp,
+            color = if (fileDiff.isNewFile) 
+                Color(0xFF4CAF50).copy(alpha = 0.3f)
+            else 
+                MaterialTheme.colorScheme.outline.copy(alpha = 0.2f)
+        )
     ) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(0.dp)
         ) {
-            // File header
+            // File header - more prominent like Cursor CLI
             Surface(
-                color = MaterialTheme.colorScheme.surfaceContainerHighest,
+                color = if (fileDiff.isNewFile) 
+                    Color(0xFF1B5E20).copy(alpha = 0.1f)
+                else 
+                    MaterialTheme.colorScheme.surfaceContainerHighest,
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(12.dp),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        .padding(horizontal = 16.dp, vertical = 12.dp),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Icon(
@@ -97,103 +111,125 @@ fun CodeDiffCard(
                             Color(0xFF4CAF50) 
                         else 
                             MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.size(20.dp)
+                        modifier = Modifier.size(22.dp)
                     )
                     Text(
                         text = fileDiff.filePath,
-                        style = MaterialTheme.typography.titleSmall,
+                        style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.Bold,
                         color = MaterialTheme.colorScheme.onSurface,
                         modifier = Modifier.weight(1f)
                     )
                     if (fileDiff.isNewFile) {
                         Surface(
-                            color = Color(0xFF4CAF50).copy(alpha = 0.2f),
+                            color = Color(0xFF4CAF50).copy(alpha = 0.25f),
                             shape = MaterialTheme.shapes.small
                         ) {
                             Text(
                                 text = "NEW",
-                                style = MaterialTheme.typography.labelSmall,
+                                style = MaterialTheme.typography.labelMedium,
                                 color = Color(0xFF4CAF50),
                                 fontWeight = FontWeight.Bold,
-                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                            )
+                        }
+                    } else {
+                        Surface(
+                            color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f),
+                            shape = MaterialTheme.shapes.small
+                        ) {
+                            Text(
+                                text = "MODIFIED",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.primary,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
                             )
                         }
                     }
                 }
             }
             
-            // Diff content
+            // Diff content - scrollable and more prominent
             if (diffLines.isEmpty()) {
                 Text(
                     text = "No changes",
-                    style = MaterialTheme.typography.bodySmall,
+                    style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(12.dp)
+                    modifier = Modifier.padding(16.dp)
                 )
             } else {
+                // Scrollable diff content
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .heightIn(max = 400.dp)
+                        .heightIn(min = 100.dp, max = 500.dp)
+                        .verticalScroll(rememberScrollState())
                 ) {
-                    diffLines.forEach { diffLine ->
+                    diffLines.forEachIndexed { index, diffLine ->
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .background(
                                     when (diffLine.type) {
-                                        DiffLineType.ADDED -> Color(0xFF1E4620).copy(alpha = 0.15f)
-                                        DiffLineType.REMOVED -> Color(0xFF5C1F1F).copy(alpha = 0.15f)
+                                        DiffLineType.ADDED -> Color(0xFF1E4620).copy(alpha = 0.2f)
+                                        DiffLineType.REMOVED -> Color(0xFF5C1F1F).copy(alpha = 0.2f)
                                         DiffLineType.UNCHANGED -> Color.Transparent
                                     }
                                 ),
                             verticalAlignment = Alignment.Top
                         ) {
-                            // Line number and indicator column
-                            Column(
+                            // Line number and indicator column - more prominent
+                            Box(
                                 modifier = Modifier
-                                    .width(70.dp)
+                                    .width(60.dp)
                                     .background(
                                         when (diffLine.type) {
-                                            DiffLineType.ADDED -> Color(0xFF1E4620).copy(alpha = 0.3f)
-                                            DiffLineType.REMOVED -> Color(0xFF5C1F1F).copy(alpha = 0.3f)
-                                            DiffLineType.UNCHANGED -> Color.Transparent
+                                            DiffLineType.ADDED -> Color(0xFF1E4620).copy(alpha = 0.4f)
+                                            DiffLineType.REMOVED -> Color(0xFF5C1F1F).copy(alpha = 0.4f)
+                                            DiffLineType.UNCHANGED -> MaterialTheme.colorScheme.surfaceContainerHighest
                                         }
                                     )
-                                    .padding(horizontal = 8.dp, vertical = 2.dp),
-                                horizontalAlignment = Alignment.End
+                                    .padding(horizontal = 10.dp, vertical = 4.dp),
+                                contentAlignment = Alignment.CenterEnd
                             ) {
-                                Text(
-                                    text = when (diffLine.type) {
-                                        DiffLineType.ADDED -> "+"
-                                        DiffLineType.REMOVED -> "-"
-                                        DiffLineType.UNCHANGED -> " "
-                                    },
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    fontWeight = FontWeight.Bold,
-                                    color = when (diffLine.type) {
-                                        DiffLineType.ADDED -> Color(0xFF4CAF50)
-                                        DiffLineType.REMOVED -> Color(0xFFF44336)
-                                        DiffLineType.UNCHANGED -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
-                                    },
-                                    fontSize = 14.sp
-                                )
-                                if (diffLine.type != DiffLineType.UNCHANGED) {
+                                Row(
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
                                     Text(
-                                        text = diffLine.lineNumber.toString(),
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
-                                        fontSize = 10.sp
+                                        text = when (diffLine.type) {
+                                            DiffLineType.ADDED -> "+"
+                                            DiffLineType.REMOVED -> "-"
+                                            DiffLineType.UNCHANGED -> " "
+                                        },
+                                        style = MaterialTheme.typography.bodyLarge,
+                                        fontWeight = FontWeight.Bold,
+                                        color = when (diffLine.type) {
+                                            DiffLineType.ADDED -> Color(0xFF4CAF50)
+                                            DiffLineType.REMOVED -> Color(0xFFF44336)
+                                            DiffLineType.UNCHANGED -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
+                                        },
+                                        fontSize = 16.sp,
+                                        fontFamily = FontFamily.Monospace
                                     )
+                                    if (diffLine.type != DiffLineType.UNCHANGED) {
+                                        Text(
+                                            text = diffLine.lineNumber.toString(),
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                                            fontSize = 11.sp,
+                                            fontFamily = FontFamily.Monospace
+                                        )
+                                    }
                                 }
                             }
                             
-                            // Code content
+                            // Code content - more readable
                             SelectionContainer {
                                 Text(
                                     text = diffLine.content,
-                                    style = MaterialTheme.typography.bodySmall,
+                                    style = MaterialTheme.typography.bodyMedium,
                                     fontFamily = FontFamily.Monospace,
                                     color = when (diffLine.type) {
                                         DiffLineType.ADDED -> Color(0xFF81C784)
@@ -202,7 +238,9 @@ fun CodeDiffCard(
                                     },
                                     modifier = Modifier
                                         .weight(1f)
-                                        .padding(vertical = 2.dp, horizontal = 8.dp)
+                                        .padding(vertical = 4.dp, horizontal = 12.dp),
+                                    fontSize = 13.sp,
+                                    lineHeight = 20.sp
                                 )
                             }
                         }
