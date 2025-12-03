@@ -25,6 +25,17 @@ object PpeConfig {
     /** Default write timeout in seconds */
     const val DEFAULT_WRITE_TIMEOUT_SECONDS = 60L
     
+    /**
+     * Maximum time to wait for a single LLM API call (in milliseconds).
+     *
+     * This is a safety guard so that if a provider hangs or the network is slow,
+     * the agent won't appear to be \"thinking\" forever with zero progress.
+     *
+     * Keep this lower than the AgentScreen timeout (currently 300000ms) so that
+     * we can surface a clear error to the user before the UI-level timeout hits.
+     */
+    const val API_CALL_TIMEOUT_MS: Long = 120_000L // 2 minutes
+    
     // ==================== File Limits ====================
     
     /** Maximum lines to read from a file without offset/limit */

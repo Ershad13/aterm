@@ -14,6 +14,8 @@ import java.io.File
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.TimeoutCancellationException
 
 /**
  * Execution engine for PPE scripts
@@ -42,15 +44,31 @@ class PpeExecutionEngine(
         disableTools: Boolean = false,
         onChunk: ((String) -> Unit)? = null
     ): Result<PpeApiResponse> {
-        val result = apiClient.callApi(
-            messages = messages,
-            model = model,
-            temperature = temperature,
-            topP = topP,
-            topK = topK,
-            tools = tools,
-            disableTools = disableTools
-        )
+        val result = try {
+            // Hard timeout so a single provider call can't hang the entire agent.
+            withTimeout(PpeConfig.API_CALL_TIMEOUT_MS) {
+                apiClient.callApi(
+                    messages = messages,
+                    model = model,
+                    temperature = temperature,
+                    topP = topP,
+                    topK = topK,
+                    tools = tools,
+                    disableTools = disableTools
+                )
+            }
+        } catch (e: TimeoutCancellationException) {
+            Log.e(
+                "PpeExecutionEngine",
+                "API call timed out after ${PpeConfig.API_CALL_TIMEOUT_MS}ms",
+                e
+            )
+            onChunk?.invoke(
+                "✗ LLM API call timed out after ${PpeConfig.API_CALL_TIMEOUT_MS / 1000}s. " +
+                "Please check your network or provider configuration and try again.\n"
+            )
+            return Result.failure(e)
+        }
         
         // If it's a KeysExhaustedExceptionWithRetry, wait and retry
         if (result.isFailure) {
