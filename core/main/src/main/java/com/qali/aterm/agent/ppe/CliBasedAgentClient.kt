@@ -5,14 +5,8 @@ import com.qali.aterm.agent.core.FunctionCall
 import com.qali.aterm.agent.tools.ToolRegistry
 import com.qali.aterm.agent.ppe.models.PpeScript
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.flow
-import kotlinx.coroutines.channels.Channel
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.flow.channelFlow
 import kotlinx.coroutines.withTimeout
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.currentCoroutineContext
-import kotlin.coroutines.coroutineContext
 import android.util.Log
 import java.io.File
 
@@ -47,16 +41,13 @@ class CliBasedAgentClient(
         memory: String? = null,  // Agent memory context from previous interactions
         systemContext: String? = null,  // System information (OS, package manager, etc.)
         sessionId: String = "main"  // Session ID for tracking and analysis
-    ): Flow<AgentEvent> = flow {
+    ): Flow<AgentEvent> = channelFlow {
         val startTime = System.currentTimeMillis()
         var eventCount = 0
         var lastEventTime = startTime
         var toolCallCount = 0
         var toolResultCount = 0
         var chunkCount = 0
-        
-        // Get the coroutine scope from the current context
-        val flowScope = CoroutineScope(coroutineContext)
         
         try {
             Log.d("CliBasedAgentClient", "Starting sendMessage for: ${userMessage.take(50)}...")
@@ -105,25 +96,10 @@ class CliBasedAgentClient(
             
             Log.d("CliBasedAgentClient", "Starting script execution (non-streaming)")
             
-            // Use Channel to queue events from non-suspend callbacks and emit them immediately
-            val eventChannel = Channel<AgentEvent>(Channel.UNLIMITED)
-            Log.d("CliBasedAgentClient", "Event channel created")
-            
-            // Launch coroutine to consume events from channel and emit them
-            // Use launch directly (not coroutineScope) so it doesn't block the flow
-            val emitJob = flowScope.launch {
-                Log.d("CliBasedAgentClient", "Emit job started")
-                for (event in eventChannel) {
-                    Log.d("CliBasedAgentClient", "Emitting event: ${event.javaClass.simpleName}")
-                    emit(event)
-                }
-                Log.d("CliBasedAgentClient", "Emit job completed - channel closed")
-            }
-            Log.d("CliBasedAgentClient", "Emit job created, about to call executeScript")
-            
             // Execute script with overall timeout to prevent infinite hanging
             // Use 2 minutes total timeout (120 seconds) - should be enough for most tasks
             // This wraps the entire execution to catch any hanging API calls
+            // channelFlow allows emissions from multiple coroutines, so we can send() directly
             val result = try {
                 Log.d("CliBasedAgentClient", "Wrapping executeScript with 120s timeout")
                 withTimeout(120_000L) { // 2 minutes total timeout
@@ -138,8 +114,8 @@ class CliBasedAgentClient(
                             eventCount++
                             Log.d("CliBasedAgentClient", "Chunk received (count: $chunkCount, size: ${chunk.length}, time since start: ${now - startTime}ms)")
                             onChunk(chunk)
-                            // Send chunk event to channel (non-blocking)
-                            eventChannel.trySend(AgentEvent.Chunk(chunk))
+                            // Send directly to channelFlow (thread-safe, allows concurrent emissions)
+                            trySend(AgentEvent.Chunk(chunk))
                         },
                         onToolCall = { functionCall ->
                             val now = System.currentTimeMillis()
@@ -148,8 +124,8 @@ class CliBasedAgentClient(
                             eventCount++
                             Log.d("CliBasedAgentClient", "Tool call received (count: $toolCallCount, tool: ${functionCall.name}, time since start: ${now - startTime}ms)")
                             onToolCall(functionCall)
-                            // Send tool call event to channel (non-blocking)
-                            eventChannel.trySend(AgentEvent.ToolCall(functionCall))
+                            // Send directly to channelFlow (thread-safe, allows concurrent emissions)
+                            trySend(AgentEvent.ToolCall(functionCall))
                         },
                         onToolResult = { toolName, args ->
                             val now = System.currentTimeMillis()
@@ -162,9 +138,9 @@ class CliBasedAgentClient(
                             // Get tool result from execution engine (FIFO queue)
                             val toolResult: com.qali.aterm.agent.tools.ToolResult? = executionEngine.getNextToolResult(toolName)
                             if (toolResult != null) {
-                                Log.d("CliBasedAgentClient", "Sending tool result event to channel for: $toolName")
-                                // Send tool result event to channel (non-blocking)
-                                eventChannel.trySend(AgentEvent.ToolResult(toolName, toolResult))
+                                Log.d("CliBasedAgentClient", "Sending tool result event for: $toolName")
+                                // Send directly to channelFlow (thread-safe, allows concurrent emissions)
+                                trySend(AgentEvent.ToolResult(toolName, toolResult))
                             } else {
                                 Log.w("CliBasedAgentClient", "Tool result not found in queue for: $toolName")
                             }
@@ -179,8 +155,8 @@ class CliBasedAgentClient(
                 Log.e("CliBasedAgentClient", "Script execution timed out after ${totalTime}ms (120s limit)")
                 Log.e("CliBasedAgentClient", "Timeout details - Events: $eventCount, Chunks: $chunkCount, ToolCalls: $toolCallCount, ToolResults: $toolResultCount")
                 
-                // Emit timeout error to channel
-                eventChannel.trySend(AgentEvent.Error("Script execution timed out after 2 minutes. The agent may be stuck waiting for an API response. Please check your network connection and API configuration."))
+                // Send timeout error to channelFlow
+                trySend(AgentEvent.Error("Script execution timed out after 2 minutes. The agent may be stuck waiting for an API response. Please check your network connection and API configuration."))
                 
                 // Return failure result
                 PpeExecutionResult(
@@ -190,19 +166,6 @@ class CliBasedAgentClient(
                     chatHistory = emptyList(),
                     error = "Script execution timed out after 2 minutes. Please check your network connection and API configuration."
                 )
-            }
-            
-            // Close channel and wait for all events to be emitted (with timeout)
-            eventChannel.close()
-            
-            // Wait for emit job with timeout to prevent infinite hanging
-            try {
-                withTimeout(60000L) { // 60 second timeout for emit job
-                    emitJob.join()
-                }
-            } catch (e: kotlinx.coroutines.TimeoutCancellationException) {
-                Log.w("CliBasedAgentClient", "Emit job timeout - forcing completion")
-                emitJob.cancel()
             }
             
             val now = System.currentTimeMillis()
@@ -217,19 +180,19 @@ class CliBasedAgentClient(
                 // Emit final result if any
                 if (result.finalResult.isNotEmpty()) {
                     Log.d("CliBasedAgentClient", "Sending final result (length: ${result.finalResult.length})")
-                    emit(AgentEvent.Chunk(result.finalResult))
+                    send(AgentEvent.Chunk(result.finalResult)) // Use send() in channelFlow
                     onChunk(result.finalResult)
                 } else {
                     Log.d("CliBasedAgentClient", "No final result to send")
                 }
                 Log.d("CliBasedAgentClient", "Sending Done event")
-                emit(AgentEvent.Done)
+                send(AgentEvent.Done) // Use send() in channelFlow
             } else {
                 val errorMsg = result.error ?: "Script execution failed"
                 Log.e("CliBasedAgentClient", "Script execution failed: $errorMsg")
-                emit(AgentEvent.Error(errorMsg))
+                send(AgentEvent.Error(errorMsg)) // Use send() in channelFlow
                 // Still emit Done after error to ensure stream completes
-                emit(AgentEvent.Done)
+                send(AgentEvent.Done) // Use send() in channelFlow
             }
             
             Log.d("CliBasedAgentClient", "Script execution completed (total time: ${totalTime}ms)")
@@ -250,7 +213,7 @@ class CliBasedAgentClient(
             Log.e("CliBasedAgentClient", "Exception type: ${e.javaClass.simpleName}, message: ${e.message}")
             e.printStackTrace()
             // Emit error event
-            emit(AgentEvent.Error(e.message ?: "Unknown error: ${e.javaClass.simpleName}"))
+            trySend(AgentEvent.Error(e.message ?: "Unknown error: ${e.javaClass.simpleName}"))
         }
     }
     
