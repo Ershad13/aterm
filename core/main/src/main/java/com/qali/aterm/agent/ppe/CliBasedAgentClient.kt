@@ -101,22 +101,29 @@ class CliBasedAgentClient(
             
             // Use Channel to queue events from non-suspend callbacks and emit them immediately
             val eventChannel = Channel<AgentEvent>(Channel.UNLIMITED)
+            Log.d("CliBasedAgentClient", "Event channel created")
             
             // Launch coroutine to consume events from channel and emit them
             // Use coroutineScope to ensure proper scope for launch
             val emitJob = coroutineScope {
                 launch {
+                    Log.d("CliBasedAgentClient", "Emit job started")
                     for (event in eventChannel) {
+                        Log.d("CliBasedAgentClient", "Emitting event: ${event.javaClass.simpleName}")
                         emit(event)
                     }
+                    Log.d("CliBasedAgentClient", "Emit job completed - channel closed")
                 }
             }
+            Log.d("CliBasedAgentClient", "Emit job created, about to call executeScript")
             
             // Execute script with overall timeout to prevent infinite hanging
             // Use 2 minutes total timeout (120 seconds) - should be enough for most tasks
             // This wraps the entire execution to catch any hanging API calls
             val result = try {
+                Log.d("CliBasedAgentClient", "Wrapping executeScript with 120s timeout")
                 withTimeout(120_000L) { // 2 minutes total timeout
+                    Log.d("CliBasedAgentClient", "Calling executionEngine.executeScript")
                     executionEngine.executeScript(
                         script = script,
                         inputParams = inputParams,
@@ -158,9 +165,12 @@ class CliBasedAgentClient(
                                 Log.w("CliBasedAgentClient", "Tool result not found in queue for: $toolName")
                             }
                         }
-                    )
+                    ).also {
+                        Log.d("CliBasedAgentClient", "executeScript returned (success: ${it.success})")
+                    }
                 }
             } catch (e: kotlinx.coroutines.TimeoutCancellationException) {
+                Log.e("CliBasedAgentClient", "TimeoutCancellationException caught in withTimeout block")
                 val totalTime = System.currentTimeMillis() - startTime
                 Log.e("CliBasedAgentClient", "Script execution timed out after ${totalTime}ms (120s limit)")
                 Log.e("CliBasedAgentClient", "Timeout details - Events: $eventCount, Chunks: $chunkCount, ToolCalls: $toolCallCount, ToolResults: $toolResultCount")
