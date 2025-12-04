@@ -185,11 +185,12 @@ class PpeApiClient(
                 
                 // Otherwise, use ApiProviderManager (existing flow)
                 val actualModel = model ?: ApiProviderManager.getCurrentModel()
-                val providerType = ApiProviderManager.selectedProvider.name
+                val providerType = ApiProviderManager.selectedProvider
+                val providerTypeName = providerType.name
                 
                 DebugLogger.d("PpeApiClient", "Using ApiProviderManager", mapOf(
                     "call_id" to callId,
-                    "provider" to providerType,
+                    "provider" to providerTypeName,
                     "model" to actualModel
                 ))
                 
@@ -266,7 +267,7 @@ class PpeApiClient(
                     // Log successful API call
                     DebugLogger.logApiCall(
                         tag = "PpeApiClient",
-                        provider = providerType,
+                        provider = providerTypeName,
                         model = actualModel,
                         requestSize = requestBody.toString().length,
                         responseSize = response.text.length,
@@ -283,7 +284,7 @@ class PpeApiClient(
                     
                     // Classify error and get recovery information
                     val errorContext = mapOf(
-                        "provider" to providerType,
+                        "provider" to providerTypeName,
                         "model" to actualModel,
                         "call_id" to callId,
                         "duration_ms" to duration
@@ -312,7 +313,7 @@ class PpeApiClient(
                     // Log failed API call with enhanced error information
                     DebugLogger.logApiCall(
                         tag = "PpeApiClient",
-                        provider = providerType,
+                        provider = providerTypeName,
                         model = actualModel,
                         requestSize = requestBody.toString().length,
                         responseSize = 0,
