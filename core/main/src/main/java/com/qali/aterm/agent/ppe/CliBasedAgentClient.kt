@@ -10,6 +10,9 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.currentCoroutineContext
+import kotlin.coroutines.coroutineContext
 import android.util.Log
 import java.io.File
 
@@ -51,6 +54,9 @@ class CliBasedAgentClient(
         var toolCallCount = 0
         var toolResultCount = 0
         var chunkCount = 0
+        
+        // Get the coroutine scope from the current context
+        val flowScope = CoroutineScope(coroutineContext)
         
         try {
             Log.d("CliBasedAgentClient", "Starting sendMessage for: ${userMessage.take(50)}...")
@@ -104,16 +110,14 @@ class CliBasedAgentClient(
             Log.d("CliBasedAgentClient", "Event channel created")
             
             // Launch coroutine to consume events from channel and emit them
-            // Use coroutineScope to ensure proper scope for launch
-            val emitJob = coroutineScope {
-                launch {
-                    Log.d("CliBasedAgentClient", "Emit job started")
-                    for (event in eventChannel) {
-                        Log.d("CliBasedAgentClient", "Emitting event: ${event.javaClass.simpleName}")
-                        emit(event)
-                    }
-                    Log.d("CliBasedAgentClient", "Emit job completed - channel closed")
+            // Use launch directly (not coroutineScope) so it doesn't block the flow
+            val emitJob = flowScope.launch {
+                Log.d("CliBasedAgentClient", "Emit job started")
+                for (event in eventChannel) {
+                    Log.d("CliBasedAgentClient", "Emitting event: ${event.javaClass.simpleName}")
+                    emit(event)
                 }
+                Log.d("CliBasedAgentClient", "Emit job completed - channel closed")
             }
             Log.d("CliBasedAgentClient", "Emit job created, about to call executeScript")
             
