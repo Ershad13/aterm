@@ -22,51 +22,26 @@ object ErrorDetectionUtils {
         val filePath: String,
         val lineNumber: Int? = null,
         val columnNumber: Int? = null,
-        val functionName: String? = null
+        val functionName: String? = null,
+        val severity: com.qali.aterm.agent.utils.ErrorSeverity? = null
     )
     
     /**
      * Extract error locations from error message or stack trace
+     * Now uses ErrorPatternLibrary for multi-language support
      */
     fun parseErrorLocations(errorMessage: String, workspaceRoot: String): List<ErrorLocation> {
         val locations = mutableListOf<ErrorLocation>()
         
-        // JavaScript/Node.js stack trace patterns
-        val jsPatterns = listOf(
-            // "at functionName (/path/to/file.js:123:45)"
-            Pattern.compile("at\\s+(?:[^\\s]+\\s+)?\\(?([^:]+):(\\d+):(\\d+)\\)?"),
-            // "at /path/to/file.js:123:45"
-            Pattern.compile("at\\s+([^:]+):(\\d+):(\\d+)"),
-            // "Error: message\n    at file.js:123"
-            Pattern.compile("at\\s+([^\\s]+):(\\d+)"),
-        )
+        // Detect language from error message
+        val detectedLanguage = ErrorPatternLibrary.detectLanguage("", errorMessage)
+        val languagePatterns = ErrorPatternLibrary.getPatternsForLanguage(detectedLanguage)
         
-        // Python stack trace patterns
-        val pythonPatterns = listOf(
-            // "File \"/path/to/file.py\", line 123"
-            Pattern.compile("File\\s+[\"']([^\"']+)[\"'],\\s*line\\s+(\\d+)"),
-            // "  File \"/path/to/file.py\", line 123, in function"
-            Pattern.compile("File\\s+[\"']([^\"']+)[\"'],\\s*line\\s+(\\d+)(?:,\\s*in\\s+(\\w+))?"),
-        )
+        // Also try generic patterns as fallback
+        val genericPatterns = ErrorPatternLibrary.getPatternsForLanguage("generic")
         
-        // Java/Kotlin stack trace patterns
-        val javaPatterns = listOf(
-            // "at com.example.Class.method(Class.java:123)"
-            Pattern.compile("at\\s+[^\\s]+\\(([^:]+):(\\d+)\\)"),
-            // "Caused by: ... at Class.java:123"
-            Pattern.compile("at\\s+[^\\s]+\\(([^:]+):(\\d+)\\)"),
-        )
-        
-        // Generic patterns
-        val genericPatterns = listOf(
-            // "Error in file.js:123"
-            Pattern.compile("(?:error|Error|ERROR)\\s+(?:in|at|on)\\s+([^:]+):(\\d+)"),
-            // "file.js:123:45"
-            Pattern.compile("([^\\s]+):(\\d+)(?::(\\d+))?"),
-        )
-        
-        // Try all patterns
-        val allPatterns = jsPatterns + pythonPatterns + javaPatterns + genericPatterns
+        // Try all patterns (language-specific first, then generic)
+        val allPatterns = languagePatterns.patterns + genericPatterns.patterns
         
         for (pattern in allPatterns) {
             val matcher = pattern.matcher(errorMessage)
@@ -80,11 +55,29 @@ object ErrorDetectionUtils {
                     // Resolve relative paths
                     val resolvedPath = resolveFilePath(filePath, workspaceRoot)
                     if (resolvedPath != null) {
+                        // Detect error type from language-specific patterns
+                        var errorType: String? = null
+                        for ((type, pattern) in languagePatterns.errorTypePatterns) {
+                            if (pattern.matcher(errorMessage).find()) {
+                                errorType = type
+                                break
+                            }
+                        }
+                        
+                        // Classify severity based on error message and type
+                        val severity = ErrorSeverityClassifier.classifySeverity(
+                            errorMessage = errorMessage,
+                            errorType = errorType,
+                            stackTraceDepth = null,
+                            affectedFileCount = null
+                        )
+                        
                         locations.add(ErrorLocation(
                             filePath = resolvedPath,
                             lineNumber = lineNum,
                             columnNumber = colNum,
-                            functionName = funcName
+                            functionName = funcName,
+                            severity = severity
                         ))
                     }
                 } catch (e: Exception) {
@@ -152,7 +145,15 @@ object ErrorDetectionUtils {
         val affectedFiles: List<String>
     )
     
-    fun detectApiMismatch(errorMessage: String): ApiMismatch? {
+    fun detectApiMismatch(errorMessage: String, filePath: String? = null): ApiMismatch? {
+        // Use enhanced API mismatch library
+        return ApiMismatchLibrary.detectApiMismatch(errorMessage, filePath) ?: detectLegacyApiMismatch(errorMessage)
+    }
+    
+    /**
+     * Legacy API mismatch detection (fallback)
+     */
+    private fun detectLegacyApiMismatch(errorMessage: String): ApiMismatch? {
         val lowerError = errorMessage.lowercase()
         
         // SQLite vs MySQL detection
@@ -182,6 +183,88 @@ object ErrorDetectionUtils {
         }
         
         return null
+    }
+    
+    /**
+     * Get enhanced error context for a specific error location
+     */
+    fun getErrorContext(
+        errorLocation: ErrorLocation,
+        workspaceRoot: String,
+        contextLines: Int = 5
+    ): com.qali.aterm.agent.utils.ErrorContextExtractor.ErrorContext? {
+        if (errorLocation.lineNumber == null) {
+            return null
+        }
+        
+        return com.qali.aterm.agent.utils.ErrorContextExtractor.extractContext(
+            filePath = errorLocation.filePath,
+            lineNumber = errorLocation.lineNumber,
+            columnNumber = errorLocation.columnNumber,
+            contextLines = contextLines,
+            workspaceRoot = workspaceRoot
+        )
+    }
+    
+    /**
+     * Handle multiple errors simultaneously
+     * Groups errors and creates prioritized fix order
+     */
+    fun handleMultipleErrors(
+        errorLocations: List<ErrorLocation>,
+        errorMessages: List<String>,
+        workspaceRoot: String
+    ): MultiErrorHandler.MultiErrorAnalysis {
+        return MultiErrorHandler.handleMultipleErrors(
+            errorLocations = errorLocations,
+            errorMessages = errorMessages,
+            workspaceRoot = workspaceRoot
+        )
+    }
+    
+    /**
+     * Correlate errors and find root causes
+     */
+    fun correlateErrors(
+        errorLocations: List<ErrorLocation>,
+        errorMessages: List<String>,
+        workspaceRoot: String
+    ): ErrorCorrelationEngine.CorrelationResult {
+        return ErrorCorrelationEngine.correlateErrors(
+            errorLocations = errorLocations,
+            errorMessages = errorMessages,
+            workspaceRoot = workspaceRoot
+        )
+    }
+    
+    /**
+     * Record error in history
+     */
+    fun recordErrorInHistory(
+        errorMessage: String,
+        errorLocation: ErrorLocation,
+        errorType: String? = null,
+        workspaceRoot: String
+    ) {
+        ErrorHistoryManager.addError(
+            errorMessage = errorMessage,
+            errorType = errorType,
+            severity = errorLocation.severity ?: ErrorSeverity.MEDIUM,
+            filePath = errorLocation.filePath,
+            lineNumber = errorLocation.lineNumber,
+            functionName = errorLocation.functionName,
+            workspaceRoot = workspaceRoot
+        )
+    }
+    
+    /**
+     * Get fix suggestion from history
+     */
+    fun getFixSuggestionFromHistory(
+        errorMessage: String,
+        filePath: String? = null
+    ): String? {
+        return ErrorHistoryManager.suggestFixFromHistory(errorMessage, filePath)
     }
     
     /**

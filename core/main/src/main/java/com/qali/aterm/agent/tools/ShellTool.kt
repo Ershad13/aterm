@@ -331,6 +331,18 @@ class ShellToolInvocation(
             
             val (exitCode, output) = result
             
+            // Real-time error monitoring
+            val detectedErrors = if (exitCode != 0 || output.contains("error", ignoreCase = true) || 
+                                     output.contains("exception", ignoreCase = true)) {
+                com.qali.aterm.agent.utils.ErrorMonitor.monitorShellOutput(
+                    output = output,
+                    command = params.command,
+                    workspaceRoot = workspaceRoot
+                )
+            } else {
+                emptyList()
+            }
+            
             // Record command in history
             CommandHistoryManager.addCommand(
                 command = params.command,
@@ -351,6 +363,21 @@ class ShellToolInvocation(
                 extractErrorInfo(output, exitCode)
             } else {
                 null
+            }
+            
+            // Add detected errors to result if any
+            val errorSummary = if (detectedErrors.isNotEmpty()) {
+                buildString {
+                    appendLine("\n⚠️ Real-time error monitoring detected ${detectedErrors.size} error(s):")
+                    detectedErrors.take(5).forEach { error ->
+                        appendLine("  - ${error.severity.name}: ${error.errorMessage.take(60)}")
+                        if (error.filePath != null) {
+                            appendLine("    File: ${error.filePath}")
+                        }
+                    }
+                }
+            } else {
+                ""
             }
             
             if (exitCode == 0) {

@@ -64,8 +64,44 @@ class WriteFileToolInvocation(
             // Create parent directories if needed
             file.parentFile?.mkdirs()
             
+            // Error prediction BEFORE writing (preventive)
+            val predictedErrors = com.qali.aterm.agent.utils.ErrorPredictor.predictErrors(
+                content = params.content,
+                filePath = params.file_path,
+                workspaceRoot = workspaceRoot
+            )
+            
+            // Risk assessment
+            val riskAssessment = com.qali.aterm.agent.utils.ErrorPredictor.assessRisk(
+                content = params.content,
+                filePath = params.file_path,
+                workspaceRoot = workspaceRoot
+            )
+            
+            // Warn about predicted errors before writing
+            if (predictedErrors.isNotEmpty() && riskAssessment.overallRisk != com.qali.aterm.agent.utils.ErrorPredictor.RiskLevel.LOW) {
+                val warning = buildString {
+                    appendLine("⚠️ Error prediction detected ${predictedErrors.size} potential issue(s):")
+                    appendLine("Risk Level: ${riskAssessment.overallRisk.name}")
+                    predictedErrors.take(3).forEach { prediction ->
+                        appendLine("  - ${prediction.riskLevel.name}: ${prediction.description}")
+                        if (prediction.preventiveFix != null) {
+                            appendLine("    Preventive Fix: ${prediction.preventiveFix.take(60)}")
+                        }
+                    }
+                }
+                updateOutput?.invoke(warning)
+            }
+            
             // Write content
             file.writeText(params.content)
+            
+            // Real-time error monitoring for file writes
+            val fileWriteErrors = com.qali.aterm.agent.utils.ErrorMonitor.monitorFileWrite(
+                filePath = params.file_path,
+                content = params.content,
+                workspaceRoot = workspaceRoot
+            )
             
             updateOutput?.invoke("File written successfully")
             
@@ -171,10 +207,44 @@ class WriteFileToolInvocation(
                 ""
             }
             
-            val messageWithErrors = if (errorTasks.isNotEmpty()) {
-                baseMessage + AutoErrorDetection.formatErrorDetectionMessage(errorTasks) + codeSummary + relativenessSummary + patchSection
+            // Include prediction summary
+            val predictionSection = if (predictedErrors.isNotEmpty() && 
+                riskAssessment.overallRisk != com.qali.aterm.agent.utils.ErrorPredictor.RiskLevel.LOW) {
+                buildString {
+                    appendLine("\n\n⚠️ Error Prediction:")
+                    appendLine("Risk Level: ${riskAssessment.overallRisk.name}")
+                    appendLine("Predicted Issues: ${predictedErrors.size} (${riskAssessment.criticalCount} critical, ${riskAssessment.highCount} high)")
+                    if (predictedErrors.isNotEmpty()) {
+                        appendLine("Top Issues:")
+                        predictedErrors.take(3).forEach { prediction ->
+                            appendLine("  - ${prediction.description}")
+                            if (prediction.preventiveFix != null) {
+                                appendLine("    Preventive Fix: ${prediction.preventiveFix.take(80)}")
+                            }
+                        }
+                    }
+                }
             } else {
-                baseMessage + codeSummary + relativenessSummary + patchSection
+                ""
+            }
+            
+            // Include monitoring summary
+            val monitoringSection = if (fileWriteErrors.isNotEmpty()) {
+                buildString {
+                    appendLine("\n\n⚠️ Real-time monitoring detected ${fileWriteErrors.size} potential issue(s):")
+                    fileWriteErrors.take(3).forEach { error ->
+                        appendLine("  - ${error.severity.name}: ${error.errorMessage.take(60)}")
+                    }
+                }
+            } else {
+                ""
+            }
+            
+            val messageWithErrors = if (errorTasks.isNotEmpty()) {
+                baseMessage + AutoErrorDetection.formatErrorDetectionMessage(errorTasks) + 
+                predictionSection + monitoringSection + codeSummary + relativenessSummary + patchSection
+            } else {
+                baseMessage + predictionSection + monitoringSection + codeSummary + relativenessSummary + patchSection
             }
             
             ToolResult(
