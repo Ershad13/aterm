@@ -3619,10 +3619,10 @@ JSON Blueprint:
             }
         } else {
             // Use smart file prioritization
-            val projectType = ProjectStartupDetector.detectProjectType(userMessage.lowercase(), workspaceRoot)
+            val projectTypeDetection = ProjectStartupDetector.detectProjectType(userMessage.lowercase(), workspaceRoot)
             com.qali.aterm.agent.utils.AtermIgnoreManager.getPriorityFiles(
                 workspaceRoot, 
-                projectType.projectType?.name?.lowercase()
+                projectTypeDetection.projectType?.name?.lowercase()
             )
         }
         // Build enhanced prompt with error detection info
@@ -3789,8 +3789,6 @@ JSON Response:
             }
             
             onChunk("Reading $normalizedPath${if (request.offset != null && request.limit != null) " (lines ${request.offset + 1}-${request.offset + request.limit})" else ""}...\n")
-            
-            val file = File(workspaceRoot, normalizedPath)
             if (!file.exists() || !file.isFile) {
                 onChunk("⚠ File not found: $normalizedPath (original: ${request.path})\n")
                 continue

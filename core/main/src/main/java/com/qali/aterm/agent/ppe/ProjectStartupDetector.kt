@@ -101,7 +101,7 @@ object ProjectStartupDetector {
     /**
      * Detect project type from user message and workspace
      */
-    private fun detectProjectType(message: String, workspaceRoot: String): ProjectTypeDetection {
+    fun detectProjectType(message: String, workspaceRoot: String): ProjectTypeDetection {
         val lowerMessage = message.lowercase()
         
         // React detection
@@ -338,9 +338,9 @@ object ProjectStartupDetector {
     }
     
     /**
-     * Internal data class for project type detection
+     * Data class for project type detection
      */
-    private data class ProjectTypeDetection(
+    data class ProjectTypeDetection(
         val projectType: ProjectType?,
         val suggestedTemplate: String?,
         val detectedLanguage: String?
