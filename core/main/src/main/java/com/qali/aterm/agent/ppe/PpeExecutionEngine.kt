@@ -3983,14 +3983,25 @@ Updated Blueprint JSON:
             }
             
             // Step 1: Get file structure (respecting .gitignore) with caching
-            onChunk("Step 1: Analyzing project structure...\n")
+            // Only show message if not already in chat history
+            val step1Message = "Step 1: Analyzing project structure..."
+            if (!updatedChatHistory.any { it.parts.any { part -> part is Part.TextPart && part.text.contains(step1Message) } }) {
+                onChunk("$step1Message\n")
+            }
             val fileStructure = IntelligentCache.getFileStructure(workspaceRoot) {
                 getFileStructureRespectingGitignore(workspaceRoot)
             }
-            onChunk("Project structure analyzed.\n\n")
+            // Don't print "Project structure analyzed" if already printed
+            val analyzedMessage = "Project structure analyzed"
+            if (!updatedChatHistory.any { it.parts.any { part -> part is Part.TextPart && part.text.contains(analyzedMessage) } }) {
+                onChunk("$analyzedMessage.\n\n")
+            }
             
             // Step 2: Determine which files to read (with rate limiting)
-            onChunk("Step 2: Determining which files to read...\n")
+            val step2Message = "Step 2: Determining which files to read..."
+            if (!updatedChatHistory.any { it.parts.any { part -> part is Part.TextPart && part.text.contains(step2Message) } }) {
+                onChunk("$step2Message\n")
+            }
             rateLimiter.acquire()
             val readPlan = determineFilesToRead(userMessage, fileStructure, updatedChatHistory, script)
             
@@ -4001,9 +4012,15 @@ Updated Blueprint JSON:
                 onChunk("Identified ${readPlan.files.size} files to read.\n\n")
                 
                 // Step 3: Read the files
-                onChunk("Step 3: Reading files...\n")
+                val step3Message = "Step 3: Reading files..."
+                if (!updatedChatHistory.any { it.parts.any { part -> part is Part.TextPart && part.text.contains(step3Message) } }) {
+                    onChunk("$step3Message\n")
+                }
                 val fileContents = readFilesFromPlan(readPlan, workspaceRoot, onChunk)
-                onChunk("\n")
+                // Only add newline if we actually read files
+                if (fileContents.isNotEmpty()) {
+                    onChunk("\n")
+                }
                 
                 // Add file contents to chat history for context
                 if (fileContents.isNotEmpty()) {
@@ -4023,7 +4040,10 @@ Updated Blueprint JSON:
                 }
                 
                 // Step 4: Get plan from AI
-                onChunk("Step 4: Analyzing and creating plan...\n")
+                val step4Message = "Step 4: Analyzing and creating plan..."
+                if (!updatedChatHistory.any { it.parts.any { part -> part is Part.TextPart && part.text.contains(step4Message) } }) {
+                    onChunk("$step4Message\n")
+                }
                 
                 // Check for "Cannot find module" errors and suggest fixes
                 val moduleFixHint = if (userMessage.contains("Cannot find module", ignoreCase = true)) {
