@@ -145,40 +145,42 @@ class CommandExecutionTool(
     override val displayName = "ExecuteCommand"
     override val description = "Executes a shell command with allowlist checking. Commands not in allowlist require user approval."
     
+    override val parameterSchema = FunctionParameters(
+        type = "object",
+        properties = mapOf(
+            "command" to PropertySchema(
+                type = "string",
+                description = "The command to execute"
+            ),
+            "description" to PropertySchema(
+                type = "string",
+                description = "Optional description of what this command does"
+            ),
+            "dir_path" to PropertySchema(
+                type = "string",
+                description = "Optional directory to execute command in"
+            ),
+            "timeout" to PropertySchema(
+                type = "number",
+                description = "Optional timeout in seconds (default: 60)"
+            ),
+            "analyze_output" to PropertySchema(
+                type = "boolean",
+                description = "If true, output will be analyzed by AI (default: false)"
+            ),
+            "requires_approval" to PropertySchema(
+                type = "boolean",
+                description = "If false, skip allowlist check (use with caution, default: true)"
+            )
+        ),
+        required = listOf("command")
+    )
+    
     override fun getFunctionDeclaration(): FunctionDeclaration {
         return FunctionDeclaration(
             name = name,
             description = description,
-            parameters = FunctionParameters(
-                type = "object",
-                properties = mapOf(
-                    "command" to PropertySchema(
-                        type = "string",
-                        description = "The command to execute"
-                    ),
-                    "description" to PropertySchema(
-                        type = "string",
-                        description = "Optional description of what this command does"
-                    ),
-                    "dir_path" to PropertySchema(
-                        type = "string",
-                        description = "Optional directory to execute command in"
-                    ),
-                    "timeout" to PropertySchema(
-                        type = "number",
-                        description = "Optional timeout in seconds (default: 60)"
-                    ),
-                    "analyze_output" to PropertySchema(
-                        type = "boolean",
-                        description = "If true, output will be analyzed by AI (default: false)"
-                    ),
-                    "requires_approval" to PropertySchema(
-                        type = "boolean",
-                        description = "If false, skip allowlist check (use with caution, default: true)"
-                    )
-                ),
-                required = listOf("command")
-            )
+            parameters = parameterSchema
         )
     }
     
