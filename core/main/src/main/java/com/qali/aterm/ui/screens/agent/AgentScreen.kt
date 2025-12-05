@@ -82,6 +82,16 @@ data class DiffLine(
     val lineNumber: Int
 )
 
+data class CodeBlock(
+    val language: String?,
+    val code: String
+)
+
+data class MessageContent(
+    val textParts: List<String>,
+    val codeBlocks: List<CodeBlock>
+)
+
 data class AgentMessage(
     val text: String,
     val isUser: Boolean,
@@ -89,13 +99,60 @@ data class AgentMessage(
     val fileDiff: FileDiff? = null, // Optional file diff for code changes
     val pendingToolCall: PendingToolCall? = null, // Optional pending tool call requiring approval
     val viewed: Boolean = false // Whether the message has been viewed (for file diff cards)
-)
+) {
+    // Parse message text to extract code blocks
+    val parsedContent: MessageContent by lazy {
+        parseMessageContent(text)
+    }
+}
 
 data class PendingToolCall(
     val functionCall: com.qali.aterm.agent.core.FunctionCall,
     val requiresApproval: Boolean = false,
     val reason: String = ""
 )
+
+/**
+ * Parse message text to extract code blocks and text parts
+ */
+fun parseMessageContent(text: String): MessageContent {
+    val codeBlockPattern = Regex("""```(\w+)?\s*\n?(.*?)\n?```""", RegexOption.DOT_MATCHES_ALL)
+    val textParts = mutableListOf<String>()
+    val codeBlocks = mutableListOf<CodeBlock>()
+    var lastIndex = 0
+    
+    codeBlockPattern.findAll(text).forEach { match ->
+        // Add text before code block
+        if (match.range.first > lastIndex) {
+            val textPart = text.substring(lastIndex, match.range.first).trim()
+            if (textPart.isNotEmpty()) {
+                textParts.add(textPart)
+            }
+        }
+        
+        // Extract code block
+        val language = match.groupValues[1].takeIf { it.isNotEmpty() }
+        val code = match.groupValues[2].trim()
+        codeBlocks.add(CodeBlock(language = language, code = code))
+        
+        lastIndex = match.range.last + 1
+    }
+    
+    // Add remaining text after last code block
+    if (lastIndex < text.length) {
+        val textPart = text.substring(lastIndex).trim()
+        if (textPart.isNotEmpty()) {
+            textParts.add(textPart)
+        }
+    }
+    
+    // If no code blocks found, return entire text as single part
+    if (codeBlocks.isEmpty()) {
+        textParts.add(text)
+    }
+    
+    return MessageContent(textParts = textParts, codeBlocks = codeBlocks)
+}
 
 fun formatTimestamp(timestamp: Long): String {
     val time = java.util.Date(timestamp)
@@ -991,69 +1048,190 @@ fun CodeDiffCard(
     }
 }
 
+/**
+ * Styled code block card component
+ */
 @Composable
-fun MessageBubble(message: AgentMessage) {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = if (message.isUser) Arrangement.End else Arrangement.Start
+fun CodeBlockCard(
+    codeBlock: CodeBlock,
+    modifier: Modifier = Modifier,
+    isUser: Boolean = false
+) {
+    Card(
+        modifier = modifier
+            .widthIn(max = 320.dp)
+            .padding(vertical = 4.dp),
+        shape = RoundedCornerShape(12.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = if (isUser)
+                MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.8f)
+            else
+                MaterialTheme.colorScheme.surfaceContainerHigh
+        ),
+        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
     ) {
-        if (!message.isUser) {
-            Icon(
-                imageVector = Icons.Default.Star,
-                contentDescription = null,
-                modifier = Modifier
-                    .size(32.dp)
-                    .padding(end = 8.dp),
-                tint = MaterialTheme.colorScheme.primary
-            )
-        }
-        
-        Card(
-            modifier = Modifier
-                .widthIn(max = 280.dp)
-                .padding(vertical = 4.dp),
-            shape = RoundedCornerShape(16.dp),
-            colors = CardDefaults.cardColors(
-                containerColor = if (message.isUser) 
-                    MaterialTheme.colorScheme.primaryContainer 
-                else 
-                    MaterialTheme.colorScheme.surfaceContainerHighest
-            )
+        Column(
+            modifier = Modifier.padding(12.dp)
         ) {
-            Column(
-                modifier = Modifier.padding(12.dp)
-            ) {
-                Text(
-                    text = message.text,
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = if (message.isUser) 
-                        MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.7f)
-                    else {
-                        MaterialTheme.colorScheme.onSurfaceVariant
-                    }
+            // Language label if present
+            if (codeBlock.language != null) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(bottom = 8.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = codeBlock.language,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.primary,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+                Divider(
+                    modifier = Modifier.padding(bottom = 8.dp),
+                    thickness = 1.dp,
+                    color = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f)
                 )
-                Spacer(modifier = Modifier.height(4.dp))
+            }
+            
+            // Code content
+            SelectionContainer {
                 Text(
-                    text = formatTimestamp(message.timestamp),
+                    text = codeBlock.code,
                     style = MaterialTheme.typography.bodySmall,
-                    color = if (message.isUser) 
-                        MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.7f)
-                    else {
-                        MaterialTheme.colorScheme.onSurfaceVariant
-                    },
-                    fontSize = 10.sp
+                    fontFamily = FontFamily.Monospace,
+                    color = if (isUser)
+                        MaterialTheme.colorScheme.onPrimaryContainer
+                    else
+                        MaterialTheme.colorScheme.onSurface,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .verticalScroll(rememberScrollState())
                 )
             }
         }
-        
-        if (message.isUser) {
-            Spacer(modifier = Modifier.width(8.dp))
-            Icon(
-                imageVector = Icons.Default.Person,
-                contentDescription = null,
-                modifier = Modifier.size(32.dp),
-                tint = MaterialTheme.colorScheme.primary
-            )
+    }
+}
+
+@Composable
+fun MessageBubble(message: AgentMessage) {
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalAlignment = if (message.isUser) Alignment.End else Alignment.Start
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = if (message.isUser) Arrangement.End else Arrangement.Start
+        ) {
+            if (!message.isUser) {
+                Icon(
+                    imageVector = Icons.Default.Star,
+                    contentDescription = null,
+                    modifier = Modifier
+                        .size(32.dp)
+                        .padding(end = 8.dp),
+                    tint = MaterialTheme.colorScheme.primary
+                )
+            }
+            
+            // Display text parts and code blocks
+            Column(
+                modifier = Modifier.widthIn(max = 320.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                // Display text parts and code blocks alternately
+                val content = message.parsedContent
+                var codeBlockIndex = 0
+                
+                content.textParts.forEachIndexed { index, textPart ->
+                    // Display text part
+                    if (textPart.isNotEmpty()) {
+                        Card(
+                            modifier = Modifier
+                                .widthIn(max = 280.dp)
+                                .padding(vertical = 4.dp),
+                            shape = RoundedCornerShape(16.dp),
+                            colors = CardDefaults.cardColors(
+                                containerColor = if (message.isUser) 
+                                    MaterialTheme.colorScheme.primaryContainer 
+                                else 
+                                    MaterialTheme.colorScheme.surfaceContainerHighest
+                            )
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(12.dp)
+                            ) {
+                                Text(
+                                    text = textPart,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = if (message.isUser) 
+                                        MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.7f)
+                                    else {
+                                        MaterialTheme.colorScheme.onSurfaceVariant
+                                    }
+                                )
+                                if (index == content.textParts.size - 1 && content.codeBlocks.isEmpty()) {
+                                    Spacer(modifier = Modifier.height(4.dp))
+                                    Text(
+                                        text = formatTimestamp(message.timestamp),
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = if (message.isUser) 
+                                            MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.7f)
+                                        else {
+                                            MaterialTheme.colorScheme.onSurfaceVariant
+                                        },
+                                        fontSize = 10.sp
+                                    )
+                                }
+                            }
+                        }
+                    }
+                    
+                    // Display code block after this text part (if available)
+                    if (codeBlockIndex < content.codeBlocks.size) {
+                        CodeBlockCard(
+                            codeBlock = content.codeBlocks[codeBlockIndex],
+                            isUser = message.isUser
+                        )
+                        codeBlockIndex++
+                    }
+                }
+                
+                // Display any remaining code blocks
+                while (codeBlockIndex < content.codeBlocks.size) {
+                    CodeBlockCard(
+                        codeBlock = content.codeBlocks[codeBlockIndex],
+                        isUser = message.isUser
+                    )
+                    codeBlockIndex++
+                }
+                
+                // Show timestamp if no code blocks
+                if (content.codeBlocks.isEmpty() && content.textParts.isNotEmpty()) {
+                    // Timestamp already shown in last text part
+                } else if (content.codeBlocks.isNotEmpty()) {
+                    // Show timestamp below code blocks
+                    Text(
+                        text = formatTimestamp(message.timestamp),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontSize = 10.sp,
+                        modifier = Modifier.padding(start = if (message.isUser) 0.dp else 40.dp, top = 4.dp)
+                    )
+                }
+            }
+            
+            if (message.isUser) {
+                Spacer(modifier = Modifier.width(8.dp))
+                Icon(
+                    imageVector = Icons.Default.Person,
+                    contentDescription = null,
+                    modifier = Modifier.size(32.dp),
+                    tint = MaterialTheme.colorScheme.primary
+                )
+            }
         }
     }
 }
