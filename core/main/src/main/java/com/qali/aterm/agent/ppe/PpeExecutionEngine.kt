@@ -424,6 +424,11 @@ class PpeExecutionEngine(
                                         val toolExecutionTime = System.currentTimeMillis() - toolStartTime
                                         Log.d("PpeExecutionEngine", "Tool #$toolExecutionCount (${call.name}) completed (time: ${toolExecutionTime}ms, error: ${result.error != null})")
                                         
+                                        // Display formatted file change notification for write_file tool (cursor-cli style)
+                                        if (call.name == "write_file" && result.error == null && result.returnDisplay != null) {
+                                            onChunk("\n${result.returnDisplay}\n")
+                                        }
+                                        
                                         // Record tool call in state tracker
                                         ExecutionStateTracker.recordToolCall(
                                             operationId = operationId,
@@ -1905,16 +1910,6 @@ class PpeExecutionEngine(
         
         // Notify callback
         onToolResult(functionCall.name, functionCall.args)
-        
-        // Display formatted file change notification for write_file tool (cursor-cli style)
-        if (functionCall.name == "write_file" && result.error == null && result.returnDisplay != null) {
-            val filePath = functionCall.args["file_path"] as? String ?: ""
-            val file = File(workspaceRoot, filePath)
-            val isNewFile = !file.exists() || file.length() == 0L
-            
-            // The notification is already formatted in WriteFileTool, just display it
-            onChunk("\n${result.returnDisplay}\n")
-        }
         
         return result
     }
