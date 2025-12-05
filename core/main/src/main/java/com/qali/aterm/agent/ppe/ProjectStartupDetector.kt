@@ -40,13 +40,39 @@ object ProjectStartupDetector {
     fun detectNewProject(userMessage: String, workspaceRoot: String): ProjectDetection {
         val message = userMessage.lowercase()
         
+        // EXCLUDE error/debug indicators first - these should NOT be treated as new projects
+        val errorDebugIndicators = listOf(
+            "error", "bug", "fix", "debug", "broken", "not working",
+            "doesn't work", "doesn't start", "won't start", "wont start",
+            "not starting", "failed", "failure", "exception", "crash",
+            "issue", "problem", "solve", "troubleshoot"
+        )
+        val hasErrorDebugIndicator = errorDebugIndicators.any { message.contains(it) }
+        
+        // If message contains error/debug indicators, it's NOT a new project
+        if (hasErrorDebugIndicator) {
+            Log.d("ProjectStartupDetector", "Excluding from new project detection - contains error/debug indicators")
+            return ProjectDetection(
+                isNewProject = false,
+                projectType = null,
+                confidence = 0.0,
+                suggestedTemplate = null,
+                detectedLanguage = null
+            )
+        }
+        
         // Check for new project keywords (enhanced list)
+        // Exclude "start" alone - require context like "new project" or "create"
         val newProjectKeywords = listOf(
-            "make me", "create", "new project", "build", "start", "initialize",
+            "make me", "create", "new project", "build", "initialize",
             "set up", "setup", "generate", "scaffold", "scaffolding", "new app",
             "create a", "build a", "make a", "develop", "develop a"
         )
-        val hasNewProjectKeyword = newProjectKeywords.any { message.contains(it) }
+        // Only match "start" if it's clearly about starting a NEW project
+        val hasStartKeyword = message.contains("start") && 
+            (message.contains("new") || message.contains("create") || 
+             message.contains("project") || message.contains("app"))
+        val hasNewProjectKeyword = newProjectKeywords.any { message.contains(it) } || hasStartKeyword
         
         // Auto-create .atermignore for new projects
         com.qali.aterm.agent.utils.AtermIgnoreManager.createDefaultAtermIgnore(workspaceRoot)

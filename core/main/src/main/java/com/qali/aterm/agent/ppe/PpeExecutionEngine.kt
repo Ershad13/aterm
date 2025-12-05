@@ -219,7 +219,37 @@ class PpeExecutionEngine(
                             ?: processedContent).takeIf { it.isNotEmpty() } ?: processedContent
                         
                         if (aiCallCount == 1) {
+                            // PRIORITY: Check for upgrade/debug flow FIRST (before new project detection)
+                            // This prevents false positives where error messages are misclassified as new projects
+                            if (isUpgradeOrDebugRequest(userMessage, workspaceRoot)) {
+                                Log.d("PpeExecutionEngine", "Detected upgrade/debug request - using upgrade/debug flow")
+                                val upgradeResult = executeUpgradeDebugFlow(
+                                    userMessage,
+                                    chatHistory + turnMessages,
+                                    script,
+                                    onChunk,
+                                    onToolCall,
+                                    onToolResult
+                                )
+                                
+                                // Store result
+                                currentVariables["LatestResult"] = upgradeResult.finalResult
+                                currentVariables["RESPONSE"] = upgradeResult.finalResult
+                                
+                                // Add to chat history
+                                turnMessages.add(
+                                    Content(
+                                        role = "model",
+                                        parts = listOf(Part.TextPart(text = upgradeResult.finalResult))
+                                    )
+                                )
+                                
+                                // Continue with normal flow if there are more turns
+                                continue
+                            }
+                            
                             // Check for new project startup (enhanced detection)
+                            // Only check if NOT a debug/error request
                             val projectDetection = ProjectStartupDetector.detectNewProject(userMessage, workspaceRoot)
                             if (projectDetection.isNewProject) {
                                 Log.d("PpeExecutionEngine", "Detected new project startup - type: ${projectDetection.projectType}, confidence: ${projectDetection.confidence}")
@@ -251,34 +281,6 @@ class PpeExecutionEngine(
                                     Content(
                                         role = "model",
                                         parts = listOf(Part.TextPart(text = twoPhaseResult.finalResult))
-                                    )
-                                )
-                                
-                                // Continue with normal flow if there are more turns
-                                continue
-                            }
-                            
-                            // Check for upgrade/debug flow (existing project)
-                            if (isUpgradeOrDebugRequest(userMessage, workspaceRoot)) {
-                                Log.d("PpeExecutionEngine", "Detected upgrade/debug request - using upgrade/debug flow")
-                                val upgradeResult = executeUpgradeDebugFlow(
-                                    userMessage,
-                                    chatHistory + turnMessages,
-                                    script,
-                                    onChunk,
-                                    onToolCall,
-                                    onToolResult
-                                )
-                                
-                                // Store result
-                                currentVariables["LatestResult"] = upgradeResult.finalResult
-                                currentVariables["RESPONSE"] = upgradeResult.finalResult
-                                
-                                // Add to chat history
-                                turnMessages.add(
-                                    Content(
-                                        role = "model",
-                                        parts = listOf(Part.TextPart(text = upgradeResult.finalResult))
                                     )
                                 )
                                 
@@ -2255,12 +2257,14 @@ class PpeExecutionEngine(
     private fun isUpgradeOrDebugRequest(userMessage: String, workspaceRoot: String): Boolean {
         val message = userMessage.lowercase()
         
-        // Check for upgrade/debug keywords
+        // Check for upgrade/debug keywords (enhanced with more patterns)
         val upgradeDebugKeywords = listOf(
             "fix", "debug", "upgrade", "update", "improve", "refactor",
             "modify", "change", "edit", "add feature", "enhance",
             "error", "bug", "issue", "problem", "broken", "not working",
-            "doesn't work", "failed", "failure", "exception", "crash"
+            "doesn't work", "doesn't start", "won't start", "wont start",
+            "not starting", "failed", "failure", "exception", "crash",
+            "solve", "troubleshoot", "repair", "resolve"
         )
         val hasUpgradeKeyword = upgradeDebugKeywords.any { message.contains(it) }
         

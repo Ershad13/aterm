@@ -119,25 +119,45 @@ object ActionFlowPlanner {
         // Check for multiple flows
         val flowCount = mutableSetOf<ActionFlowType>()
         
-        // Startup indicators
-        if (message.contains("create") || message.contains("new project") || 
-            message.contains("initialize") || message.contains("setup") ||
-            message.contains("start") && (message.contains("project") || message.contains("app"))) {
+        // Debug indicators (check FIRST to prioritize error detection)
+        // These patterns indicate something is broken or not working
+        val debugPatterns = listOf(
+            "error", "exception", "failed", "failure", "crash", "bug",
+            "doesn't work", "doesn't start", "won't start", "wont start",
+            "not working", "not starting", "broken", "undefined",
+            "null pointer", "cannot", "unable", "invalid", "missing",
+            "compile error", "runtime error", "syntax error", "type error",
+            "fix", "debug", "solve", "issue", "problem", "troubleshoot"
+        )
+        
+        if (debugPatterns.any { message.contains(it) }) {
+            flowCount.add(ActionFlowType.DEBUG)
+        }
+        
+        // Startup indicators (more specific to avoid false positives)
+        // Only match if it's clearly about creating/initializing a NEW project
+        val startupPatterns = listOf(
+            "create", "new project", "initialize", "setup", "scaffold",
+            "generate project", "make a", "build a", "develop a"
+        )
+        
+        // Check for "start" but only if it's about starting a NEW project/app
+        // NOT if it's about something that "won't start" (already handled by debug)
+        val isStartupStart = message.contains("start") && 
+            (message.contains("project") || message.contains("app") || 
+             message.contains("new") || message.contains("create")) &&
+            !message.contains("won't") && !message.contains("wont") &&
+            !message.contains("doesn't") && !message.contains("not")
+        
+        if (startupPatterns.any { message.contains(it) } || isStartupStart) {
             flowCount.add(ActionFlowType.STARTUP)
         }
         
         // Upgrade indicators
         if (message.contains("upgrade") || message.contains("enhance") || 
             message.contains("add feature") || message.contains("improve") ||
-            message.contains("update") && !message.contains("update file")) {
+            (message.contains("update") && !message.contains("update file"))) {
             flowCount.add(ActionFlowType.UPGRADE)
-        }
-        
-        // Debug indicators
-        if (message.contains("error") || message.contains("bug") || 
-            message.contains("fix") || message.contains("debug") ||
-            message.contains("broken") || message.contains("not working")) {
-            flowCount.add(ActionFlowType.DEBUG)
         }
         
         // Custom indicators
@@ -149,9 +169,10 @@ object ActionFlowPlanner {
         
         return when {
             flowCount.size > 1 -> ActionFlowType.MULTIPLE
+            // Prioritize DEBUG over STARTUP when both could match
+            flowCount.contains(ActionFlowType.DEBUG) -> ActionFlowType.DEBUG
             flowCount.contains(ActionFlowType.STARTUP) -> ActionFlowType.STARTUP
             flowCount.contains(ActionFlowType.UPGRADE) -> ActionFlowType.UPGRADE
-            flowCount.contains(ActionFlowType.DEBUG) -> ActionFlowType.DEBUG
             flowCount.contains(ActionFlowType.CUSTOM) -> ActionFlowType.CUSTOM
             else -> ActionFlowType.CUSTOM // Default to custom
         }
