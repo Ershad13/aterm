@@ -291,49 +291,29 @@ object AgentMemory {
     
     /**
      * Parse memory from chat history
-     * Accepts any list of messages with text and timestamp properties
+     * Accepts messages with text and timestamp properties
      */
     fun parseMemoryFromHistory(
-        messages: List<*>,
+        messages: List<Any>,
         workspaceRoot: String
     ): MemorySummary? {
         if (messages.isEmpty()) {
             return null
         }
         
-        // Extract memory-related messages using reflection
-        val memoryEntries = messages.filter { message ->
+        // Extract memory-related messages
+        val memoryEntries = messages.mapNotNull { message ->
             try {
-                val textField = message?.javaClass?.getMethod("getText") ?: message?.javaClass?.getDeclaredField("text")
-                val text = when {
-                    textField is java.lang.reflect.Method -> textField.invoke(message) as? String ?: ""
-                    textField is java.lang.reflect.Field -> {
-                        textField.isAccessible = true
-                        textField.get(message) as? String ?: ""
-                    }
-                    else -> ""
-                }
+                // Try to access text and timestamp using reflection
+                val textMethod = message.javaClass.methods.find { it.name == "getText" || it.name == "text" }
+                val timestampMethod = message.javaClass.methods.find { it.name == "getTimestamp" || it.name == "timestamp" }
                 
-                text.contains("remember", ignoreCase = true) ||
-                text.contains("memory", ignoreCase = true) ||
-                text.contains("note", ignoreCase = true)
-            } catch (e: Exception) {
-                false
-            }
-        }
-        
-        if (memoryEntries.isEmpty()) {
-            return null
-        }
-        
-        val entries = memoryEntries.mapIndexedNotNull { index, message ->
-            try {
-                val textField = message?.javaClass?.getMethod("getText") ?: message?.javaClass?.getDeclaredField("text")
-                val timestampField = message?.javaClass?.getMethod("getTimestamp") ?: message?.javaClass?.getDeclaredField("timestamp")
+                val textField = message.javaClass.declaredFields.find { it.name == "text" }
+                val timestampField = message.javaClass.declaredFields.find { it.name == "timestamp" }
                 
                 val text = when {
-                    textField is java.lang.reflect.Method -> textField.invoke(message) as? String ?: ""
-                    textField is java.lang.reflect.Field -> {
+                    textMethod != null -> textMethod.invoke(message) as? String ?: ""
+                    textField != null -> {
                         textField.isAccessible = true
                         textField.get(message) as? String ?: ""
                     }
@@ -341,28 +321,38 @@ object AgentMemory {
                 }
                 
                 val timestamp = when {
-                    timestampField is java.lang.reflect.Method -> (timestampField.invoke(message) as? Number)?.toLong() ?: System.currentTimeMillis()
-                    timestampField is java.lang.reflect.Field -> {
+                    timestampMethod != null -> (timestampMethod.invoke(message) as? Number)?.toLong() ?: System.currentTimeMillis()
+                    timestampField != null -> {
                         timestampField.isAccessible = true
                         (timestampField.get(message) as? Number)?.toLong() ?: System.currentTimeMillis()
                     }
                     else -> System.currentTimeMillis()
                 }
                 
-                MemoryEntry(
-                    id = "hist_${timestamp}_$index",
-                    timestamp = timestamp,
-                    category = "chat_history",
-                    content = text,
-                    tags = listOf("history")
-                )
+                if (text.contains("remember", ignoreCase = true) ||
+                    text.contains("memory", ignoreCase = true) ||
+                    text.contains("note", ignoreCase = true)) {
+                    Pair(text, timestamp)
+                } else {
+                    null
+                }
             } catch (e: Exception) {
                 null
             }
         }
         
-        if (entries.isEmpty()) {
+        if (memoryEntries.isEmpty()) {
             return null
+        }
+        
+        val entries = memoryEntries.mapIndexed { index, (text, timestamp) ->
+            MemoryEntry(
+                id = "hist_${timestamp}_$index",
+                timestamp = timestamp,
+                category = "chat_history",
+                content = text,
+                tags = listOf("history")
+            )
         }
         
         return MemorySummary(entries, "Memory from chat history", entries.sumOf { it.content.lines().size + 2 })
