@@ -35,15 +35,19 @@ object UpgradePlanner {
             return null
         }
         
-        // Get current codebase structure
+        // Get current codebase structure (respecting .gitignore/.atermignore)
         val fileStructure = getFileStructure(workspaceRoot)
         val codebaseSummary = analyzeCodebase(workspaceRoot)
+        
+        // Load blueprint or .analysis file if available (for metadata context)
+        val projectMetadata = loadProjectMetadata(workspaceRoot)
         
         return try {
             generatePlanWithAI(
                 userMessage = userMessage,
                 fileStructure = fileStructure,
                 codebaseSummary = codebaseSummary,
+                projectMetadata = projectMetadata,
                 apiClient = apiClient,
                 chatHistory = chatHistory
             )
@@ -60,21 +64,37 @@ object UpgradePlanner {
         userMessage: String,
         fileStructure: String,
         codebaseSummary: String,
+        projectMetadata: String?,
         apiClient: PpeApiClient,
         chatHistory: List<Content>
     ): UpgradePlan {
-        val prompt = """
-You are an expert software architect. Analyze the user's upgrade request and create a comprehensive upgrade plan.
-
-User Upgrade Request: "$userMessage"
-
-Current Codebase Structure:
-$fileStructure
-
-Codebase Summary:
-$codebaseSummary
-
-Create a detailed upgrade plan that includes:
+        val prompt = buildString {
+            appendLine("You are an expert software architect. Analyze the user's upgrade request and create a comprehensive upgrade plan.")
+            appendLine()
+            appendLine("User Upgrade Request: \"$userMessage\"")
+            appendLine()
+            appendLine("## Current Project Tree (excluding .gitignore files)")
+            appendLine(fileStructure)
+            appendLine()
+            appendLine("## Codebase Summary")
+            appendLine(codebaseSummary)
+            
+            // Include project metadata if available (from blueprint or .analysis file)
+            if (projectMetadata != null) {
+                appendLine()
+                appendLine("## Project Metadata & Starting Point")
+                appendLine("The following metadata comes from either a blueprint or .analysis file.")
+                appendLine("Use this to understand the project's current structure, file purposes, functions, classes, and dependencies.")
+                appendLine("This helps you identify the starting point for the upgrade.")
+                appendLine()
+                appendLine(projectMetadata)
+            }
+            
+            appendLine()
+            appendLine("Create a detailed upgrade plan that includes:")
+        }
+        
+        val fullPrompt = prompt + """
 
 1. **Summary**: Brief overview of what the upgrade will accomplish
 2. **Files to Modify**: List of existing files that need changes
@@ -138,6 +158,7 @@ IMPORTANT:
 - Be specific about file paths and changes
 - Order execution steps logically (dependencies first)
 - Consider all impacts of the upgrade
+${if (projectMetadata != null) "- Use the project metadata to understand existing file structures, functions, and dependencies\n- Reference existing function/class names from metadata when planning changes" else ""}
 
 JSON Response:
 """.trimIndent()
@@ -360,7 +381,8 @@ JSON Response:
     }
     
     /**
-     * Get file structure summary
+     * Get file structure summary (respecting .gitignore/.atermignore)
+     * Includes file metadata: size, type, and basic info
      */
     private fun getFileStructure(workspaceRoot: String): String {
         val workspaceDir = File(workspaceRoot)
@@ -370,13 +392,151 @@ JSON Response:
         
         val fileList = mutableListOf<String>()
         workspaceDir.walkTopDown().forEach { file ->
+            // Respect .atermignore (which includes .gitignore patterns)
             if (file.isFile && !AtermIgnoreManager.shouldIgnoreFile(file, workspaceRoot)) {
                 val relativePath = file.relativeTo(workspaceDir).path.replace("\\", "/")
-                fileList.add(relativePath)
+                val fileSize = file.length()
+                val fileExtension = file.extension
+                val fileType = when {
+                    fileExtension.isEmpty() -> "file"
+                    fileExtension in listOf("js", "ts", "jsx", "tsx", "py", "java", "kt", "go", "rs", "cpp", "c") -> "code"
+                    fileExtension in listOf("json", "yaml", "yml", "toml", "xml") -> "config"
+                    fileExtension in listOf("md", "txt", "rst") -> "documentation"
+                    fileExtension in listOf("css", "scss", "sass", "less") -> "style"
+                    fileExtension in listOf("html", "htm") -> "template"
+                    else -> "other"
+                }
+                
+                // Format: path [type, size]
+                val sizeStr = when {
+                    fileSize < 1024 -> "${fileSize}B"
+                    fileSize < 1024 * 1024 -> "${fileSize / 1024}KB"
+                    else -> "${fileSize / (1024 * 1024)}MB"
+                }
+                
+                fileList.add("$relativePath [$fileType, $sizeStr]")
             }
         }
         
         return fileList.sorted().joinToString("\n")
+    }
+    
+    /**
+     * Load project metadata from blueprint or .analysis file
+     * Returns formatted string with project context for AI
+     */
+    private fun loadProjectMetadata(workspaceRoot: String): String? {
+        val workspaceDir = File(workspaceRoot)
+        
+        // Try to load .analysis file first (preferred - more detailed)
+        val analysisFile = File(workspaceDir, ".analysis")
+        if (analysisFile.exists() && analysisFile.isFile) {
+            try {
+                val analysisJson = analysisFile.readText()
+                val json = JSONObject(analysisJson)
+                
+                return buildString {
+                    appendLine("### Project Analysis File (.analysis)")
+                    appendLine("Project Type: ${json.optString("projectType", "unknown")}")
+                    
+                    // Structure
+                    json.optJSONObject("structure")?.let { structure ->
+                        appendLine("\n**Structure:**")
+                        appendLine("- Root: ${structure.optString("root", "")}")
+                        structure.optJSONArray("entryPoints")?.let { entryPoints ->
+                            if (entryPoints.length() > 0) {
+                                appendLine("- Entry Points:")
+                                for (i in 0 until entryPoints.length()) {
+                                    appendLine("  - ${entryPoints.getString(i)}")
+                                }
+                            }
+                        }
+                    }
+                    
+                    // Dependencies
+                    json.optJSONObject("dependencies")?.let { deps ->
+                        appendLine("\n**Dependencies:**")
+                        deps.optJSONArray("runtime")?.let { runtime ->
+                            if (runtime.length() > 0) {
+                                appendLine("- Runtime: ${(0 until runtime.length()).joinToString(", ") { runtime.getString(it) }}")
+                            }
+                        }
+                    }
+                    
+                    // Files with metadata
+                    json.optJSONArray("files")?.let { filesArray ->
+                        if (filesArray.length() > 0) {
+                            appendLine("\n**Files with Metadata:**")
+                            for (i in 0 until filesArray.length().coerceAtMost(50)) { // Limit to 50 files
+                                val fileObj = filesArray.getJSONObject(i)
+                                appendLine("- ${fileObj.optString("path", "")} [${fileObj.optString("type", "unknown")}]")
+                                
+                                // Functions
+                                fileObj.optJSONArray("functions")?.let { funcs ->
+                                    if (funcs.length() > 0) {
+                                        appendLine("  Functions: ${(0 until funcs.length()).joinToString(", ") { funcs.getString(it) }}")
+                                    }
+                                }
+                                
+                                // Classes
+                                fileObj.optJSONArray("classes")?.let { classes ->
+                                    if (classes.length() > 0) {
+                                        appendLine("  Classes: ${(0 until classes.length()).joinToString(", ") { classes.getString(it) }}")
+                                    }
+                                }
+                                
+                                // Imports
+                                fileObj.optJSONArray("imports")?.let { imports ->
+                                    if (imports.length() > 0) {
+                                        appendLine("  Imports: ${(0 until imports.length().coerceAtMost(5)).joinToString(", ") { imports.getString(it) }}${if (imports.length() > 5) "..." else ""}")
+                                    }
+                                }
+                            }
+                            if (filesArray.length() > 50) {
+                                appendLine("  ... and ${filesArray.length() - 50} more files")
+                            }
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                Log.w("UpgradePlanner", "Failed to parse .analysis file: ${e.message}", e)
+            }
+        }
+        
+        // Try to load blueprint file (fallback)
+        val blueprintFile = File(workspaceDir, "blueprint.json")
+        if (blueprintFile.exists() && blueprintFile.isFile) {
+            try {
+                val blueprintJson = blueprintFile.readText()
+                val json = JSONObject(blueprintJson)
+                
+                return buildString {
+                    appendLine("### Project Blueprint File (blueprint.json)")
+                    appendLine("Project Type: ${json.optString("projectType", "unknown")}")
+                    
+                    // Files from blueprint
+                    json.optJSONArray("files")?.let { filesArray ->
+                        if (filesArray.length() > 0) {
+                            appendLine("\n**Files from Blueprint:**")
+                            for (i in 0 until filesArray.length().coerceAtMost(50)) {
+                                val fileObj = filesArray.getJSONObject(i)
+                                appendLine("- ${fileObj.optString("path", "")}")
+                                fileObj.optString("description", null)?.let { desc ->
+                                    appendLine("  Description: $desc")
+                                }
+                            }
+                            if (filesArray.length() > 50) {
+                                appendLine("  ... and ${filesArray.length() - 50} more files")
+                            }
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                Log.w("UpgradePlanner", "Failed to parse blueprint.json: ${e.message}", e)
+            }
+        }
+        
+        return null
     }
     
     /**
