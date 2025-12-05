@@ -89,7 +89,7 @@ object ActionFlowPlanner {
     /**
      * Plan action flow based on user message and system info
      */
-    fun planActionFlow(
+    suspend fun planActionFlow(
         userMessage: String,
         systemInfo: SystemInfo,
         apiClient: PpeApiClient?,
@@ -160,7 +160,7 @@ object ActionFlowPlanner {
     /**
      * Plan with AI
      */
-    private fun planWithAI(
+    private suspend fun planWithAI(
         userMessage: String,
         systemInfo: SystemInfo,
         flowType: ActionFlowType,
@@ -219,10 +219,11 @@ object ActionFlowPlanner {
                     )
                 ),
                 tools = emptyList(),
-                streaming = false
+                disableTools = true
             )
             
-            val jsonText = extractJsonFromResponse(response.text)
+            val responseText = response.getOrNull()?.text ?: ""
+            val jsonText = extractJsonFromResponse(responseText)
             parsePlanFromJson(jsonText)
         } catch (e: Exception) {
             Log.w("ActionFlowPlanner", "AI planning failed: ${e.message}", e)

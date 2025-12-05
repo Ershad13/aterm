@@ -288,4 +288,46 @@ object AgentMemory {
             }
         }
     }
+    
+    /**
+     * Parse memory from chat history
+     */
+    fun parseMemoryFromHistory(
+        messages: List<com.qali.aterm.ui.screens.agent.AgentMessage>,
+        workspaceRoot: String
+    ): MemorySummary? {
+        // Extract memory-related messages
+        val memoryEntries = messages.filter { message ->
+            message.text.contains("remember", ignoreCase = true) ||
+            message.text.contains("memory", ignoreCase = true) ||
+            message.text.contains("note", ignoreCase = true)
+        }
+        
+        if (memoryEntries.isEmpty()) {
+            return null
+        }
+        
+        val entries = memoryEntries.mapIndexed { index, message ->
+            MemoryEntry(
+                id = "hist_${message.timestamp}_$index",
+                timestamp = message.timestamp,
+                category = "chat_history",
+                content = message.text,
+                tags = listOf("history")
+            )
+        }
+        
+        return MemorySummary(entries, "Memory from chat history", entries.sumOf { it.content.lines().size + 2 })
+    }
+    
+    /**
+     * Format memory for prompt
+     */
+    fun formatMemoryForPrompt(memory: MemorySummary?): String? {
+        if (memory == null || memory.entries.isEmpty()) {
+            return null
+        }
+        
+        return getMemoryForContext("", null).take(500) // Limit to 500 chars
+    }
 }

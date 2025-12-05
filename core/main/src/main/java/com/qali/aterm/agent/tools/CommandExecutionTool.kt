@@ -77,7 +77,7 @@ class CommandExecutionToolInvocation(
                             returnDisplay = "Command skipped",
                             error = ToolError(
                                 message = "Command skipped by user",
-                                type = ToolErrorType.CANCELLED
+                                type = ToolErrorType.EXECUTION_ERROR
                             )
                         )
                     }
@@ -122,12 +122,9 @@ class CommandExecutionToolInvocation(
         // If analyze_output is true, return result with flag for AI analysis
         if (params.analyze_output && result.llmContent.isNotEmpty()) {
             return ToolResult(
-                llmContent = result.llmContent + "\n\n[ANALYZE_OUTPUT:true]",
+                llmContent = result.llmContent + "\n\n[ANALYZE_OUTPUT:true]\n[COMMAND:${params.command}]",
                 returnDisplay = result.returnDisplay,
-                metadata = (result.metadata ?: emptyMap()) + mapOf(
-                    "analyze_output" to true,
-                    "command" to params.command
-                )
+                error = result.error
             )
         }
         
@@ -187,7 +184,8 @@ class CommandExecutionTool(
     
     override fun createInvocation(
         params: CommandExecutionToolParams,
-        workspaceRoot: String
+        toolName: String?,
+        toolDisplayName: String?
     ): ToolInvocation<CommandExecutionToolParams, ToolResult> {
         return CommandExecutionToolInvocation(
             toolParams = params,
