@@ -4,6 +4,7 @@ import com.qali.aterm.agent.core.*
 import com.qali.aterm.agent.ppe.models.*
 import com.qali.aterm.agent.tools.ToolRegistry
 import com.qali.aterm.agent.utils.CodeDependencyAnalyzer
+import com.qali.aterm.agent.utils.AtermIgnoreManager
 import com.qali.aterm.agent.debug.DebugLogger
 import com.qali.aterm.agent.debug.ExecutionStateTracker
 import com.qali.aterm.agent.debug.BreakpointManager
