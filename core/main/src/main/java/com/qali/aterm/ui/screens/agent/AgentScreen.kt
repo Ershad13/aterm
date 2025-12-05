@@ -670,15 +670,14 @@ fun FileChangesSummaryCard(
         messages.mapNotNull { it.fileDiff }
     }
     
-    val newFiles = remember(fileDiffs) {
-        fileDiffs.filter { it.isNewFile }.map { it.filePath }.distinct()
+    // Combine new and changed files into single list (new files first)
+    val allFiles = remember(fileDiffs) {
+        val newFiles = fileDiffs.filter { it.isNewFile }.map { it.filePath }.distinct()
+        val changedFiles = fileDiffs.filter { !it.isNewFile }.map { it.filePath }.distinct()
+        newFiles + changedFiles
     }
     
-    val changedFiles = remember(fileDiffs) {
-        fileDiffs.filter { !it.isNewFile }.map { it.filePath }.distinct()
-    }
-    
-    if (newFiles.isEmpty() && changedFiles.isEmpty()) {
+    if (allFiles.isEmpty()) {
         return
     }
     
@@ -719,49 +718,40 @@ fun FileChangesSummaryCard(
             
             Divider()
             
-            // New files section
-            if (newFiles.isNotEmpty()) {
-                Column(
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
+            // All files (new and changed) in single list
+            Column(
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Text(
+                    text = "Files (${allFiles.size})",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+                allFiles.forEach { filePath ->
+                    val isNewFile = fileDiffs.any { it.filePath == filePath && it.isNewFile }
                     Row(
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(
+                                if (isNewFile) 
+                                    Color(0xFF4CAF50).copy(alpha = 0.1f)
+                                else
+                                    MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.3f),
+                                shape = RoundedCornerShape(6.dp)
+                            )
+                            .padding(10.dp),
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Icon(
-                            imageVector = Icons.Outlined.Add,
+                            imageVector = if (isNewFile) Icons.Outlined.Add else Icons.Outlined.InsertDriveFile,
                             contentDescription = null,
-                            tint = Color(0xFF4CAF50),
-                            modifier = Modifier.size(18.dp)
+                            tint = if (isNewFile) Color(0xFF4CAF50) else MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(16.dp)
                         )
                         Text(
-                            text = "New Files (${newFiles.size})",
-                            style = MaterialTheme.typography.titleSmall,
-                            fontWeight = FontWeight.Bold,
-                            color = Color(0xFF4CAF50)
-                        )
-                    }
-                    newFiles.forEach { filePath ->
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .background(
-                                    Color(0xFF4CAF50).copy(alpha = 0.1f),
-                                    shape = RoundedCornerShape(6.dp)
-                                )
-                                .padding(10.dp),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Icon(
-                                imageVector = Icons.Outlined.Add,
-                                contentDescription = null,
-                                tint = Color(0xFF4CAF50),
-                                modifier = Modifier.size(16.dp)
-                            )
-                            Text(
-                                text = filePath,
+                            text = filePath,
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = MaterialTheme.colorScheme.onSurface,
                                 modifier = Modifier.weight(1f)
