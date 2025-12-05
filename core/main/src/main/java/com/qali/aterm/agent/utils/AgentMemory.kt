@@ -291,30 +291,78 @@ object AgentMemory {
     
     /**
      * Parse memory from chat history
+     * Accepts any list of messages with text and timestamp properties
      */
     fun parseMemoryFromHistory(
-        messages: List<com.qali.aterm.ui.screens.agent.AgentMessage>,
+        messages: List<*>,
         workspaceRoot: String
     ): MemorySummary? {
-        // Extract memory-related messages
+        if (messages.isEmpty()) {
+            return null
+        }
+        
+        // Extract memory-related messages using reflection
         val memoryEntries = messages.filter { message ->
-            message.text.contains("remember", ignoreCase = true) ||
-            message.text.contains("memory", ignoreCase = true) ||
-            message.text.contains("note", ignoreCase = true)
+            try {
+                val textField = message?.javaClass?.getMethod("getText") ?: message?.javaClass?.getDeclaredField("text")
+                val text = when {
+                    textField is java.lang.reflect.Method -> textField.invoke(message) as? String ?: ""
+                    textField is java.lang.reflect.Field -> {
+                        textField.isAccessible = true
+                        textField.get(message) as? String ?: ""
+                    }
+                    else -> ""
+                }
+                
+                text.contains("remember", ignoreCase = true) ||
+                text.contains("memory", ignoreCase = true) ||
+                text.contains("note", ignoreCase = true)
+            } catch (e: Exception) {
+                false
+            }
         }
         
         if (memoryEntries.isEmpty()) {
             return null
         }
         
-        val entries = memoryEntries.mapIndexed { index, message ->
-            MemoryEntry(
-                id = "hist_${message.timestamp}_$index",
-                timestamp = message.timestamp,
-                category = "chat_history",
-                content = message.text,
-                tags = listOf("history")
-            )
+        val entries = memoryEntries.mapIndexedNotNull { index, message ->
+            try {
+                val textField = message?.javaClass?.getMethod("getText") ?: message?.javaClass?.getDeclaredField("text")
+                val timestampField = message?.javaClass?.getMethod("getTimestamp") ?: message?.javaClass?.getDeclaredField("timestamp")
+                
+                val text = when {
+                    textField is java.lang.reflect.Method -> textField.invoke(message) as? String ?: ""
+                    textField is java.lang.reflect.Field -> {
+                        textField.isAccessible = true
+                        textField.get(message) as? String ?: ""
+                    }
+                    else -> ""
+                }
+                
+                val timestamp = when {
+                    timestampField is java.lang.reflect.Method -> (timestampField.invoke(message) as? Number)?.toLong() ?: System.currentTimeMillis()
+                    timestampField is java.lang.reflect.Field -> {
+                        timestampField.isAccessible = true
+                        (timestampField.get(message) as? Number)?.toLong() ?: System.currentTimeMillis()
+                    }
+                    else -> System.currentTimeMillis()
+                }
+                
+                MemoryEntry(
+                    id = "hist_${timestamp}_$index",
+                    timestamp = timestamp,
+                    category = "chat_history",
+                    content = text,
+                    tags = listOf("history")
+                )
+            } catch (e: Exception) {
+                null
+            }
+        }
+        
+        if (entries.isEmpty()) {
+            return null
         }
         
         return MemorySummary(entries, "Memory from chat history", entries.sumOf { it.content.lines().size + 2 })
