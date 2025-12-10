@@ -16,28 +16,21 @@ import org.json.JSONObject
 import java.io.IOException
 import java.util.concurrent.TimeUnit
 
-/**
- * Ollama Client for local LLM inference
- * Now supports ChatGPT Python Script API (Ollama-compatible format)
- */
 class OllamaClient(
     private val toolRegistry: ToolRegistry,
     private val workspaceRoot: String,
-    private val baseUrl: String = "http://localhost:11434", // Default Ollama port
-    private val model: String = "gptfree", // Changed default to match your script
+    private val baseUrl: String = "http://localhost:11434",
+    private val model: String = "gptfree",
     private val apiKey: String? = null
 ) {
     private val client = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
-        .readTimeout(300, TimeUnit.SECONDS) // Increased for ChatGPT responses
+        .readTimeout(300, TimeUnit.SECONDS)
         .writeTimeout(60, TimeUnit.SECONDS)
         .build()
     
     private val chatHistory = mutableListOf<Map<String, Any>>()
     
-    /**
-     * Send a message and get streaming response
-     */
     suspend fun sendMessage(
         userMessage: String,
         onChunk: (String) -> Unit,
@@ -46,60 +39,57 @@ class OllamaClient(
     ): Flow<AgentEvent> = flow {
         android.util.Log.d("OllamaClient", "Sending message to ChatGPT Python Script API")
         
-        // Add user message to history (thread-safe operation on mutable list)
         synchronized(chatHistory) {
             chatHistory.add(mapOf("role" to "user", "content" to userMessage))
         }
         
         try {
-            // Build request body in Ollama format
-            val requestBody = JSONObject().apply {
-                put("model", model)
-                
-                val messagesArray = JSONArray()
-                // Access chat history in synchronized block
-                synchronized(chatHistory) {
-                    chatHistory.forEach { msg ->
-                        messagesArray.put(JSONObject().apply {
-                            put("role", msg["role"])
-                            put("content", msg["content"])
-                        })
-                    }
-                }
-                put("messages", messagesArray)
-                
-                put("stream", false) // Python script returns non-streaming responses
-                
-                // Optional: Add tool support if available
-                // FIX: Changed getAvailableTools() to getTools() assuming that is the correct API
-                val tools = toolRegistry.getTools()
-                if (tools.isNotEmpty()) {
-                    val toolsArray = JSONArray()
-                    tools.forEach { tool ->
-                        val toolObj = JSONObject().apply {
-                            put("type", "function")
-                            put("function", JSONObject().apply {
-                                put("name", tool.name)
-                                put("description", tool.description ?: "")
-                                // Add parameters if available
-                                tool.parameters?.let { params ->
-                                    put("parameters", JSONObject(params))
-                                }
-                            })
-                        }
-                        toolsArray.put(toolObj)
-                    }
-                    put("tools", toolsArray)
+            // Build request body manually using explicit put calls to avoid ambiguity
+            val requestJson = JSONObject()
+            requestJson.put("model", model)
+            
+            val messagesArray = JSONArray()
+            synchronized(chatHistory) {
+                chatHistory.forEach { msg ->
+                    val msgObj = JSONObject()
+                    msgObj.put("role", msg["role"])
+                    msgObj.put("content", msg["content"])
+                    messagesArray.put(msgObj)
                 }
             }
+            requestJson.put("messages", messagesArray)
+            requestJson.put("stream", false)
             
-            android.util.Log.d("OllamaClient", "Request body: ${requestBody.toString().take(500)}...")
+            // Tool listing temporarily disabled as getTools() API is unresolved
+            /*
+            val tools = toolRegistry.getTools() 
+            if (tools.isNotEmpty()) {
+                val toolsArray = JSONArray()
+                tools.forEach { tool ->
+                    val toolObj = JSONObject()
+                    toolObj.put("type", "function")
+                    
+                    val funcObj = JSONObject()
+                    funcObj.put("name", tool.name)
+                    funcObj.put("description", tool.description ?: "")
+                    
+                    tool.parameters?.let { params ->
+                        funcObj.put("parameters", JSONObject(params))
+                    }
+                    
+                    toolObj.put("function", funcObj)
+                    toolsArray.put(toolObj)
+                }
+                requestJson.put("tools", toolsArray)
+            }
+            */
+
+            val requestBody = requestJson.toString().toRequestBody("application/json".toMediaType())
             
             val requestBuilder = Request.Builder()
                 .url("$baseUrl/api/chat")
-                .post(requestBody.toString().toRequestBody("application/json".toMediaType()))
+                .post(requestBody)
             
-            // Add API key if provided
             apiKey?.let { key ->
                 requestBuilder.addHeader("Authorization", "Bearer $key")
                 requestBuilder.addHeader("API-Key", key)
@@ -109,62 +99,45 @@ class OllamaClient(
             
             val request = requestBuilder.build()
             
-            android.util.Log.d("OllamaClient", "Executing request to ${request.url}")
-            
-            client.newCall(request).execute().use { response ->
+            // Use standard try-finally for response handling to avoid closure issues
+            var response: Response? = null
+            try {
+                response = client.newCall(request).execute()
                 if (!response.isSuccessful) {
-                    val errorBody = try {
-                        response.body?.string() ?: "Unknown error"
-                    } catch (e: Exception) {
-                        "Failed to read error body: ${e.message}"
-                    }
-                    android.util.Log.e("OllamaClient", "API error ${response.code}: $errorBody")
+                    val errorBody = response.body?.string() ?: "Unknown error"
                     emit(AgentEvent.Error("ChatGPT API error: ${response.code} - $errorBody"))
                     return@flow
                 }
                 
-                response.body?.string()?.let { responseBody ->
-                    android.util.Log.d("OllamaClient", "Response received (length: ${responseBody.length})")
-                    
-                    // FIX: Collect chunks in a list instead of emitting directly inside the callback
-                    // This avoids calling a suspend function (emit) from a non-suspend lambda
+                val responseBody = response.body?.string()
+                if (responseBody != null) {
                     val capturedChunks = mutableListOf<String>()
                     val toolCallsToExecute = mutableListOf<Triple<FunctionCall, ToolResult, String>>()
                     
-                    // Parse using the ChatGPT Python Script parser
                     val finishReason = ApiResponseParser.parseChatGPTPythonResponse(
                         responseBody,
-                        { chunk ->
-                            // Just capture the chunk, don't emit yet
-                            capturedChunks.add(chunk)
-                        },
+                        { chunk: String -> capturedChunks.add(chunk) },
                         onToolCall,
                         onToolResult,
-                        toolCallsToExecute
-                    ) { json ->
-                        // Convert JSONObject to Map<String, Any>
-                        val map = mutableMapOf<String, Any>()
-                        val keys = json.keys()
-                        while (keys.hasNext()) {
-                            val key = keys.next()
-                            val value = json.get(key)
-                            map[key] = value
+                        toolCallsToExecute,
+                        { json: JSONObject ->
+                            val map = mutableMapOf<String, Any>()
+                            val keys = json.keys()
+                            while (keys.hasNext()) {
+                                val key = keys.next()
+                                val value = json.get(key)
+                                map[key] = value
+                            }
+                            map
                         }
-                        map
-                    }
+                    )
                     
-                    // FIX: Now emit the captured chunks from the flow context (suspend allowed here)
                     capturedChunks.forEach { chunk ->
-                        android.util.Log.d("OllamaClient", "Emitting chunk: ${chunk.take(100)}...")
                         emit(AgentEvent.Chunk(chunk))
                     }
                     
-                    // If we have tool calls to execute, handle them
                     if (toolCallsToExecute.isNotEmpty()) {
-                        android.util.Log.d("OllamaClient", "Processing ${toolCallsToExecute.size} tool calls")
-                        
                         for ((functionCall, toolResult, callId) in toolCallsToExecute) {
-                            // Execute tool
                             val tool = toolRegistry.getTool(functionCall.name)
                             if (tool != null) {
                                 try {
@@ -175,10 +148,8 @@ class OllamaClient(
                                         toolResult.returnDisplay
                                     )
                                     
-                                    // Emit tool result event
                                     emit(AgentEvent.ToolResult(callId, result.llmContent))
                                     
-                                    // Add tool result to history for follow-up
                                     synchronized(chatHistory) {
                                         chatHistory.add(mapOf(
                                             "role" to "tool",
@@ -187,45 +158,33 @@ class OllamaClient(
                                             "tool_call_id" to callId
                                         ))
                                     }
-                                    
-                                    // Send tool result back to assistant
                                     onToolResult(callId, mapOf("content" to result.llmContent))
-                                    
                                 } catch (e: Exception) {
-                                    android.util.Log.e("OllamaClient", "Tool execution error", e)
                                     emit(AgentEvent.Error("Tool execution failed: ${e.message}"))
                                 }
                             } else {
-                                android.util.Log.w("OllamaClient", "Tool not found: ${functionCall.name}")
                                 emit(AgentEvent.Error("Tool not found: ${functionCall.name}"))
                             }
                         }
                     } else {
-                        // No tool calls, just add assistant response to history
                         val fullResponse = capturedChunks.joinToString("")
-                        
                         if (fullResponse.isNotEmpty()) {
                             synchronized(chatHistory) {
                                 chatHistory.add(mapOf("role" to "assistant", "content" to fullResponse))
                             }
-                            android.util.Log.d("OllamaClient", "Added assistant response to history")
                         }
                     }
                     
-                    // Emit completion event
-                    emit(AgentEvent.Complete(finishReason ?: "STOP"))
-                    
-                } ?: run {
+                    // Fixed: Use AgentEvent.Done instead of Complete
+                    emit(AgentEvent.Done(finishReason ?: "STOP"))
+                } else {
                     emit(AgentEvent.Error("Empty response body"))
                 }
+            } finally {
+                response?.close()
             }
-        } catch (e: IOException) {
-            val errorMsg = e.message ?: "Network error"
-            android.util.Log.e("OllamaClient", "Network error", e)
-            emit(AgentEvent.Error("Network error: $errorMsg\n\nMake sure the Python script is running: python script.py"))
         } catch (e: Exception) {
             val errorMsg = e.message ?: "Unknown error"
-            android.util.Log.e("OllamaClient", "Error", e)
             emit(AgentEvent.Error("Error: $errorMsg"))
         }
     }.flowOn(Dispatchers.IO)
