@@ -1541,14 +1541,15 @@ fun DebugDialog(
             
             // Configuration
             appendLine("--- Configuration ---")
-            val currentProvider = ApiProviderManager.selectedProvider
-            val providerName = if (useOllama) "Ollama" else currentProvider.displayName
+            // Use ChatGPT Python Script or Gemini based on settings
+            val providerName = if (useOllama) "ChatGPT Python Script" else "Gemini"
             appendLine("Provider: $providerName")
             if (useOllama) {
                 appendLine("Host: $ollamaHost")
                 appendLine("Port: $ollamaPort")
-                appendLine("Model: $ollamaModel")
+                appendLine("Model: gptfree") // Your script uses "gptfree" model
                 appendLine("URL: $ollamaUrl")
+                appendLine("API Key: ${if (ollamaModel.isNotBlank() && ollamaModel != "llama3.2") "SET" else "NOT SET"}")
             } else {
                 val model = com.qali.aterm.api.ApiProviderManager.getCurrentModel()
                 appendLine("Model: $model")
@@ -1882,16 +1883,31 @@ fun AgentScreen(
     var currentAgentJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
     val clipboardManager = LocalClipboardManager.current
     
-    // Read Ollama settings from Settings
-    val useOllama = Settings.use_ollama
-    val ollamaHost = Settings.ollama_host
-    val ollamaPort = Settings.ollama_port
-    val ollamaModel = Settings.ollama_model
-    val ollamaUrl = "http://$ollamaHost:$ollamaPort"
+    // ChatGPT Python Script settings (reusing Ollama settings for compatibility)
+    val useChatGPTScript = Settings.use_ollama
+    val chatGPTHost = Settings.ollama_host
+    val chatGPTPort = Settings.ollama_port
+    val chatGPTApiKey = Settings.ollama_model // Reusing model field for API key
+    val chatGPTModel = "gptfree" // Your script uses "gptfree" model name
+    val chatGPTUrl = "http://$chatGPTHost:$chatGPTPort"
     
-    // Initialize client - use sessionId in key to ensure per-session clients
-    val aiClient = remember(sessionId, workspaceRoot, useOllama, ollamaHost, ollamaPort, ollamaModel) {
-        AgentService.initialize(workspaceRoot, useOllama, ollamaUrl, ollamaModel, sessionId, mainActivity)
+    // Initialize client for ChatGPT Python Script
+    // Use sessionId in key to ensure per-session clients
+    val aiClient = remember(sessionId, workspaceRoot, useChatGPTScript, chatGPTHost, chatGPTPort, chatGPTApiKey) {
+        if (useChatGPTScript) {
+            // Initialize OllamaClient for ChatGPT Python Script
+            val toolRegistry = com.qali.aterm.agent.tools.ToolRegistry.getInstance()
+            OllamaClient(
+                toolRegistry = toolRegistry,
+                workspaceRoot = workspaceRoot,
+                baseUrl = chatGPTUrl,
+                model = chatGPTModel,
+                apiKey = chatGPTApiKey.takeIf { it.isNotBlank() && it != "llama3.2" } // Use API key if available (not default llama model)
+            )
+        } else {
+            // Fallback to regular AgentService for Gemini
+            AgentService.initialize(workspaceRoot, false, "", "", sessionId, mainActivity)
+        }
     }
     
     // Ensure agent session exists when AgentScreen opens
@@ -1998,7 +2014,7 @@ fun AgentScreen(
             if (aiClient is AgentClient) {
                 aiClient.restoreHistoryFromMessages(loadedHistory)
             }
-            // CliBasedAgentClient doesn't need history restoration (uses script-based approach)
+            // OllamaClient and CliBasedAgentClient don't need history restoration (use chat history)
             android.util.Log.d("AgentScreen", "Loaded ${loadedHistory.size} messages for session $sessionId")
         } else {
             messages = emptyList()
@@ -2007,7 +2023,7 @@ fun AgentScreen(
             if (aiClient is AgentClient) {
                 aiClient.resetChat()
             }
-            // CliBasedAgentClient doesn't need reset (stateless)
+            // OllamaClient and CliBasedAgentClient don't need reset (stateless)
         }
     }
     
@@ -2097,7 +2113,7 @@ fun AgentScreen(
                     ) {
                         Text(
                             text = when {
-                                useOllama -> "Ollama AI Agent"
+                                useChatGPTScript -> "ChatGPT AI Agent"
                                 AgentService.isUsingCliAgent() -> "CLI-Based AI Agent"
                                 else -> "Gemini AI Agent"
                             },
@@ -2338,7 +2354,7 @@ fun AgentScreen(
                                     currentAgentJob = null // Clear reference before cancelling to avoid race conditions
                                     previousJob?.cancel()
                                     
-                                    // Send to Gemini API with tools
+                                    // Send to AI API with tools
                                     // Launch on IO dispatcher to avoid blocking main thread
                                     val job = scope.launch(Dispatchers.IO) {
                                         val messageStartTime = System.currentTimeMillis()
@@ -2419,98 +2435,98 @@ fun AgentScreen(
                                         }
                                         
                                         try {
-                                            android.util.Log.d("AgentScreen", "Creating stream, useOllama: $useOllama, useCliAgent: ${AgentService.isUsingCliAgent()}")
+                                            android.util.Log.d("AgentScreen", "Creating stream, useChatGPTScript: $useChatGPTScript, useCliAgent: ${AgentService.isUsingCliAgent()}")
                                             val stream = when {
                                                 // Use CliBasedAgentClient for all providers (including Ollama) - non-streaming flow
                                                 aiClient is CliBasedAgentClient -> {
-                                                (aiClient as CliBasedAgentClient).sendMessage(
-                                                    userMessage = prompt,
-                                                    onChunk = { },
-                                                    onToolCall = { },
-                                                    onToolResult = { _, _ -> },
-                                                    memory = memory,
-                                                    systemContext = systemContext,
-                                                    sessionId = sessionId
-                                                )
+                                                    (aiClient as CliBasedAgentClient).sendMessage(
+                                                        userMessage = prompt,
+                                                        onChunk = { },
+                                                        onToolCall = { },
+                                                        onToolResult = { _, _ -> },
+                                                        memory = memory,
+                                                        systemContext = systemContext,
+                                                        sessionId = sessionId
+                                                    )
                                                 }
-                                                // Fallback to old OllamaClient only if CLI agent is disabled
-                                                useOllama && !AgentService.isUsingCliAgent() -> {
+                                                // Use OllamaClient for ChatGPT Python Script
+                                                aiClient is OllamaClient -> {
                                                     (aiClient as OllamaClient).sendMessage(
-                                                    userMessage = prompt,
-                                                    onChunk = { chunk ->
-                                                        // Update UI state on main dispatcher - launch coroutine since callback is not suspend
-                                                        scope.launch(Dispatchers.Main) {
-                                                            currentResponseText += chunk
-                                                            val currentMessages = if (messages.isNotEmpty()) messages.dropLast(1) else messages
-                                                            messages = currentMessages + AgentMessage(
-                                                                text = currentResponseText,
-                                                                isUser = false,
-                                                                timestamp = System.currentTimeMillis()
-                                                            )
+                                                        userMessage = prompt,
+                                                        onChunk = { chunk ->
+                                                            // Update UI state on main dispatcher - launch coroutine since callback is not suspend
+                                                            scope.launch(Dispatchers.Main) {
+                                                                currentResponseText += chunk
+                                                                val currentMessages = if (messages.isNotEmpty()) messages.dropLast(1) else messages
+                                                                messages = currentMessages + AgentMessage(
+                                                                    text = currentResponseText,
+                                                                    isUser = false,
+                                                                    timestamp = System.currentTimeMillis()
+                                                                )
+                                                            }
+                                                        },
+                                                        onToolCall = { functionCall ->
+                                                            // Update UI state on main dispatcher - launch coroutine since callback is not suspend
+                                                            scope.launch(Dispatchers.Main) {
+                                                                val toolMessage = AgentMessage(
+                                                                    text = "🔧 Calling tool: ${functionCall.name}",
+                                                                    isUser = false,
+                                                                    timestamp = System.currentTimeMillis()
+                                                                )
+                                                                messages = messages + toolMessage
+                                                            }
+                                                        },
+                                                        onToolResult = { toolName, args ->
+                                                            // Update UI state on main dispatcher - launch coroutine since callback is not suspend
+                                                            scope.launch(Dispatchers.Main) {
+                                                                val resultMessage = AgentMessage(
+                                                                    text = "✅ Tool '$toolName' completed",
+                                                                    isUser = false,
+                                                                    timestamp = System.currentTimeMillis()
+                                                                )
+                                                                messages = messages + resultMessage
+                                                            }
                                                         }
-                                                    },
-                                                    onToolCall = { functionCall ->
-                                                        // Update UI state on main dispatcher - launch coroutine since callback is not suspend
-                                                        scope.launch(Dispatchers.Main) {
-                                                            val toolMessage = AgentMessage(
-                                                                text = "🔧 Calling tool: ${functionCall.name}",
-                                                                isUser = false,
-                                                                timestamp = System.currentTimeMillis()
-                                                            )
-                                                            messages = messages + toolMessage
-                                                        }
-                                                    },
-                                                    onToolResult = { toolName, args ->
-                                                        // Update UI state on main dispatcher - launch coroutine since callback is not suspend
-                                                        scope.launch(Dispatchers.Main) {
-                                                            val resultMessage = AgentMessage(
-                                                                text = "✅ Tool '$toolName' completed",
-                                                                isUser = false,
-                                                                timestamp = System.currentTimeMillis()
-                                                            )
-                                                            messages = messages + resultMessage
-                                                        }
-                                                    }
-                                                )
+                                                    )
                                                 }
                                                 else -> {
                                                     (aiClient as AgentClient).sendMessage(
-                                                    userMessage = prompt,
-                                                    onChunk = { chunk ->
-                                                        // Update UI state on main dispatcher - launch coroutine since callback is not suspend
-                                                        scope.launch(Dispatchers.Main) {
-                                                            currentResponseText += chunk
-                                                            val currentMessages = if (messages.isNotEmpty()) messages.dropLast(1) else messages
-                                                            messages = currentMessages + AgentMessage(
-                                                                text = currentResponseText,
-                                                                isUser = false,
-                                                                timestamp = System.currentTimeMillis()
-                                                            )
+                                                        userMessage = prompt,
+                                                        onChunk = { chunk ->
+                                                            // Update UI state on main dispatcher - launch coroutine since callback is not suspend
+                                                            scope.launch(Dispatchers.Main) {
+                                                                currentResponseText += chunk
+                                                                val currentMessages = if (messages.isNotEmpty()) messages.dropLast(1) else messages
+                                                                messages = currentMessages + AgentMessage(
+                                                                    text = currentResponseText,
+                                                                    isUser = false,
+                                                                    timestamp = System.currentTimeMillis()
+                                                                )
+                                                            }
+                                                        },
+                                                        onToolCall = { functionCall ->
+                                                            // Update UI state on main dispatcher - launch coroutine since callback is not suspend
+                                                            scope.launch(Dispatchers.Main) {
+                                                                val toolMessage = AgentMessage(
+                                                                    text = "🔧 Calling tool: ${functionCall.name}",
+                                                                    isUser = false,
+                                                                    timestamp = System.currentTimeMillis()
+                                                                )
+                                                                messages = messages + toolMessage
+                                                            }
+                                                        },
+                                                        onToolResult = { toolName, args ->
+                                                            // Update UI state on main dispatcher - launch coroutine since callback is not suspend
+                                                            scope.launch(Dispatchers.Main) {
+                                                                val resultMessage = AgentMessage(
+                                                                    text = "✅ Tool '$toolName' completed",
+                                                                    isUser = false,
+                                                                    timestamp = System.currentTimeMillis()
+                                                                )
+                                                                messages = messages + resultMessage
+                                                            }
                                                         }
-                                                    },
-                                                    onToolCall = { functionCall ->
-                                                        // Update UI state on main dispatcher - launch coroutine since callback is not suspend
-                                                        scope.launch(Dispatchers.Main) {
-                                                            val toolMessage = AgentMessage(
-                                                                text = "🔧 Calling tool: ${functionCall.name}",
-                                                                isUser = false,
-                                                                timestamp = System.currentTimeMillis()
-                                                            )
-                                                            messages = messages + toolMessage
-                                                        }
-                                                    },
-                                                    onToolResult = { toolName, args ->
-                                                        // Update UI state on main dispatcher - launch coroutine since callback is not suspend
-                                                        scope.launch(Dispatchers.Main) {
-                                                            val resultMessage = AgentMessage(
-                                                                text = "✅ Tool '$toolName' completed",
-                                                                isUser = false,
-                                                                timestamp = System.currentTimeMillis()
-                                                            )
-                                                            messages = messages + resultMessage
-                                                        }
-                                                    }
-                                                )
+                                                    )
                                                 }
                                             }
                                             
@@ -3376,7 +3392,7 @@ fun AgentScreen(
                     
                     // Get the AI client
                     val aiClient = when {
-                        AgentService.isUsingOllama() -> AgentService.getOllamaClient()
+                        useChatGPTScript -> aiClient // Already initialized for ChatGPT
                         AgentService.isUsingCliAgent() -> AgentService.getCliClient()
                         else -> AgentService.getClient()
                     }
@@ -3421,36 +3437,36 @@ fun AgentScreen(
                                 sessionId = sessionId
                             )
                         }
-                        // Fallback to old OllamaClient only if CLI agent is disabled
+                        // Use OllamaClient for ChatGPT Python Script
                         aiClient is OllamaClient -> {
                             (aiClient as OllamaClient).sendMessage(
                                 userMessage = "__CONTINUE__", // Special message to continue from chat history
-                            onChunk = { chunk ->
-                                currentResponseText += chunk
-                                val currentMessages = if (messages.isNotEmpty()) messages.dropLast(1) else messages
-                                messages = currentMessages + AgentMessage(
-                                    text = currentResponseText,
-                                    isUser = false,
-                                    timestamp = System.currentTimeMillis()
-                                )
-                            },
-                            onToolCall = { functionCall ->
-                                val toolMessage = AgentMessage(
-                                    text = "🔧 Calling tool: ${functionCall.name}",
-                                    isUser = false,
-                                    timestamp = System.currentTimeMillis()
-                                )
-                                messages = messages + toolMessage
-                            },
-                            onToolResult = { toolName, args ->
-                                val resultMessage = AgentMessage(
-                                    text = "✅ Tool '$toolName' completed",
-                                    isUser = false,
-                                    timestamp = System.currentTimeMillis()
-                                )
-                                messages = messages + resultMessage
-                            }
-                        )
+                                onChunk = { chunk ->
+                                    currentResponseText += chunk
+                                    val currentMessages = if (messages.isNotEmpty()) messages.dropLast(1) else messages
+                                    messages = currentMessages + AgentMessage(
+                                        text = currentResponseText,
+                                        isUser = false,
+                                        timestamp = System.currentTimeMillis()
+                                    )
+                                },
+                                onToolCall = { functionCall ->
+                                    val toolMessage = AgentMessage(
+                                        text = "🔧 Calling tool: ${functionCall.name}",
+                                        isUser = false,
+                                        timestamp = System.currentTimeMillis()
+                                    )
+                                    messages = messages + toolMessage
+                                },
+                                onToolResult = { toolName, args ->
+                                    val resultMessage = AgentMessage(
+                                        text = "✅ Tool '$toolName' completed",
+                                        isUser = false,
+                                        timestamp = System.currentTimeMillis()
+                                    )
+                                    messages = messages + resultMessage
+                                }
+                            )
                         }
                         else -> {
                             // Fallback to AgentClient
@@ -3708,11 +3724,11 @@ fun AgentScreen(
             onCopy = { text ->
                 clipboardManager.setText(AnnotatedString(text))
             },
-            useOllama = useOllama,
-            ollamaHost = ollamaHost,
-            ollamaPort = ollamaPort,
-            ollamaModel = ollamaModel,
-            ollamaUrl = ollamaUrl,
+            useOllama = useChatGPTScript,
+            ollamaHost = chatGPTHost,
+            ollamaPort = chatGPTPort,
+            ollamaModel = chatGPTApiKey, // Using API key field for model
+            ollamaUrl = chatGPTUrl,
             workspaceRoot = workspaceRoot,
             messages = messages,
             aiClient = aiClient

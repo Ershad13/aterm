@@ -14,6 +14,103 @@ import org.json.JSONObject
 object ApiResponseParser {
     
     /**
+     * Parse ChatGPT Python Script API response format
+     */
+    fun parseChatGPTPythonResponse(
+        bodyString: String,
+        onChunk: (String) -> Unit,
+        onToolCall: (FunctionCall) -> Unit,
+        onToolResult: (String, Map<String, Any>) -> Unit,
+        toolCallsToExecute: MutableList<Triple<FunctionCall, ToolResult, String>>,
+        jsonObjectToMap: (JSONObject) -> Map<String, Any>
+    ): String? {
+        android.util.Log.d("ApiResponseParser", "Parsing ChatGPT Python Script response")
+        
+        try {
+            // First, try to parse as single JSON response (non-streaming)
+            val json = JSONObject(bodyString)
+            
+            // Check for OpenAI/Ollama format
+            if (json.has("choices") && json.has("model")) {
+                return parseOpenAIResponse(bodyString, onChunk, onToolCall, onToolResult, toolCallsToExecute, jsonObjectToMap)
+            }
+            
+            // Check for Ollama format
+            if (json.has("message") && json.has("done")) {
+                return parseOllamaResponse(bodyString, onChunk, onToolCall, onToolResult, toolCallsToExecute, jsonObjectToMap)
+            }
+            
+            // Check for Gemini format
+            if (json.has("candidates")) {
+                return processGeminiResponse(json, onChunk, onToolCall, onToolResult, toolCallsToExecute, jsonObjectToMap)
+            }
+            
+            // Default ChatGPT Python Script format
+            val model = json.optString("model", "gptfree")
+            val message = json.optJSONObject("message")
+            
+            if (message != null) {
+                val role = message.optString("role", "assistant")
+                val content = message.optString("content", "")
+                
+                if (content.isNotEmpty()) {
+                    android.util.Log.d("ApiResponseParser", "Received content: ${content.take(100)}...")
+                    onChunk(content)
+                }
+                
+                // Check for tool calls (if the script supports them)
+                val toolCalls = message.optJSONArray("tool_calls")
+                if (toolCalls != null) {
+                    for (i in 0 until toolCalls.length()) {
+                        val toolCall = toolCalls.getJSONObject(i)
+                        val function = toolCall.optJSONObject("function")
+                        if (function != null) {
+                            val functionName = function.getString("name")
+                            val functionArgs = function.optString("arguments", "{}")
+                            val callId = toolCall.optString("id", "${functionName}-${System.currentTimeMillis()}")
+                            
+                            val argsMap = try {
+                                jsonObjectToMap(JSONObject(functionArgs))
+                            } catch (e: Exception) {
+                                emptyMap<String, Any>()
+                            }
+                            
+                            val functionCall = FunctionCall(
+                                name = functionName,
+                                args = argsMap,
+                                id = callId
+                            )
+                            onToolCall(functionCall)
+                            toolCallsToExecute.add(Triple(functionCall, ToolResult(llmContent = "", returnDisplay = ""), callId))
+                        }
+                    }
+                }
+            }
+            
+            // Check for done reason
+            val doneReason = json.optString("done_reason", "stop")
+            return when (doneReason.uppercase()) {
+                "STOP" -> "STOP"
+                "LENGTH", "MAX_TOKENS" -> "MAX_TOKENS"
+                else -> doneReason.uppercase()
+            }
+            
+        } catch (e: Exception) {
+            android.util.Log.e("ApiResponseParser", "Failed to parse as JSON, trying SSE", e)
+            
+            // Try SSE parsing
+            return parseGeminiSSEResponse(
+                bodyString,
+                onChunk,
+                onToolCall,
+                onToolResult,
+                toolCallsToExecute,
+                jsonObjectToMap
+            ) ?: "STOP"
+        }
+    }
+    
+    /**
      * Parse Gemini SSE response format
      */
     fun parseGeminiSSEResponse(
@@ -205,11 +302,13 @@ object ApiResponseParser {
         toolCallsToExecute: MutableList<Triple<FunctionCall, ToolResult, String>>,
         jsonObjectToMap: (JSONObject) -> Map<String, Any>
     ): String? {
+        android.util.Log.d("ApiResponseParser", "Parsing Ollama format response")
         val json = JSONObject(bodyString)
         val message = json.optJSONObject("message")
         if (message != null) {
             val content = message.optString("content", "")
             if (content.isNotEmpty()) {
+                android.util.Log.d("ApiResponseParser", "Ollama content: ${content.take(100)}...")
                 onChunk(content)
             }
             
@@ -243,6 +342,7 @@ object ApiResponseParser {
         }
         
         val done = json.optBoolean("done", false)
+        android.util.Log.d("ApiResponseParser", "Ollama done: $done")
         return if (done) "STOP" else null
     }
     
