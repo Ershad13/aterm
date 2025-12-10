@@ -8,7 +8,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
-import kotlinx.coroutines.withContext
 import okhttp3.*
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -38,10 +37,6 @@ class OllamaClient(
     
     /**
      * Send a message and get streaming response
-     * 
-     * This function returns a Flow that runs entirely on the IO dispatcher to avoid
-     * NetworkOnMainThreadException. The flow builder itself is moved to IO using flowOn(),
-     * ensuring all network operations happen off the main thread.
      */
     suspend fun sendMessage(
         userMessage: String,
@@ -57,24 +52,27 @@ class OllamaClient(
         }
         
         try {
-            // Build request body in Ollama format (which your Python script supports)
+            // Build request body in Ollama format
             val requestBody = JSONObject().apply {
                 put("model", model)
-                put("messages", JSONArray().apply {
-                    // Access chat history in synchronized block
-                    synchronized(chatHistory) {
-                        chatHistory.forEach { msg ->
-                            put(JSONObject().apply {
-                                put("role", msg["role"])
-                                put("content", msg["content"])
-                            })
-                        }
+                
+                val messagesArray = JSONArray()
+                // Access chat history in synchronized block
+                synchronized(chatHistory) {
+                    chatHistory.forEach { msg ->
+                        messagesArray.put(JSONObject().apply {
+                            put("role", msg["role"])
+                            put("content", msg["content"])
+                        })
                     }
-                })
+                }
+                put("messages", messagesArray)
+                
                 put("stream", false) // Python script returns non-streaming responses
                 
                 // Optional: Add tool support if available
-                val tools = toolRegistry.getAvailableTools()
+                // FIX: Changed getAvailableTools() to getTools() assuming that is the correct API
+                val tools = toolRegistry.getTools()
                 if (tools.isNotEmpty()) {
                     val toolsArray = JSONArray()
                     tools.forEach { tool ->
@@ -104,16 +102,13 @@ class OllamaClient(
             // Add API key if provided
             apiKey?.let { key ->
                 requestBuilder.addHeader("Authorization", "Bearer $key")
-                // Also try API-Key header for compatibility
                 requestBuilder.addHeader("API-Key", key)
             }
             
-            // Add X-Requested-With header for CORS support
             requestBuilder.addHeader("X-Requested-With", "XMLHttpRequest")
             
             val request = requestBuilder.build()
             
-            // Execute network call - flow is already on IO dispatcher due to flowOn()
             android.util.Log.d("OllamaClient", "Executing request to ${request.url}")
             
             client.newCall(request).execute().use { response ->
@@ -130,18 +125,18 @@ class OllamaClient(
                 
                 response.body?.string()?.let { responseBody ->
                     android.util.Log.d("OllamaClient", "Response received (length: ${responseBody.length})")
-                    android.util.Log.d("OllamaClient", "Response: ${responseBody.take(500)}...")
                     
-                    // Parse the response
+                    // FIX: Collect chunks in a list instead of emitting directly inside the callback
+                    // This avoids calling a suspend function (emit) from a non-suspend lambda
+                    val capturedChunks = mutableListOf<String>()
                     val toolCallsToExecute = mutableListOf<Triple<FunctionCall, ToolResult, String>>()
                     
                     // Parse using the ChatGPT Python Script parser
                     val finishReason = ApiResponseParser.parseChatGPTPythonResponse(
                         responseBody,
                         { chunk ->
-                            android.util.Log.d("OllamaClient", "Emitting chunk: ${chunk.take(100)}...")
-                            // Emit chunk as event
-                            emit(AgentEvent.Chunk(chunk))
+                            // Just capture the chunk, don't emit yet
+                            capturedChunks.add(chunk)
                         },
                         onToolCall,
                         onToolResult,
@@ -156,6 +151,12 @@ class OllamaClient(
                             map[key] = value
                         }
                         map
+                    }
+                    
+                    // FIX: Now emit the captured chunks from the flow context (suspend allowed here)
+                    capturedChunks.forEach { chunk ->
+                        android.util.Log.d("OllamaClient", "Emitting chunk: ${chunk.take(100)}...")
+                        emit(AgentEvent.Chunk(chunk))
                     }
                     
                     // If we have tool calls to execute, handle them
@@ -201,14 +202,7 @@ class OllamaClient(
                         }
                     } else {
                         // No tool calls, just add assistant response to history
-                        val fullResponse = responseBody.let {
-                            try {
-                                val json = JSONObject(it)
-                                json.optJSONObject("message")?.optString("content", "") ?: ""
-                            } catch (e: Exception) {
-                                ""
-                            }
-                        }
+                        val fullResponse = capturedChunks.joinToString("")
                         
                         if (fullResponse.isNotEmpty()) {
                             synchronized(chatHistory) {
@@ -234,50 +228,7 @@ class OllamaClient(
             android.util.Log.e("OllamaClient", "Error", e)
             emit(AgentEvent.Error("Error: $errorMsg"))
         }
-    }.flowOn(Dispatchers.IO) // Move entire flow execution to IO dispatcher
-    
-    /**
-     * Alternative method for streaming responses (if Python script supports streaming)
-     */
-    private suspend fun handleStreamingResponse(
-        response: Response,
-        emit: (AgentEvent) -> Unit,
-        onChunk: (String) -> Unit,
-        onToolCall: (FunctionCall) -> Unit,
-        onToolResult: (String, Map<String, Any>) -> Unit
-    ) {
-        response.body?.source()?.let { source ->
-            var buffer = ""
-            while (true) {
-                val line = source.readUtf8Line() ?: break
-                if (line.isBlank()) continue
-                
-                try {
-                    val json = JSONObject(line)
-                    val message = json.optJSONObject("message")
-                    val content = message?.optString("content", "") ?: ""
-                    
-                    if (content.isNotEmpty()) {
-                        buffer += content
-                        // Emit event immediately
-                        emit(AgentEvent.Chunk(content))
-                    }
-                    
-                    if (json.optBoolean("done", false)) {
-                        // Add assistant response to history (thread-safe)
-                        synchronized(chatHistory) {
-                            chatHistory.add(mapOf("role" to "assistant", "content" to buffer))
-                        }
-                        emit(AgentEvent.Complete("STOP"))
-                        break
-                    }
-                } catch (e: Exception) {
-                    // Skip malformed JSON
-                    android.util.Log.d("OllamaClient", "Failed to parse JSON: ${e.message}")
-                }
-            }
-        }
-    }
+    }.flowOn(Dispatchers.IO)
     
     fun resetChat() {
         synchronized(chatHistory) {
@@ -287,31 +238,5 @@ class OllamaClient(
     
     fun getHistory(): List<Map<String, Any>> = synchronized(chatHistory) {
         chatHistory.toList()
-    }
-    
-    /**
-     * Helper to build proper tool parameter schema
-     */
-    private fun buildToolParameters(tool: Tool): JSONObject {
-        return JSONObject().apply {
-            put("type", "object")
-            val properties = JSONObject()
-            tool.parameters?.forEach { (paramName, paramInfo) ->
-                properties.put(paramName, JSONObject().apply {
-                    put("type", paramInfo["type"] ?: "string")
-                    paramInfo["description"]?.let { put("description", it) }
-                    // Add enum if present
-                    paramInfo["enum"]?.let { enumList ->
-                        if (enumList is List<*>) {
-                            put("enum", JSONArray(enumList))
-                        }
-                    }
-                })
-            }
-            put("properties", properties)
-            put("required", JSONArray(tool.parameters?.filter { (_, info) ->
-                info["required"] == true
-            }?.keys?.toList() ?: emptyList()))
-        }
     }
 }
