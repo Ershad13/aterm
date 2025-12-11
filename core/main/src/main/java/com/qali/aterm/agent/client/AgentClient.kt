@@ -9154,11 +9154,11 @@ exports.$functionName = (req, res, next) => {
                     sendMessageQuestionFlow(contextMessage, onChunk, onToolCall, onToolResult)
                 }
                 IntentType.DEBUG_UPGRADE -> {
-                    val enhancedMessage = enhanceUserIntent(contextMessage, intent)
+                    val enhancedMessage = enhanceUserIntent(contextMessage)
                     sendMessageStandardReverse(enhancedMessage, onChunk, onToolCall, onToolResult)
                 }
                 IntentType.CREATE_NEW -> {
-                    val enhancedMessage = enhanceUserIntent(contextMessage, intent)
+                    val enhancedMessage = enhanceUserIntent(contextMessage)
                     sendMessageStandard(enhancedMessage, onChunk, onToolCall, onToolResult)
                 }
             }
